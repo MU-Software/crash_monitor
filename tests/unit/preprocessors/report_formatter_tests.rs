@@ -343,22 +343,13 @@ fn test_format_environment_some() {
 
 fn sample_crash_context() -> RawCrashContext {
     RawCrashContext {
-        active_tool: "bevel".to_string(),
-        region_count: 3,
-        voxel_count: 100,
-        undo_depth: 2,
-        redo_depth: 1,
-        last_action_id: 7,
-        frame_number: 42,
-        alloc_count: 1000,
-        free_count: 900,
-        alloc_bytes_total: 4096,
-        thread_pool_size: 8,
-        active_batch: 0,
         heartbeat_counter: 55,
         session_start_ns: 123,
         session_id: "sess-1".to_string(),
-        tags: vec![("phase".to_string(), "bevel".to_string())],
+        annotations: vec![
+            ("active_tool".to_string(), "bevel".to_string()),
+            ("phase".to_string(), "bevel".to_string()),
+        ],
         app_version: "1.2.3".to_string(),
         build_number: 100,
         git_hash: "abc123".to_string(),
@@ -392,10 +383,9 @@ fn test_format_crash_context_full() {
     let (context, build, _snap) = format_crash_context(Some(&ctx), None);
 
     let context = context.expect("ctx present → Some");
-    assert_eq!(context["active_tool"], "bevel");
-    assert_eq!(context["region_count"], 3);
-    assert_eq!(context["frame_number"], 42);
-    assert_eq!(context["tags"]["phase"], "bevel");
+    // App/domain state is now a generic annotation map.
+    assert_eq!(context["annotations"]["active_tool"], "bevel");
+    assert_eq!(context["annotations"]["phase"], "bevel");
 
     let build = build.expect("ctx present → build Some");
     assert_eq!(build["app_version"], "1.2.3");

@@ -15,7 +15,7 @@ pub struct BuildInfo {
     pub git_hash: String,
     pub build_type: String,
     pub build_preset: String,
-    pub tags: Vec<(String, String)>,
+    pub annotations: Vec<(String, String)>,
 }
 
 pub struct BuildInfoEnricher;
@@ -46,7 +46,7 @@ impl PreProcessor for BuildInfoEnricher {
             git_hash: ctx.git_hash.clone(),
             build_type: ctx.build_type.clone(),
             build_preset: ctx.build_preset.clone(),
-            tags: ctx.tags.clone(),
+            annotations: ctx.annotations.clone(),
         });
 
         Ok(())

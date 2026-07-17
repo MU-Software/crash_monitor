@@ -18,22 +18,10 @@ fn dummy_event() -> CrashEvent {
 
 fn make_context() -> RawCrashContext {
     RawCrashContext {
-        active_tool: "brush".into(),
-        region_count: 10,
-        voxel_count: 500,
-        undo_depth: 3,
-        redo_depth: 1,
-        last_action_id: 42,
-        frame_number: 100,
-        alloc_count: 200,
-        free_count: 180,
-        alloc_bytes_total: 4096,
-        thread_pool_size: 4,
-        active_batch: 0,
         heartbeat_counter: 99,
         session_start_ns: 0,
         session_id: "test-session".into(),
-        tags: vec![("env".into(), "test".into())],
+        annotations: vec![("env".into(), "test".into())],
         app_version: "1.2.3".into(),
         build_number: 456,
         git_hash: "abc123def".into(),
@@ -62,7 +50,7 @@ fn test_extracts_version_from_context() {
 }
 
 #[test]
-fn test_extracts_tags() {
+fn test_extracts_annotations() {
     let enricher = BuildInfoEnricher;
     let event = dummy_event();
     let mut data = CollectedData::default();
@@ -71,8 +59,8 @@ fn test_extracts_tags() {
     enricher.process(&event, 0, &mut data).unwrap();
 
     let info = data.build_info.as_ref().unwrap();
-    assert_eq!(info.tags.len(), 1);
-    assert_eq!(info.tags[0], ("env".to_string(), "test".to_string()));
+    assert_eq!(info.annotations.len(), 1);
+    assert_eq!(info.annotations[0], ("env".to_string(), "test".to_string()));
 }
 
 #[test]

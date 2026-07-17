@@ -82,10 +82,9 @@ fn test_read_context_fresh_shm() {
     let ctx = shm.read_context();
     assert!(ctx.is_some());
     let ctx = ctx.unwrap();
-    assert_eq!(ctx.region_count, 0);
-    assert_eq!(ctx.voxel_count, 0);
     assert_eq!(ctx.heartbeat_counter, 0);
-    assert!(ctx.active_tool.is_empty());
+    assert!(ctx.annotations.is_empty());
+    assert!(ctx.session_id.is_empty());
 }
 
 #[test]
@@ -132,60 +131,45 @@ fn write_c_string(dst: &mut [c_char], s: &str) {
 #[test]
 fn test_convert_c_context_basic_fields() {
     let mut c = zeroed_context();
-    write_c_string(&mut c.active_tool, "brush");
-    c.region_count = 3;
-    c.voxel_count = 1024;
-    c.frame_number = 60;
-    c.undo_depth = 5;
-    c.redo_depth = 2;
-    c.last_action_id = 42;
-    c.alloc_count = 100;
-    c.free_count = 90;
-    c.alloc_bytes_total = 8192;
-    c.thread_pool_size = 4;
-    c.active_batch = 1;
     c.heartbeat_counter = 999;
     c.session_start_ns = 123_456_789;
     c.build_number = 7;
     c.git_dirty = true;
+    // App/domain state arrives as generic key-value annotations.
+    c.annotation_count = 2;
+    write_c_string(&mut c.annotations[0].key, "active_tool");
+    write_c_string(&mut c.annotations[0].value, "brush");
+    write_c_string(&mut c.annotations[1].key, "voxel_count");
+    write_c_string(&mut c.annotations[1].value, "1024");
 
     let r = convert_c_context(&c);
 
-    assert_eq!(r.active_tool, "brush");
-    assert_eq!(r.region_count, 3);
-    assert_eq!(r.voxel_count, 1024);
-    assert_eq!(r.frame_number, 60);
-    assert_eq!(r.undo_depth, 5);
-    assert_eq!(r.redo_depth, 2);
-    assert_eq!(r.last_action_id, 42);
-    assert_eq!(r.alloc_count, 100);
-    assert_eq!(r.free_count, 90);
-    assert_eq!(r.alloc_bytes_total, 8192);
-    assert_eq!(r.thread_pool_size, 4);
-    assert_eq!(r.active_batch, 1);
     assert_eq!(r.heartbeat_counter, 999);
     assert_eq!(r.session_start_ns, 123_456_789);
     assert_eq!(r.build_number, 7);
     assert!(r.git_dirty);
+    assert_eq!(r.annotations.len(), 2);
+    assert_eq!(
+        r.annotations[0],
+        ("active_tool".to_string(), "brush".to_string())
+    );
+    assert_eq!(
+        r.annotations[1],
+        ("voxel_count".to_string(), "1024".to_string())
+    );
     // Zeroed string fields should be empty
     assert!(r.session_id.is_empty());
     assert!(r.app_version.is_empty());
     assert!(r.git_hash.is_empty());
-    assert!(r.tags.is_empty());
 }
 
 #[test]
-fn test_convert_c_context_tags() {
+fn test_convert_c_context_annotation_count_clamped() {
     let mut c = zeroed_context();
-    c.tag_count = 1;
-    write_c_string(&mut c.tags[0][0], "env");
-    write_c_string(&mut c.tags[0][1], "production");
-
+    // A corrupt/over-large count must be clamped, never read out of bounds.
+    c.annotation_count = 9999;
     let r = convert_c_context(&c);
-
-    assert_eq!(r.tags.len(), 1);
-    assert_eq!(r.tags[0].0, "env");
-    assert_eq!(r.tags[0].1, "production");
+    assert_eq!(r.annotations.len(), crate::shm::types::MAX_ANNOTATIONS);
 }
 
 #[test]

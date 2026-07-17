@@ -355,26 +355,15 @@ fn format_crash_context(
         return (None, None, format_settings(settings));
     };
 
-    let tags: serde_json::Map<String, serde_json::Value> = ctx
-        .tags
+    // App/domain state is emitted as a generic annotation map (app-agnostic).
+    let annotations: serde_json::Map<String, serde_json::Value> = ctx
+        .annotations
         .iter()
         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
         .collect();
 
     let crash_context = serde_json::json!({
-        "active_tool": ctx.active_tool,
-        "region_count": ctx.region_count,
-        "voxel_count": ctx.voxel_count,
-        "undo_depth": ctx.undo_depth,
-        "redo_depth": ctx.redo_depth,
-        "last_action_id": ctx.last_action_id,
-        "frame_number": ctx.frame_number,
-        "alloc_count": ctx.alloc_count,
-        "free_count": ctx.free_count,
-        "alloc_bytes_total": ctx.alloc_bytes_total,
-        "thread_pool_size": ctx.thread_pool_size,
-        "active_batch": ctx.active_batch,
-        "tags": tags,
+        "annotations": annotations,
     });
 
     let build = serde_json::json!({

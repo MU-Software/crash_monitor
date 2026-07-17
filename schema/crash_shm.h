@@ -68,36 +68,28 @@ typedef struct sut_crumb_state {
     uint32_t ring_count; /* atomic: number of registered threads */
 } sut_crumb_state_t;
 
-/* ── Crash context — engine state snapshot ── */
+/* ── App-supplied annotation (generic key-value) ──
+ * Domain state (active tool, counts, undo depth, user tags, ...) is recorded as
+ * string key-value pairs rather than typed fields, so the monitor stays entirely
+ * app-agnostic. A host app records these via sut_crash_set_annotation(); the
+ * typed convenience setters (sut_crash_set_counts, ...) are thin wrappers. */
+#define SUT_CRASH_MAX_ANNOTATIONS 16
+
+typedef struct sut_crash_annotation {
+    char key[32];
+    char value[64];
+} sut_crash_annotation_t;
+
+_Static_assert(sizeof(sut_crash_annotation_t) == 96, "sut_crash_annotation_t must be 96 bytes");
+
+/* ── Crash context — app-agnostic engine snapshot ── */
 typedef struct sut_crash_context {
-    /* Engine state */
-    char active_tool[32];
-    int32_t region_count;
-    int32_t voxel_count;
-    int32_t undo_depth;
-    int32_t redo_depth;
-    uint32_t last_action_id;
-    uint32_t frame_number;
-
-    /* Memory */
-    uint64_t alloc_count;
-    uint64_t free_count;
-    uint64_t alloc_bytes_total;
-
-    /* Thread pool */
-    int32_t thread_pool_size;
-    int32_t active_batch;
-
     /* ANR detection heartbeat (accessed atomically; see note above) */
     uint64_t heartbeat_counter;
 
     /* Session */
     uint64_t session_start_ns;
     char session_id[37]; /* UUID v4 (36 chars + NUL) */
-
-    /* User-defined key-value tags */
-    char tags[4][2][64]; /* [slot][key=0/value=1][chars] */
-    int32_t tag_count;
 
     /* Build identification (populated from CMake defines at init) */
     char app_version[16];
@@ -109,6 +101,10 @@ typedef struct sut_crash_context {
     char build_timestamp[24];
     char compiler[32];
     char os_version[32];
+
+    /* App-supplied domain state as generic key-value annotations. */
+    int32_t annotation_count;
+    sut_crash_annotation_t annotations[SUT_CRASH_MAX_ANNOTATIONS];
 } sut_crash_context_t;
 
 /* ── Settings snapshot ── */

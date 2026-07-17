@@ -1,5 +1,12 @@
 use super::*;
+use std::mem::MaybeUninit;
 use std::os::raw::c_char;
+
+/// A zeroed annotation array of the schema-defined length.
+fn zeroed_annotations() -> [SutCrashAnnotation; MAX_ANNOTATIONS] {
+    // SAFETY: SutCrashAnnotation is repr(C) plain char arrays; all-zero is valid.
+    unsafe { MaybeUninit::zeroed().assume_init() }
+}
 
 /// Build a `Vec<c_char>` from bytes (shm char arrays are `c_char`/i8).
 fn cc(bytes: &[u8]) -> Vec<c_char> {
@@ -34,33 +41,27 @@ fn test_c_array_to_string_all_zeros() {
 }
 
 #[test]
-fn test_read_tags_normal() {
-    let mut tags = [[[0 as c_char; 64]; 2]; 4];
-    set(&mut tags[0][0], b"key");
-    set(&mut tags[0][1], b"val");
-    set(&mut tags[1][0], b"k2");
-    set(&mut tags[1][1], b"v2");
-    let result = read_tags(&tags, 2);
+fn test_read_annotations_normal() {
+    let mut anns = zeroed_annotations();
+    set(&mut anns[0].key, b"key");
+    set(&mut anns[0].value, b"val");
+    set(&mut anns[1].key, b"k2");
+    set(&mut anns[1].value, b"v2");
+    let result = read_annotations(&anns, 2);
     assert_eq!(result.len(), 2);
     assert_eq!(result[0], ("key".to_string(), "val".to_string()));
     assert_eq!(result[1], ("k2".to_string(), "v2".to_string()));
 }
 
 #[test]
-fn test_read_tags_clamps_negative() {
-    let tags = [[[0 as c_char; 64]; 2]; 4];
-    assert!(read_tags(&tags, -1).is_empty());
+fn test_read_annotations_clamps_negative() {
+    let anns = zeroed_annotations();
+    assert!(read_annotations(&anns, -1).is_empty());
 }
 
 #[test]
-fn test_read_tags_clamps_above_four() {
-    let mut tags = [[[0 as c_char; 64]; 2]; 4];
-    let keys = [b'a', b'b', b'c', b'd'];
-    let vals = [b'A', b'B', b'C', b'D'];
-    for (i, (&k, &v)) in keys.iter().zip(vals.iter()).enumerate() {
-        tags[i][0][0] = k as c_char;
-        tags[i][1][0] = v as c_char;
-    }
-    let result = read_tags(&tags, 10);
-    assert_eq!(result.len(), 4);
+fn test_read_annotations_clamps_above_max() {
+    let anns = zeroed_annotations();
+    let result = read_annotations(&anns, 9999);
+    assert_eq!(result.len(), MAX_ANNOTATIONS);
 }

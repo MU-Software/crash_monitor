@@ -13,22 +13,10 @@ use super::types::*;
 /// Convert a C `SutCrashContext` to the Rust `RawCrashContext`.
 pub(crate) fn convert_c_context(c: &SutCrashContext) -> RawCrashContext {
     RawCrashContext {
-        active_tool: c_array_to_string(&c.active_tool),
-        region_count: c.region_count,
-        voxel_count: c.voxel_count,
-        undo_depth: c.undo_depth,
-        redo_depth: c.redo_depth,
-        last_action_id: c.last_action_id,
-        frame_number: c.frame_number,
-        alloc_count: c.alloc_count,
-        free_count: c.free_count,
-        alloc_bytes_total: c.alloc_bytes_total,
-        thread_pool_size: c.thread_pool_size,
-        active_batch: c.active_batch,
         heartbeat_counter: c.heartbeat_counter,
         session_start_ns: c.session_start_ns,
         session_id: c_array_to_string(&c.session_id),
-        tags: read_tags(&c.tags, c.tag_count),
+        annotations: read_annotations(&c.annotations, c.annotation_count),
         app_version: c_array_to_string(&c.app_version),
         build_number: c.build_number,
         git_hash: c_array_to_string(&c.git_hash),

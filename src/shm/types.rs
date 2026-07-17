@@ -26,7 +26,8 @@ mod ffi {
 
 // Rust-style aliases for the generated shm structs (layout SSOT = crash_shm.h).
 pub use ffi::{
-    sut_breadcrumb_t as SutBreadcrumb, sut_crash_context_t as SutCrashContext,
+    sut_breadcrumb_t as SutBreadcrumb, sut_crash_annotation_t as SutCrashAnnotation,
+    sut_crash_context_t as SutCrashContext,
     sut_crash_settings_snapshot_t as SutCrashSettingsSnapshot, sut_crumb_ring_t as SutCrumbRing,
     sut_crumb_state_t as SutCrumbState, sut_screenshot_section_t as SutScreenshotSection,
 };
@@ -42,6 +43,7 @@ pub const SHM_CANARY: u32 = 0xDEAD_BEEF;
 // Schema-derived from crash_shm.h #defines (via bindgen).
 pub const CRUMB_RING_CAPACITY: usize = ffi::SUT_CRUMB_RING_CAPACITY as usize;
 pub const CRUMB_MAX_THREADS: usize = ffi::SUT_CRUMB_MAX_THREADS as usize;
+pub const MAX_ANNOTATIONS: usize = ffi::SUT_CRASH_MAX_ANNOTATIONS as usize;
 pub const SCREENSHOT_SLOTS: u32 = ffi::SUT_SCREENSHOT_SLOTS;
 pub const SCREENSHOT_WIDTH: u32 = ffi::SUT_SCREENSHOT_WIDTH;
 pub const SCREENSHOT_HEIGHT: u32 = ffi::SUT_SCREENSHOT_HEIGHT;
@@ -93,19 +95,20 @@ const _: () = assert!(size_of::<ShmHeader>() == 64);
 const _: () = assert!(size_of::<SutBreadcrumb>() == 64);
 const _: () = assert!(size_of::<SutCrumbRing>() == 32784);
 const _: () = assert!(size_of::<SutCrumbState>() == 262_280);
-const _: () = assert!(size_of::<SutCrashContext>() == 824);
+const _: () = assert!(size_of::<SutCrashAnnotation>() == 96);
+const _: () = assert!(size_of::<SutCrashContext>() == 1760);
 const _: () = assert!(size_of::<SutCrashSettingsSnapshot>() == 160);
 const _: () = assert!(size_of::<ShmAttachmentSlot>() == 288);
 
-// Offset assertions for SutCrashContext
-const _: () = assert!(offset_of!(SutCrashContext, heartbeat_counter) == 88);
-const _: () = assert!(offset_of!(SutCrashContext, session_start_ns) == 96);
-const _: () = assert!(offset_of!(SutCrashContext, session_id) == 104);
-const _: () = assert!(offset_of!(SutCrashContext, tags) == 141);
-const _: () = assert!(offset_of!(SutCrashContext, tag_count) == 656);
-const _: () = assert!(offset_of!(SutCrashContext, app_version) == 660);
-const _: () = assert!(offset_of!(SutCrashContext, git_dirty) == 696);
-const _: () = assert!(offset_of!(SutCrashContext, os_version) == 785);
+// Offset assertions for SutCrashContext (app-agnostic layout)
+const _: () = assert!(offset_of!(SutCrashContext, heartbeat_counter) == 0);
+const _: () = assert!(offset_of!(SutCrashContext, session_start_ns) == 8);
+const _: () = assert!(offset_of!(SutCrashContext, session_id) == 16);
+const _: () = assert!(offset_of!(SutCrashContext, app_version) == 53);
+const _: () = assert!(offset_of!(SutCrashContext, git_dirty) == 92);
+const _: () = assert!(offset_of!(SutCrashContext, os_version) == 181);
+const _: () = assert!(offset_of!(SutCrashContext, annotation_count) == 216);
+const _: () = assert!(offset_of!(SutCrashContext, annotations) == 220);
 
 // ═══════════════════════════════════════════════════
 //  Section layout (computed from struct sizes)
@@ -157,24 +160,15 @@ pub struct RawBreadcrumb {
 }
 
 /// Crash context converted to Rust-native types.
+///
+/// App/domain state lives in `annotations` (generic key-value); the struct
+/// carries no app-specific fields, keeping the monitor app-agnostic.
 #[derive(Debug, Clone)]
 pub struct RawCrashContext {
-    pub active_tool: String,
-    pub region_count: i32,
-    pub voxel_count: i32,
-    pub undo_depth: i32,
-    pub redo_depth: i32,
-    pub last_action_id: u32,
-    pub frame_number: u32,
-    pub alloc_count: u64,
-    pub free_count: u64,
-    pub alloc_bytes_total: u64,
-    pub thread_pool_size: i32,
-    pub active_batch: i32,
     pub heartbeat_counter: u64,
     pub session_start_ns: u64,
     pub session_id: String,
-    pub tags: Vec<(String, String)>,
+    pub annotations: Vec<(String, String)>,
     pub app_version: String,
     pub build_number: u32,
     pub git_hash: String,
@@ -227,17 +221,15 @@ pub(crate) fn c_array_to_string(bytes: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
-/// Read tags from the fixed [4][2][64] C array.
-pub(crate) fn read_tags(tags: &[[[c_char; 64]; 2]; 4], count: i32) -> Vec<(String, String)> {
-    #[allow(clippy::cast_sign_loss)] // clamped to 0..=4
-    let count = count.clamp(0, 4) as usize;
-    (0..count)
-        .map(|i| {
-            (
-                c_array_to_string(&tags[i][0]),
-                c_array_to_string(&tags[i][1]),
-            )
-        })
+/// Read app annotations from the fixed C array, clamped to a valid count.
+pub(crate) fn read_annotations(
+    annotations: &[SutCrashAnnotation; MAX_ANNOTATIONS],
+    count: i32,
+) -> Vec<(String, String)> {
+    let count = usize::try_from(count).unwrap_or(0).min(MAX_ANNOTATIONS);
+    annotations[..count]
+        .iter()
+        .map(|a| (c_array_to_string(&a.key), c_array_to_string(&a.value)))
         .collect()
 }
 

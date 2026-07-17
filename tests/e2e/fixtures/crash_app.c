@@ -82,9 +82,12 @@ static void populate_shm(const char* scenario) {
     ring->count++;
     __atomic_store_n(&crumbs->ring_count, 1u, __ATOMIC_RELEASE);
 
-    /* Minimal context. heartbeat_counter is intentionally left at 0: the `anr`
-     * scenario never advances it, which is exactly what the watchdog detects. */
-    strncpy(ctx->active_tool, "e2e_producer", sizeof(ctx->active_tool) - 1);
+    /* Minimal context: one generic annotation + session. heartbeat_counter is
+     * intentionally left at 0 — the `anr` scenario never advances it, which is
+     * exactly what the watchdog detects. */
+    strncpy(ctx->annotations[0].key, "active_tool", sizeof(ctx->annotations[0].key) - 1);
+    strncpy(ctx->annotations[0].value, "e2e_producer", sizeof(ctx->annotations[0].value) - 1);
+    ctx->annotation_count = 1;
     strncpy(ctx->session_id, "00000000-0000-4000-8000-000000000000", sizeof(ctx->session_id) - 1);
     ctx->session_start_ns = now_ns();
 }

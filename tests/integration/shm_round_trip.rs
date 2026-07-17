@@ -138,20 +138,21 @@ fn test_context_write_read() {
     unsafe {
         let ctx = base.add(CONTEXT_OFFSET);
 
-        // active_tool: [u8; 32] at offset 0
-        write_c_str(ctx, "brush", 32);
+        // annotation_count = 1
+        write_val::<i32>(ctx, offset_of!(SutCrashContext, annotation_count), 1);
 
-        // region_count: i32
-        write_val::<i32>(ctx, offset_of!(SutCrashContext, region_count), 7);
-
-        // voxel_count: i32
-        write_val::<i32>(ctx, offset_of!(SutCrashContext, voxel_count), 1024);
+        // annotations[0] = { key: "active_tool", value: "brush" }; key[32], value[64]
+        let ann0 = ctx.add(offset_of!(SutCrashContext, annotations));
+        write_c_str(ann0, "active_tool", 32);
+        write_c_str(ann0.add(32), "brush", 64);
     }
 
     let ctx = shm.read_context().expect("read_context should succeed");
-    assert_eq!(ctx.active_tool, "brush");
-    assert_eq!(ctx.region_count, 7);
-    assert_eq!(ctx.voxel_count, 1024);
+    assert_eq!(ctx.annotations.len(), 1);
+    assert_eq!(
+        ctx.annotations[0],
+        ("active_tool".to_string(), "brush".to_string())
+    );
 }
 
 #[test]

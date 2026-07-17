@@ -105,19 +105,23 @@ fn print_crash_context(report: &CrashReport) {
     let Some(ref ctx) = report.crash_context else {
         return;
     };
-    let tool = ctx
-        .get("active_tool")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    let frame = ctx
-        .get("frame_number")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let regions = ctx
-        .get("region_count")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0);
-    println!("Context: tool={tool} | frame={frame} | regions={regions}");
+    // App state is a generic annotation map — print it verbatim (no app-specific
+    // field names, so the tool stays domain-agnostic).
+    let Some(annotations) = ctx
+        .get("annotations")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+    if annotations.is_empty() {
+        return;
+    }
+    let joined = annotations
+        .iter()
+        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    println!("Context: {joined}");
 }
 
 fn print_exception(report: &CrashReport) {
