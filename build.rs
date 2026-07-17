@@ -12,6 +12,11 @@ fn main() {
 
     println!("cargo:rerun-if-changed={header}");
 
+    // A host project may bake its data-dir namespace via this env at build time
+    // (consumed by `option_env!` in utils/paths.rs). Rebuild when it changes so
+    // the baked default never goes stale. Unset → generic `.crash_monitor`.
+    println!("cargo:rerun-if-env-changed=CRASH_MONITOR_DATA_DIR_NAME");
+
     let bindings = bindgen::Builder::default()
         .header(header)
         // Only our shm types/constants — never drag in system headers.

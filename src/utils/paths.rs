@@ -17,8 +17,18 @@ use std::path::PathBuf;
 /// When unset, both sides fall back to the tool default `~/.crash_monitor/`.
 const DATA_DIR_OVERRIDE_ENV: &str = "CRASH_MONITOR_DATA_DIR";
 
-/// Tool-default base directory name under `$HOME` when the override env is unset.
-const DEFAULT_DATA_DIR_NAME: &str = ".crash_monitor";
+/// Base directory name under `$HOME` when the override env is unset.
+///
+/// A host project bakes its own namespace here at build time by setting the
+/// `CRASH_MONITOR_DATA_DIR_NAME` env when compiling (see `build.rs`, which marks
+/// it as a rebuild trigger). When unbaked — the generic standalone tool build —
+/// this is `.crash_monitor`. Only the dir *name* is baked; it resolves against
+/// `$HOME` at runtime, so the binary carries no build-machine path and stays
+/// safe to distribute.
+const DEFAULT_DATA_DIR_NAME: &str = match option_env!("CRASH_MONITOR_DATA_DIR_NAME") {
+    Some(name) => name,
+    None => ".crash_monitor",
+};
 
 /// Base directory for crash reporter data: `$CRASH_MONITOR_DATA_DIR` if set,
 /// else `~/.crash_monitor/`.
