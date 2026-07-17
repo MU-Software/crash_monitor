@@ -1932,6 +1932,21 @@ fn test_global_disable_skips_every_report_type_without_side_effects() {
 // ── Real factory: builds and passes dependency-order validation ──
 
 #[test]
+fn test_attachment_copier_obeys_preprocessor_category_switch() {
+    for attachment_collector_registered in [false, true] {
+        for pre_processors_enabled in [false, true] {
+            assert_eq!(
+                should_register_attachment_copier(
+                    attachment_collector_registered,
+                    pre_processors_enabled,
+                ),
+                attachment_collector_registered && pre_processors_enabled
+            );
+        }
+    }
+}
+
+#[test]
 fn test_macos_factory_preserves_validated_global_and_trigger_policy() {
     let disabled =
         serde_json::from_str::<crate::config::CrashReporterConfig>(r#"{ "enabled": false }"#)

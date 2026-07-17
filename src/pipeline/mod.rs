@@ -724,6 +724,14 @@ fn plugin_graph_nodes<T: Plugin + ?Sized>(
         .collect()
 }
 
+#[cfg(target_os = "macos")]
+const fn should_register_attachment_copier(
+    attachment_collector_registered: bool,
+    pre_processors_enabled: bool,
+) -> bool {
+    attachment_collector_registered && pre_processors_enabled
+}
+
 // ═══════════════════════════════════════════════════
 //  Pipeline factory
 // ═══════════════════════════════════════════════════
@@ -854,7 +862,7 @@ pub fn default_macos_pipeline_from_config(
     // ── Pre-processors (order matters: dependencies must come first) ──
     let mut pre_processors: Vec<Box<dyn PreProcessor>> = vec![];
 
-    if attachment_copy_enabled && cfg.pre_processors.enabled {
+    if should_register_attachment_copier(attachment_copy_enabled, cfg.pre_processors.enabled) {
         pre_processors.push(Box::new(crate::collectors::AttachmentCopier::new()));
     }
 

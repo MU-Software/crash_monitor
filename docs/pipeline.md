@@ -237,8 +237,8 @@ it.
 
 Plugin IDs must be globally unique, while dependency edges stay within their
 category. Both the configuration registry and the assembled runtime pipeline
-are validated before the child process is spawned. Duplicate IDs, missing hard
-dependencies, dependency cycles, and invalid registration order return a
+are validated before the child process is spawned. Duplicate IDs, missing
+dependency declarations, dependency cycles, and invalid registration order return a
 structured `Result<_, ConfigValidationError>` to startup rather than panicking.
 A missing or malformed configuration file currently falls back to the built-in
 defaults silently.

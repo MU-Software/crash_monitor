@@ -39,9 +39,10 @@ pub trait Plugin: Send + Sync {
     }
     /// Ordering constraints within the same category.
     ///
-    /// Missing order-only dependencies are valid. When both plugins are
-    /// registered, the dependency must appear first; its runtime failure does
-    /// not skip this plugin.
+    /// The referenced ID must exist in the complete static registry. It may be
+    /// absent from an enabled runtime subset; when both plugins are registered,
+    /// the dependency must appear first. Its runtime failure does not skip this
+    /// plugin.
     fn order_after(&self) -> &'static [&'static str] {
         &[]
     }

@@ -184,7 +184,7 @@ impl CrashReporterConfig {
     ///
     /// # Errors
     /// Returns a structured error when the built-in plugin registry contains
-    /// duplicate IDs, a missing hard dependency, or a dependency cycle/order
+    /// duplicate IDs, a missing dependency declaration, or a dependency cycle/order
     /// violation.
     pub fn validate(self) -> Result<ValidatedConfig, ConfigValidationError> {
         let trigger_category_enabled = self.triggers.enabled;
@@ -893,7 +893,11 @@ fn validate_plugin_registry_with_policy(
                 }
             }
         }
-        validate_plugin_graph_with_policy(*category, nodes, require_order_dependencies)?;
+        if require_order_dependencies {
+            validate_plugin_graph(*category, nodes)?;
+        } else {
+            validate_runtime_plugin_graph(*category, nodes)?;
+        }
     }
 
     Ok(())
