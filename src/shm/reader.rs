@@ -47,6 +47,70 @@ const SCREENSHOT_TIERS_OFFSET: usize = SECTION4_OFFSET + offset_of!(SutScreensho
 const SCREENSHOT_DATA_OFFSET: usize = SECTION4_OFFSET + offset_of!(SutScreenshotSection, data);
 const HEARTBEAT_OFFSET: usize = CONTEXT_OFFSET + offset_of!(SutCrashContext, heartbeat_counter);
 
+#[derive(Clone, Copy)]
+enum LiveAtomicWord {
+    U32(usize),
+    U64(usize),
+}
+
+impl LiveAtomicWord {
+    const fn offset(self) -> usize {
+        match self {
+            Self::U32(offset) | Self::U64(offset) => offset,
+        }
+    }
+
+    const fn width(self) -> usize {
+        match self {
+            Self::U32(_) => size_of::<u32>(),
+            Self::U64(_) => size_of::<u64>(),
+        }
+    }
+}
+
+const LIVE_ATOMIC_WORD_COUNT: usize = 4 + CRUMB_MAX_THREADS + 1 + 1 + SCREENSHOT_SLOTS as usize;
+
+const fn live_atomic_words() -> [LiveAtomicWord; LIVE_ATOMIC_WORD_COUNT] {
+    let mut words = [LiveAtomicWord::U32(REGISTRY_GENERATION_OFFSET); LIVE_ATOMIC_WORD_COUNT];
+    let mut index = 0;
+
+    words[index] = LiveAtomicWord::U32(REGISTRY_GENERATION_OFFSET);
+    index += 1;
+    words[index] = LiveAtomicWord::U32(CONTEXT_GENERATION_OFFSET);
+    index += 1;
+    words[index] = LiveAtomicWord::U32(SETTINGS_GENERATION_OFFSET);
+    index += 1;
+    words[index] = LiveAtomicWord::U32(ATTACHMENTS_GENERATION_OFFSET);
+    index += 1;
+
+    let mut ring_index = 0;
+    while ring_index < CRUMB_MAX_THREADS {
+        words[index] = LiveAtomicWord::U32(
+            RINGS_OFFSET + ring_index * size_of::<SutCrumbRing>() + RING_GENERATION_OFFSET,
+        );
+        index += 1;
+        ring_index += 1;
+    }
+
+    words[index] = LiveAtomicWord::U32(RING_COUNT_OFFSET);
+    index += 1;
+    words[index] = LiveAtomicWord::U64(HEARTBEAT_OFFSET);
+    index += 1;
+
+    let mut screenshot_index = 0;
+    while screenshot_index < SCREENSHOT_SLOTS as usize {
+        words[index] = LiveAtomicWord::U32(
+            SCREENSHOT_GENERATIONS_OFFSET + screenshot_index * size_of::<u32>(),
+        );
+        index += 1;
+        screenshot_index += 1;
+    }
+
+    words
+}
+
+const LIVE_ATOMIC_WORDS: [LiveAtomicWord; LIVE_ATOMIC_WORD_COUNT] = live_atomic_words();
+
 const _: () = assert!(REGISTRY_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
 const _: () = assert!(CONTEXT_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
 const _: () = assert!(SETTINGS_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
@@ -57,6 +121,17 @@ const _: () =
 const _: () = assert!(size_of::<SutCrumbRing>().is_multiple_of(align_of::<AtomicU32>()));
 const _: () = assert!(SCREENSHOT_GENERATIONS_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
 const _: () = assert!(HEARTBEAT_OFFSET.is_multiple_of(align_of::<AtomicU64>()));
+const _: () = {
+    let mut index = 0;
+    let mut previous_end = 0;
+    while index < LIVE_ATOMIC_WORDS.len() {
+        let word = LIVE_ATOMIC_WORDS[index];
+        assert!(word.offset() >= previous_end);
+        assert!(word.offset() + word.width() <= SHM_TOTAL_SIZE);
+        previous_end = word.offset() + word.width();
+        index += 1;
+    }
+};
 
 /// Failure to copy or validate an immutable shared-memory snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -862,6 +937,56 @@ impl SharedMemory {
         Some(value.load(Ordering::Acquire))
     }
 
+    fn copy_non_atomic_until(
+        &self,
+        bytes: &mut Vec<u8>,
+        end: usize,
+        deadline: Option<Instant>,
+    ) -> Result<(), ShmSnapshotError> {
+        debug_assert!(bytes.len() <= end);
+        while bytes.len() < end {
+            check_snapshot_deadline(deadline)?;
+            let copied = bytes.len();
+            let chunk_len = (end - copied).min(SNAPSHOT_COPY_CHUNK_SIZE);
+            // SAFETY: the caller checked `self.size >= SHM_TOTAL_SIZE` and
+            // reserved destination capacity for that complete size. Atomic
+            // publication words delimit every range passed to this helper, so
+            // this ordinary copy never reads one of those words.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.base.cast_const().add(copied),
+                    bytes.as_mut_ptr().add(copied),
+                    chunk_len,
+                );
+                bytes.set_len(copied + chunk_len);
+            }
+        }
+        Ok(())
+    }
+
+    fn append_atomic_word(&self, bytes: &mut Vec<u8>, word: LiveAtomicWord) {
+        let offset = word.offset();
+        debug_assert_eq!(bytes.len(), offset);
+        debug_assert!(bytes.capacity() - bytes.len() >= word.width());
+
+        match word {
+            LiveAtomicWord::U32(offset) => {
+                let encoded = self
+                    .load_atomic_u32_at(offset)
+                    .unwrap_or_default()
+                    .to_ne_bytes();
+                bytes.extend_from_slice(&encoded);
+            }
+            LiveAtomicWord::U64(offset) => {
+                let encoded = self
+                    .load_atomic_u64_at(offset)
+                    .unwrap_or_default()
+                    .to_ne_bytes();
+                bytes.extend_from_slice(&encoded);
+            }
+        }
+    }
+
     fn load_publication_state(&self) -> LivePublicationState {
         let mut ring_generations = [0; CRUMB_MAX_THREADS];
         for (index, generation) in ring_generations.iter_mut().enumerate() {
@@ -947,31 +1072,17 @@ impl SharedMemory {
         })?;
 
         let publication_before = self.load_publication_state();
-        while bytes.len() < SHM_TOTAL_SIZE {
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                return Err(ShmSnapshotError::DeadlineExceeded);
-            }
-            let copied = bytes.len();
-            let chunk_len = (SHM_TOTAL_SIZE - copied).min(SNAPSHOT_COPY_CHUNK_SIZE);
-            // SAFETY: `self.size >= SHM_TOTAL_SIZE` was checked before pointer
-            // arithmetic. `try_reserve_exact` established destination capacity
-            // for the full schema, and `copied + chunk_len <= SHM_TOTAL_SIZE`.
-            // The source and destination cannot overlap. The new length is
-            // published only after every byte in this chunk has been initialized.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    self.base.cast_const().add(copied),
-                    bytes.as_mut_ptr().add(copied),
-                    chunk_len,
-                );
-                bytes.set_len(copied + chunk_len);
-            }
+        for word in LIVE_ATOMIC_WORDS {
+            self.copy_non_atomic_until(&mut bytes, word.offset(), deadline)?;
+            check_snapshot_deadline(deadline)?;
+            self.append_atomic_word(&mut bytes, word);
         }
+        self.copy_non_atomic_until(&mut bytes, SHM_TOTAL_SIZE, deadline)?;
 
-        // Pair the bounded raw copy with the producer's release publication.
+        // Keep every payload read ordered before the closing generation loads.
         // Each acquire-loaded generation is compared with the corresponding
         // pre-copy value below; there is deliberately no retry or spin.
-        fence(Ordering::Acquire);
+        fence(Ordering::SeqCst);
         let publication_after = self.load_publication_state();
         let heartbeat = self
             .load_atomic_u64_at(HEARTBEAT_OFFSET)

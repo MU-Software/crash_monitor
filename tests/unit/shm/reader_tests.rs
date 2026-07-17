@@ -132,6 +132,27 @@ fn test_validate_corrupted_magic() {
 }
 
 #[test]
+fn test_validate_rejects_legacy_schema_version() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let legacy_version = SHM_VERSION
+        .checked_sub(1)
+        .expect("the current schema must have a legacy predecessor");
+    unsafe {
+        write_val::<u32>(
+            shm.base_ptr(),
+            SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, version),
+            legacy_version,
+        );
+    }
+    assert_eq!(
+        shm.snapshot_owned_until(None).unwrap_err(),
+        ShmSnapshotError::UnsupportedVersion {
+            found: legacy_version
+        }
+    );
+}
+
+#[test]
 fn test_validate_corrupted_canary() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     // Corrupt canary

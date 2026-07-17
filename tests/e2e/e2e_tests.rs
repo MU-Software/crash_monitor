@@ -14,9 +14,12 @@
 //! Each test uses its own temporary directory via `CRASH_MONITOR_DATA_DIR` so that
 //! tests can run in parallel without interfering with each other.
 
+use crash_monitor::shm::{SHM_TOTAL_SIZE, SHM_VERSION, SharedMemory, ShmHeader};
 use std::io::Read;
+use std::mem::{offset_of, size_of};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -31,6 +34,22 @@ const SIGTERM_NUMBER: i32 = 15;
 fn crash_app_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest.join("tests/e2e/fixtures/crash_app")
+}
+
+fn unique_shm_test_id() -> u32 {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+    0xE000_0000 | NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn copy_mapping(shm: &SharedMemory) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(SHM_TOTAL_SIZE);
+    // SAFETY: `SharedMemory::create` maps exactly `SHM_TOTAL_SIZE` bytes. The
+    // producer process is not running when this helper is called.
+    unsafe {
+        std::ptr::copy_nonoverlapping(shm.base_ptr(), bytes.as_mut_ptr(), SHM_TOTAL_SIZE);
+        bytes.set_len(SHM_TOTAL_SIZE);
+    }
+    bytes
 }
 
 /// Locate the `crash_monitor` binary (release build).
@@ -204,7 +223,6 @@ fn test_e2e_crash_sigsegv() {
     assert_eq!(json["termination"]["signal"], SIGSEGV_NUMBER);
     assert!(json["termination"]["core_dumped"].is_boolean());
     assert!(json["termination"]["runtime_ms"].as_u64().is_some());
-
     let breadcrumbs = json["breadcrumbs"]
         .as_array()
         .expect("v3 C producer breadcrumb payload");
@@ -220,6 +238,47 @@ fn test_e2e_crash_sigsegv() {
     assert_eq!(
         json["crash_context"]["annotations"]["active_tool"], "e2e_producer",
         "schema-v3 C producer context must survive strict wire validation"
+    );
+}
+
+#[test]
+fn test_e2e_producer_rejects_schema_mismatch_without_writing() {
+    let child = crash_app_path();
+    if !child.exists() {
+        eprintln!("SKIP: crash_app not found at {}", child.display());
+        return;
+    }
+
+    let shm = SharedMemory::create(unique_shm_test_id()).expect("create test SHM");
+    let legacy_version = SHM_VERSION
+        .checked_sub(1)
+        .expect("the current schema must have a predecessor");
+    let version_offset = offset_of!(ShmHeader, version);
+    // SAFETY: the child has not started, the header is in bounds and mmap is
+    // sufficiently aligned. Copying bytes avoids materializing a wire struct.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            legacy_version.to_ne_bytes().as_ptr(),
+            shm.base_ptr().add(version_offset),
+            size_of::<u32>(),
+        );
+    }
+    let before = copy_mapping(&shm);
+
+    let status = Command::new(child)
+        .arg("clean")
+        .env("CRASH_MONITOR_SHM", shm.name())
+        .status()
+        .expect("run crash_app");
+    assert!(
+        status.success(),
+        "clean fixture scenario must exit successfully"
+    );
+
+    assert_eq!(
+        copy_mapping(&shm),
+        before,
+        "a producer must leave an unsupported SHM schema completely untouched"
     );
 }
 

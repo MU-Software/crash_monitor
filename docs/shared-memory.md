@@ -26,6 +26,10 @@ accepts only its exact schema version. Version 3 rejects version 1 and version 2
 regions, and a version 3 producer must not write either older version. There is
 no fallback based on common sizes or preserved offsets: on any version mismatch,
 the producer leaves the region alone and the consumer omits its SHM payload.
+Producer and monitor releases therefore have to upgrade in lockstep. In
+particular, a legacy producer that ignores the version cannot be made safe by a
+new monitor merely placing a newer version in the monitor-owned header; mixing
+such binaries is unsupported.
 
 ## Region layout
 
@@ -36,10 +40,11 @@ The monitor creates and sizes the region. Sections remain back to back:
 ```
 
 The screenshot ring dominates the roughly 50 MB region. Schema v2 reused
-previously reserved words for generations. Schema v3 replaces the wire C
-`bool` with a fixed-width byte and adds semantic constants. The 64-byte header,
+reserved or padding words and also changed the meaning of the former header
+offset-16 `ring_count` and screenshot `valid` words. Schema v3 replaces the wire
+C `bool` with a fixed-width byte and adds semantic constants. The 64-byte header,
 every payload offset, and the total region size remain unchanged across versions
-1, 2, and 3, but that layout overlap does not make the versions compatible.
+1, 2, and 3, but the publication semantics are intentionally incompatible.
 
 ### Header (64 bytes)
 
@@ -128,7 +133,8 @@ exception and uses its dedicated atomic API.
 
 ## Publication protocol
 
-All writers use a single-attempt, nonblocking seqlock operation:
+All multi-field publication-unit writers use a single-attempt, nonblocking
+seqlock operation:
 
 1. `sut_shm_seqlock_try_begin` performs at most one compare-exchange from an
    even generation to the following odd value.
@@ -137,12 +143,14 @@ All writers use a single-attempt, nonblocking seqlock operation:
 3. After writing every field in the protected unit, the producer calls
    `sut_shm_seqlock_end`, which release-stores the following even generation.
 
-A concurrent consumer acquire-loads the generation, rejects an odd value,
-copies the unit, then acquire-loads it again. It accepts the copy only when the
-two values are identical and even. The monitor's suspended owned-snapshot path
-cannot observe a generation change during its copy, but it still rejects an odd
-value left by an interrupted producer. Consumers never wait for an odd value;
-they drop only that ring, section, or screenshot slot.
+The publication protocol permits a consumer to acquire-load the generation,
+reject an odd value, copy the unit, then acquire-load it again. A copy is valid
+only when the two values are identical and even. The production monitor API
+requires task suspension before copying payload bytes, so it normally cannot
+observe a generation change, but it still rejects an odd value left by an
+interrupted producer. The concurrent stress fixture exercises the same
+before/after validation without suspension. Neither path waits for an odd
+value; it drops only that ring, section, or screenshot slot.
 
 ### Breadcrumb registry and rings
 
@@ -211,6 +219,8 @@ operations:
 
 - C uses the acquire/release and seqlock helpers in `crash_shm_atomic.h`.
 - Rust uses aligned `AtomicU32`/`AtomicU64` acquire and release operations.
+- The Rust whole-mapping copy is split around every atomic word; ordinary raw
+  copy instructions never read a generation, `ring_count`, or heartbeat word.
 - The ABI is accepted only when atomic size and alignment match the underlying
   integer and the target reports the operations as always lock-free.
 

@@ -124,6 +124,7 @@ unsafe fn run_forked_context_producer(base: *mut u8, offsets: ContextPublication
 
         write_val::<u32>(base, offsets.build_number, 1);
         generation.store(2, Ordering::Release);
+        heartbeat.store(4, Ordering::Release);
         let mut stopped = false;
         for sequence in 2..=FORK_STRESS_MAX_ITERATIONS {
             if heartbeat.load(Ordering::Acquire) == 3 {
@@ -382,6 +383,7 @@ fn test_forked_context_producer_never_exposes_torn_fields() {
     unsafe {
         store_u64_release(base, offsets.heartbeat, 2);
     }
+    wait_for_live_heartbeat(&shm, 4, Instant::now() + Duration::from_secs(3));
 
     let mut saw_changed_generation = false;
     for _ in 0..12 {
