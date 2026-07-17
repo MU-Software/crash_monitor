@@ -212,8 +212,12 @@ impl OwnedShmSnapshot {
         let Some(ring_count) = self.read_u32(ring_count_offset) else {
             return Vec::new();
         };
-        #[allow(clippy::cast_possible_truncation)] // CRUMB_MAX_THREADS is schema-bounded
-        let ring_count = ring_count.min(CRUMB_MAX_THREADS as u32) as usize;
+        let Ok(ring_count) = usize::try_from(ring_count) else {
+            return Vec::new();
+        };
+        if ring_count > CRUMB_MAX_THREADS {
+            return Vec::new();
+        }
 
         let mut breadcrumbs = Vec::new();
         for ring_index in 0..ring_count {
@@ -301,7 +305,7 @@ impl OwnedShmSnapshot {
             field(offset_of!(SutCrashContext, git_hash))?,
             CONTEXT_GIT_HASH_LEN,
         )?;
-        // Never construct the bindgen `bool`: every wire byte is decoded first.
+        // Keep the untrusted wire value integer until this explicit conversion.
         let git_dirty = self.read_u8(field(offset_of!(SutCrashContext, git_dirty))?)? != 0;
         let build_type = self.read_string(
             field(offset_of!(SutCrashContext, build_type))?,
@@ -326,9 +330,10 @@ impl OwnedShmSnapshot {
 
         let annotation_count =
             self.read_i32(field(offset_of!(SutCrashContext, annotation_count))?)?;
-        let annotation_count = usize::try_from(annotation_count)
-            .unwrap_or(0)
-            .min(MAX_ANNOTATIONS);
+        let annotation_count = usize::try_from(annotation_count).ok()?;
+        if annotation_count > MAX_ANNOTATIONS {
+            return None;
+        }
         let annotations_offset = field(offset_of!(SutCrashContext, annotations))?;
         let mut annotations = Vec::with_capacity(annotation_count);
         for index in 0..annotation_count {
@@ -407,9 +412,12 @@ impl OwnedShmSnapshot {
         let Some(count) = self.read_u32(count_offset) else {
             return Vec::new();
         };
-        let count = usize::try_from(count)
-            .unwrap_or(usize::MAX)
-            .min(ATTACHMENT_SLOT_COUNT);
+        let Ok(count) = usize::try_from(count) else {
+            return Vec::new();
+        };
+        if count > ATTACHMENT_SLOT_COUNT {
+            return Vec::new();
+        }
         let Some(slots_offset) =
             ATTACHMENT_OFFSET.checked_add(offset_of!(ShmAttachmentSection, slots))
         else {
@@ -434,7 +442,7 @@ impl OwnedShmSnapshot {
                 self.read_string(label_offset, ATTACHMENT_LABEL_LEN),
                 self.read_string(path_offset, ATTACHMENT_PATH_LEN),
             ) else {
-                break;
+                continue;
             };
             if !path.is_empty() {
                 attachments.push(RawAttachment { label, path });
@@ -505,12 +513,18 @@ impl OwnedShmSnapshot {
     }
 
     fn read_breadcrumb(&self, base: usize) -> Option<RawBreadcrumb> {
+        let category = self.read_u16(base.checked_add(offset_of!(SutBreadcrumb, category))?)?;
+        let severity = self.read_u16(base.checked_add(offset_of!(SutBreadcrumb, severity))?)?;
+        if category > CRUMB_CATEGORY_MAX || severity > CRUMB_SEVERITY_MAX {
+            return None;
+        }
+
         Some(RawBreadcrumb {
             timestamp_ns: self
                 .read_u64(base.checked_add(offset_of!(SutBreadcrumb, timestamp_ns))?)?,
             thread_id: self.read_u32(base.checked_add(offset_of!(SutBreadcrumb, thread_id))?)?,
-            category: self.read_u16(base.checked_add(offset_of!(SutBreadcrumb, category))?)?,
-            severity: self.read_u16(base.checked_add(offset_of!(SutBreadcrumb, severity))?)?,
+            category,
+            severity,
             file: self.read_string(
                 base.checked_add(offset_of!(SutBreadcrumb, file))?,
                 BREADCRUMB_FILE_LEN,
@@ -561,10 +575,17 @@ impl OwnedShmSnapshot {
     }
 
     fn read_string(&self, offset: usize, len: usize) -> Option<String> {
-        let bytes = self.range(offset, len)?;
-        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(len);
-        Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+        decode_bounded_c_string(self.range(offset, len)?)
     }
+}
+
+fn decode_bounded_c_string(bytes: &[u8]) -> Option<String> {
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    let value = std::str::from_utf8(&bytes[..end]).ok()?;
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn indexed_offset(base: usize, index: usize, stride: usize) -> Option<usize> {

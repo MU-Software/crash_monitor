@@ -92,7 +92,7 @@ static void populate_shm(const char* scenario) {
                 e->timestamp_ns = now_ns();
                 e->thread_id = ring->tid;
                 e->category = (uint16_t)SUT_CRUMB_CAT_LIFECYCLE;
-                e->severity = 0;
+                e->severity = (uint16_t)SUT_CRUMB_SEV_INFO;
                 strncpy(e->file, "crash_app.c", sizeof(e->file) - 1);
                 e->line = (uint16_t)__LINE__;
                 snprintf(e->message, sizeof(e->message), "scenario=%s", scenario);

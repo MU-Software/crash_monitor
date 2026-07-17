@@ -40,6 +40,60 @@ unsafe fn write_cstr(base: *mut u8, offset: usize, s: &str) {
     }
 }
 
+unsafe fn write_bytes(base: *mut u8, offset: usize, bytes: &[u8]) {
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(offset), bytes.len());
+    }
+}
+
+struct BreadcrumbWireFixture<'a> {
+    timestamp_ns: u64,
+    category: u16,
+    severity: u16,
+    file: &'a [u8],
+    message: &'a [u8],
+}
+
+unsafe fn write_breadcrumb_wire(
+    base: *mut u8,
+    offset: usize,
+    timestamp_ns: u64,
+    category: u16,
+    severity: u16,
+    file: &[u8],
+    message: &[u8],
+) {
+    assert!(file.len() <= BREADCRUMB_FILE_LEN);
+    assert!(message.len() <= BREADCRUMB_MESSAGE_LEN);
+    unsafe {
+        write_val::<u64>(
+            base,
+            offset + std::mem::offset_of!(SutBreadcrumb, timestamp_ns),
+            timestamp_ns,
+        );
+        write_val::<u16>(
+            base,
+            offset + std::mem::offset_of!(SutBreadcrumb, category),
+            category,
+        );
+        write_val::<u16>(
+            base,
+            offset + std::mem::offset_of!(SutBreadcrumb, severity),
+            severity,
+        );
+        write_bytes(
+            base,
+            offset + std::mem::offset_of!(SutBreadcrumb, file),
+            file,
+        );
+        write_bytes(
+            base,
+            offset + std::mem::offset_of!(SutBreadcrumb, message),
+            message,
+        );
+    }
+}
+
 fn snapshot(shm: &SharedMemory) -> OwnedShmSnapshot {
     shm.snapshot_owned_until(None).expect("shm snapshot")
 }
@@ -151,6 +205,24 @@ fn test_read_live_heartbeat_write_read() {
 // ── owned byte parser tests ──
 
 #[test]
+fn test_bounded_c_string_decoder_enforces_wire_contract() {
+    assert_eq!(decode_bounded_c_string(b"\0"), Some(String::new()));
+    assert_eq!(
+        decode_bounded_c_string("안전\0ignored".as_bytes()),
+        Some("안전".to_owned())
+    );
+    assert_eq!(
+        decode_bounded_c_string(b"valid\0\xff\n"),
+        Some("valid".to_owned())
+    );
+
+    assert_eq!(decode_bounded_c_string(b"missing terminator"), None);
+    assert_eq!(decode_bounded_c_string(b"invalid \xff\0"), None);
+    assert_eq!(decode_bounded_c_string(b"line\nfeed\0"), None);
+    assert_eq!(decode_bounded_c_string(b"c1 \xc2\x85 control\0"), None);
+}
+
+#[test]
 fn test_read_context_decodes_primitive_bytes_without_typed_materialization() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     let annotations = CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotations);
@@ -220,17 +292,54 @@ fn test_read_context_decodes_primitive_bytes_without_typed_materialization() {
 }
 
 #[test]
-fn test_read_context_annotation_count_is_clamped() {
+fn test_read_context_decodes_all_git_dirty_wire_values_as_u8() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    unsafe {
-        write_val::<i32>(
-            shm.base_ptr(),
-            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotation_count),
-            9999,
+    let offset = CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, git_dirty);
+
+    for (wire_value, expected) in [(0, false), (1, true), (2, true), (255, true)] {
+        unsafe {
+            write_val::<u8>(shm.base_ptr(), offset, wire_value);
+        }
+        assert_eq!(
+            snapshot(&shm).read_context().expect("context").git_dirty,
+            expected,
+            "git_dirty wire byte {wire_value}"
         );
     }
-    let context = snapshot(&shm).read_context().expect("context");
-    assert_eq!(context.annotations.len(), MAX_ANNOTATIONS);
+}
+
+#[test]
+fn test_read_context_rejects_out_of_range_annotation_counts() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let offset = CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotation_count);
+    for count in [-1, i32::try_from(MAX_ANNOTATIONS).unwrap() + 1] {
+        unsafe {
+            write_val::<i32>(shm.base_ptr(), offset, count);
+        }
+        assert!(
+            snapshot(&shm).read_context().is_none(),
+            "annotation count {count}"
+        );
+    }
+}
+
+#[test]
+fn test_read_context_accepts_annotation_count_boundaries() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let offset = CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotation_count);
+    for (count, expected_len) in [(0, 0), (MAX_ANNOTATIONS, MAX_ANNOTATIONS)] {
+        unsafe {
+            write_val::<i32>(shm.base_ptr(), offset, i32::try_from(count).unwrap());
+        }
+        assert_eq!(
+            snapshot(&shm)
+                .read_context()
+                .expect("boundary count must be accepted")
+                .annotations
+                .len(),
+            expected_len
+        );
+    }
 }
 
 #[test]
@@ -275,6 +384,49 @@ fn test_read_context_string_fields_from_owned_bytes() {
     assert_eq!(context.os_version, "macOS 15.3");
 }
 
+#[test]
+fn test_malformed_context_string_rejects_context_and_preserves_raw_bytes() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let session_id = std::mem::offset_of!(SutCrashContext, session_id);
+    unsafe {
+        write_bytes(
+            shm.base_ptr(),
+            CONTEXT_OFFSET + session_id,
+            &[b'X'; CONTEXT_SESSION_ID_LEN],
+        );
+    }
+
+    let owned = snapshot(&shm);
+    assert!(owned.read_context().is_none());
+    assert_eq!(
+        &owned.raw_context_bytes_owned()[session_id..session_id + CONTEXT_SESSION_ID_LEN],
+        &[b'X'; CONTEXT_SESSION_ID_LEN]
+    );
+}
+
+#[test]
+fn test_malformed_context_annotation_rejects_complete_context() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let annotations = std::mem::offset_of!(SutCrashContext, annotations);
+    let key = annotations + std::mem::offset_of!(SutCrashAnnotation, key);
+    unsafe {
+        write_val::<i32>(
+            shm.base_ptr(),
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotation_count),
+            1,
+        );
+        write_bytes(
+            shm.base_ptr(),
+            CONTEXT_OFFSET + key,
+            &[b'K'; ANNOTATION_KEY_LEN],
+        );
+    }
+
+    let owned = snapshot(&shm);
+    assert!(owned.read_context().is_none());
+    assert_eq!(owned.raw_context_bytes_owned()[key], b'K');
+}
+
 // ── read_settings / read_attachments / read_screenshots / read_breadcrumbs with data ──
 
 #[test]
@@ -311,6 +463,37 @@ fn test_read_settings_populated() {
     assert_eq!(s.world_bound_max, [1, 2, 3]);
     assert_eq!(s.palette_count, 16);
     assert_eq!(s.history_max, 50);
+}
+
+#[test]
+fn test_malformed_settings_extra_rejects_settings_and_preserves_context() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let extra = std::mem::offset_of!(SutCrashSettingsSnapshot, extra);
+    unsafe {
+        write_bytes(
+            shm.base_ptr(),
+            SETTINGS_OFFSET + extra,
+            &[b'E'; SETTINGS_EXTRA_LEN],
+        );
+        write_cstr(
+            shm.base_ptr(),
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, app_version),
+            "stable",
+        );
+    }
+
+    let owned = snapshot(&shm);
+    assert!(owned.read_settings().is_none());
+    assert_eq!(
+        owned.read_context().expect("stable context").app_version,
+        "stable"
+    );
+    let raw = owned.raw_context_bytes_owned();
+    let raw_extra = size_of::<SutCrashContext>() + extra;
+    assert_eq!(
+        &raw[raw_extra..raw_extra + SETTINGS_EXTRA_LEN],
+        &[b'E'; SETTINGS_EXTRA_LEN]
+    );
 }
 
 #[test]
@@ -351,6 +534,81 @@ fn test_read_attachments_skips_empty_path() {
             shm.base_ptr(),
             ATTACHMENT_OFFSET + std::mem::offset_of!(ShmAttachmentSection, count),
             1,
+        );
+    }
+    assert!(snapshot(&shm).read_attachments().is_empty());
+}
+
+#[test]
+fn test_malformed_attachment_slot_is_skipped_and_later_slot_survives() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let slots = ATTACHMENT_OFFSET + std::mem::offset_of!(ShmAttachmentSection, slots);
+    let first_path = slots + std::mem::offset_of!(ShmAttachmentSlot, path);
+    let second = slots + size_of::<ShmAttachmentSlot>();
+    unsafe {
+        let base = shm.base_ptr();
+        write_val::<u32>(
+            base,
+            ATTACHMENT_OFFSET + std::mem::offset_of!(ShmAttachmentSection, count),
+            2,
+        );
+        write_cstr(
+            base,
+            slots + std::mem::offset_of!(ShmAttachmentSlot, label),
+            "malformed",
+        );
+        write_bytes(base, first_path, &[b'P'; ATTACHMENT_PATH_LEN]);
+        write_cstr(
+            base,
+            second + std::mem::offset_of!(ShmAttachmentSlot, label),
+            "stable",
+        );
+        write_cstr(
+            base,
+            second + std::mem::offset_of!(ShmAttachmentSlot, path),
+            "/tmp/stable.log",
+        );
+    }
+
+    let owned = snapshot(&shm);
+    let attachments = owned.read_attachments();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].label, "stable");
+    assert_eq!(attachments[0].path, "/tmp/stable.log");
+    assert_eq!(owned.bytes[first_path], b'P');
+}
+
+#[test]
+fn test_attachment_count_accepts_max_and_rejects_above_max() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let count = ATTACHMENT_OFFSET + std::mem::offset_of!(ShmAttachmentSection, count);
+    let last_slot = ATTACHMENT_OFFSET
+        + std::mem::offset_of!(ShmAttachmentSection, slots)
+        + (MAX_ATTACHMENTS - 1) * size_of::<ShmAttachmentSlot>();
+    unsafe {
+        let base = shm.base_ptr();
+        write_val::<u32>(base, count, u32::try_from(MAX_ATTACHMENTS).unwrap());
+        write_cstr(
+            base,
+            last_slot + std::mem::offset_of!(ShmAttachmentSlot, label),
+            "last",
+        );
+        write_cstr(
+            base,
+            last_slot + std::mem::offset_of!(ShmAttachmentSlot, path),
+            "/tmp/last.log",
+        );
+    }
+
+    let accepted = snapshot(&shm).read_attachments();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0].path, "/tmp/last.log");
+
+    unsafe {
+        write_val::<u32>(
+            shm.base_ptr(),
+            count,
+            u32::try_from(MAX_ATTACHMENTS).unwrap() + 1,
         );
     }
     assert!(snapshot(&shm).read_attachments().is_empty());
@@ -488,6 +746,156 @@ fn test_read_breadcrumbs_with_entry() {
     assert_eq!(c.line, 77);
     assert_eq!(c.file, "app.c");
     assert_eq!(c.message, "boom");
+}
+
+#[test]
+fn test_breadcrumb_ring_count_accepts_max_and_rejects_above_max() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let last_ring = SECTION2_OFFSET
+        + std::mem::offset_of!(SutCrumbState, rings)
+        + (CRUMB_MAX_THREADS - 1) * size_of::<SutCrumbRing>();
+    let entry = last_ring + std::mem::offset_of!(SutCrumbRing, buf);
+    let ring_count = SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, ring_count);
+    unsafe {
+        let base = shm.base_ptr();
+        write_breadcrumb_wire(
+            base,
+            entry,
+            777,
+            CRUMB_CATEGORY_MAX,
+            CRUMB_SEVERITY_MAX,
+            b"last.c\0",
+            b"last ring\0",
+        );
+        write_val::<u32>(
+            base,
+            last_ring + std::mem::offset_of!(SutCrumbRing, count),
+            1,
+        );
+        write_val::<u32>(
+            base,
+            last_ring + std::mem::offset_of!(SutCrumbRing, write_idx),
+            1,
+        );
+        store_u32_release(base, ring_count, u32::try_from(CRUMB_MAX_THREADS).unwrap());
+    }
+
+    let accepted = snapshot(&shm).read_breadcrumbs();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0].timestamp_ns, 777);
+
+    unsafe {
+        store_u32_release(
+            shm.base_ptr(),
+            ring_count,
+            u32::try_from(CRUMB_MAX_THREADS).unwrap() + 1,
+        );
+    }
+    assert!(snapshot(&shm).read_breadcrumbs().is_empty());
+}
+
+#[test]
+fn test_invalid_breadcrumb_values_drop_only_the_malformed_entries() {
+    assert_eq!(CRUMB_CATEGORY_MAX, 10);
+    assert_eq!(CRUMB_SEVERITY_INFO, 0);
+    assert_eq!(CRUMB_SEVERITY_WARN, 1);
+    assert_eq!(CRUMB_SEVERITY_ERROR, 2);
+    assert_eq!(CRUMB_SEVERITY_MAX, CRUMB_SEVERITY_ERROR);
+
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let ring0 = SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, rings);
+    let buffer = ring0 + std::mem::offset_of!(SutCrumbRing, buf);
+    let entries = [
+        BreadcrumbWireFixture {
+            timestamp_ns: 10,
+            category: 0,
+            severity: CRUMB_SEVERITY_INFO,
+            file: b"first.c\0",
+            message: b"first\0",
+        },
+        BreadcrumbWireFixture {
+            timestamp_ns: 20,
+            category: CRUMB_CATEGORY_MAX + 1,
+            severity: CRUMB_SEVERITY_INFO,
+            file: b"cat.c\0",
+            message: b"bad category\0",
+        },
+        BreadcrumbWireFixture {
+            timestamp_ns: 30,
+            category: CRUMB_CATEGORY_MAX,
+            severity: CRUMB_SEVERITY_MAX,
+            file: b"stable.c\0",
+            message: b"stable\0",
+        },
+        BreadcrumbWireFixture {
+            timestamp_ns: 40,
+            category: 0,
+            severity: CRUMB_SEVERITY_MAX + 1,
+            file: b"sev.c\0",
+            message: b"bad severity\0",
+        },
+        BreadcrumbWireFixture {
+            timestamp_ns: 50,
+            category: 0,
+            severity: CRUMB_SEVERITY_INFO,
+            file: b"\xff\0",
+            message: b"bad file\0",
+        },
+        BreadcrumbWireFixture {
+            timestamp_ns: 60,
+            category: 0,
+            severity: CRUMB_SEVERITY_INFO,
+            file: b"msg.c\0",
+            message: &[b'M'; BREADCRUMB_MESSAGE_LEN],
+        },
+    ];
+    unsafe {
+        let base = shm.base_ptr();
+        for (index, entry) in entries.iter().enumerate() {
+            write_breadcrumb_wire(
+                base,
+                buffer + index * size_of::<SutBreadcrumb>(),
+                entry.timestamp_ns,
+                entry.category,
+                entry.severity,
+                entry.file,
+                entry.message,
+            );
+        }
+        let entry_count = u32::try_from(entries.len()).expect("fixture count fits u32");
+        write_val::<u32>(
+            base,
+            ring0 + std::mem::offset_of!(SutCrumbRing, count),
+            entry_count,
+        );
+        write_val::<u32>(
+            base,
+            ring0 + std::mem::offset_of!(SutCrumbRing, write_idx),
+            entry_count,
+        );
+        write_val::<u32>(
+            base,
+            SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, ring_count),
+            1,
+        );
+    }
+
+    let owned = snapshot(&shm);
+    let breadcrumbs = owned.read_breadcrumbs();
+    assert_eq!(
+        breadcrumbs
+            .iter()
+            .map(|breadcrumb| breadcrumb.timestamp_ns)
+            .collect::<Vec<_>>(),
+        vec![10, 30]
+    );
+    assert_eq!(breadcrumbs[1].file, "stable.c");
+    assert_eq!(breadcrumbs[1].message, "stable");
+
+    let malformed_file = buffer - SECTION2_OFFSET
+        + 4 * size_of::<SutBreadcrumb>()
+        + std::mem::offset_of!(SutBreadcrumb, file);
+    assert_eq!(owned.raw_breadcrumb_bytes_owned()[malformed_file], 0xff);
 }
 
 #[test]

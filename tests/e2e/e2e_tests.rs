@@ -204,6 +204,23 @@ fn test_e2e_crash_sigsegv() {
     assert_eq!(json["termination"]["signal"], SIGSEGV_NUMBER);
     assert!(json["termination"]["core_dumped"].is_boolean());
     assert!(json["termination"]["runtime_ms"].as_u64().is_some());
+
+    let breadcrumbs = json["breadcrumbs"]
+        .as_array()
+        .expect("v3 C producer breadcrumb payload");
+    assert!(
+        breadcrumbs.iter().any(|breadcrumb| {
+            breadcrumb["cat"] == "LIFECYCLE"
+                && breadcrumb["sev"] == "INFO"
+                && breadcrumb["file"] == "crash_app.c"
+                && breadcrumb["msg"] == "scenario=sigsegv"
+        }),
+        "expected schema-v3 C producer breadcrumb, got {breadcrumbs:?}"
+    );
+    assert_eq!(
+        json["crash_context"]["annotations"]["active_tool"], "e2e_producer",
+        "schema-v3 C producer context must survive strict wire validation"
+    );
 }
 
 #[test]

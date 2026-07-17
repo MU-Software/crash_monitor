@@ -22,8 +22,10 @@ fn main() {
         // Only our shm types/constants — never drag in system headers.
         .allowlist_type("sut_.*")
         .allowlist_var("SUT_.*")
-        // The breadcrumb category enum is unused in Rust (category is read as
-        // u16); blocklisting it drops bindgen's redundant typedef alias.
+        // The breadcrumb category typedef is unused in Rust (its wire value is
+        // copied as u16 and validated before constructing owned values), so
+        // blocklisting it drops bindgen's redundant alias. Severity is defined
+        // by fixed-width SUT_* macros so its constants remain generated.
         .blocklist_type("sut_crumb_category.*")
         // No Default derive; owned snapshots are decoded from checked byte
         // ranges instead of materializing bindgen-generated C structs.

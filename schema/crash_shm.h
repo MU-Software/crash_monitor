@@ -14,7 +14,6 @@
 #define CRASH_SHM_H_
 
 #include <stddef.h>
-#include <stdbool.h>
 #include <stdint.h>
 
 /* Fields accessed atomically remain plain fixed-width integers in this layout
@@ -24,7 +23,7 @@
 
 /* ── Region header — 64 bytes, initialized by the monitor ── */
 #define SUT_SHM_MAGIC   0x434D4F4Eu /* "CMON" (Crash MONitor) */
-#define SUT_SHM_VERSION 2u
+#define SUT_SHM_VERSION 3u
 #define SUT_SHM_CANARY  0xDEADBEEFu
 #define SUT_SHM_TOTAL_SIZE 50033364u
 
@@ -63,6 +62,8 @@ _Static_assert(offsetof(sut_shm_header_t, attachments_generation) == 40,
                "attachments generation offset changed");
 
 /* ── Breadcrumb category ── */
+#define SUT_CRUMB_CATEGORY_MAX 10u
+
 typedef enum sut_crumb_category {
     SUT_CRUMB_CAT_TOOL = 0,
     SUT_CRUMB_CAT_WORLD,
@@ -74,16 +75,31 @@ typedef enum sut_crumb_category {
     SUT_CRUMB_CAT_MEMORY,
     SUT_CRUMB_CAT_THREAD,
     SUT_CRUMB_CAT_LIFECYCLE,
-    SUT_CRUMB_CAT_USER,
+    SUT_CRUMB_CAT_USER = SUT_CRUMB_CATEGORY_MAX,
 } sut_crumb_category_t;
+
+_Static_assert(SUT_CRUMB_CAT_TOOL == 0, "breadcrumb category minimum changed");
+_Static_assert(SUT_CRUMB_CAT_USER == SUT_CRUMB_CATEGORY_MAX,
+               "breadcrumb category maximum changed");
+
+/* ── Breadcrumb severity (fixed-width wire values) ── */
+#define SUT_CRUMB_SEV_INFO      0u
+#define SUT_CRUMB_SEV_WARN      1u
+#define SUT_CRUMB_SEV_ERROR     2u
+#define SUT_CRUMB_SEVERITY_MAX SUT_CRUMB_SEV_ERROR
+
+_Static_assert(SUT_CRUMB_SEV_INFO == 0, "breadcrumb INFO severity changed");
+_Static_assert(SUT_CRUMB_SEV_WARN == 1, "breadcrumb WARN severity changed");
+_Static_assert(SUT_CRUMB_SEV_ERROR == SUT_CRUMB_SEVERITY_MAX,
+               "breadcrumb severity maximum changed");
 
 /* ── Breadcrumb entry — 64-byte fixed stride ── */
 typedef struct sut_breadcrumb {
     uint64_t timestamp_ns; /* monotonic nanoseconds */
     uint32_t thread_id;    /* Mach thread ID (macOS) or pthread ID */
     uint16_t category;     /* sut_crumb_category_t */
-    uint16_t severity;     /* SUT_CRUMB_SEV_INFO / WARN / ERROR */
-    char file[16];         /* __FILE__ last 16 chars (path stripped) */
+    uint16_t severity;     /* SUT_CRUMB_SEV_* */
+    char file[16];         /* basename tail: at most 15 UTF-8 bytes plus NUL */
     uint16_t line;         /* __LINE__ */
     uint16_t _pad;
     char message[28]; /* snprintf-formatted short description */
@@ -143,7 +159,7 @@ typedef struct sut_crash_context {
     char app_version[16];
     uint32_t build_number;
     char git_hash[16];
-    bool git_dirty;
+    uint8_t git_dirty; /* wire boolean: 0 is false; every nonzero value is true */
     char build_type[16];
     char build_preset[16];
     char build_timestamp[24];
@@ -158,6 +174,8 @@ typedef struct sut_crash_context {
 _Static_assert(sizeof(sut_crash_context_t) == 1760, "sut_crash_context_t size changed");
 _Static_assert(offsetof(sut_crash_context_t, heartbeat_counter) == 0,
                "heartbeat counter offset changed");
+_Static_assert(offsetof(sut_crash_context_t, git_dirty) == 92,
+               "git_dirty offset changed");
 _Static_assert(offsetof(sut_crash_context_t, annotation_count) == 216,
                "annotation count offset changed");
 

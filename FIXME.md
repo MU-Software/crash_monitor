@@ -96,12 +96,12 @@
 
 ### P0-09. 신뢰하지 못하는 SHM 값을 Rust validity invariant에 맞게 검증한다
 
-- [ ] C `bool`인 `git_dirty`를 wire schema에서 `uint8_t`로 바꾸고 Rust에서 명시적으로 변환한다.
-- [ ] untrusted `git_dirty` byte를 Rust `bool`로 구체화하지 않고 먼저 integer로 읽는다.
-- [ ] `git_dirty`의 wire contract를 `0=false`, non-zero=`true`로 정의하고 0, 1, 2, 255를 테스트한다.
-- [ ] category/severity 같은 wire integer는 복사 후 semantic range를 검증하고, C char array는 bounded NUL/string/control-character 규칙으로 별도 처리한다.
-- [ ] 범위 밖 semantic value와 손상된 문자열을 포함한 malformed SHM 테스트를 추가한다.
-- [ ] schema 변경에 맞춰 version을 올리고 producer compatibility 정책을 문서화한다.
+- [x] C `bool`인 `git_dirty`를 wire schema에서 `uint8_t`로 바꾸고 Rust에서 명시적으로 변환한다.
+- [x] untrusted `git_dirty` byte를 Rust `bool`로 구체화하지 않고 먼저 integer로 읽는다.
+- [x] `git_dirty`의 wire contract를 `0=false`, non-zero=`true`로 정의하고 0, 1, 2, 255를 테스트한다.
+- [x] category/severity 같은 wire integer는 복사 후 semantic range를 검증하고, C char array는 bounded NUL/string/control-character 규칙으로 별도 처리한다.
+- [x] 범위 밖 semantic value와 손상된 문자열을 포함한 malformed SHM 테스트를 추가한다.
+- [x] schema 변경에 맞춰 version을 올리고 producer compatibility 정책을 문서화한다.
 
 범위: `schema/crash_shm.h`, `src/shm/reader.rs`.
 

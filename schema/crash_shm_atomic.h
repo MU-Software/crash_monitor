@@ -11,6 +11,7 @@
 
 #include "crash_shm.h"
 
+#include <stdbool.h>
 #include <stdatomic.h>
 
 #if !defined(__clang__) && !defined(__GNUC__)

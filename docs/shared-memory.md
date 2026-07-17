@@ -10,7 +10,7 @@ atomic alignment, schema version, and memory ordering.
 [`schema/crash_shm.h`](../schema/crash_shm.h) is the authoritative layout. It
 defines the 64-byte header, breadcrumb rings, crash context, settings,
 attachments, screenshots, and their fixed-size constants. The current ABI is
-**schema version 2**.
+**schema version 3**.
 
 - C producers include `crash_shm.h` and use the publication helpers in
   [`schema/crash_shm_atomic.h`](../schema/crash_shm_atomic.h).
@@ -21,8 +21,11 @@ attachments, screenshots, and their fixed-size constants. The current ABI is
   operations to be always lock-free.
 
 A producer must verify both `SUT_SHM_MAGIC` and the exact `SUT_SHM_VERSION`
-before deriving payload addresses or writing anything. A version mismatch is
-not a best-effort compatibility mode: the producer must leave the region alone.
+before deriving payload addresses or writing anything. The monitor likewise
+accepts only its exact schema version. Version 3 rejects version 1 and version 2
+regions, and a version 3 producer must not write either older version. There is
+no fallback based on common sizes or preserved offsets: on any version mismatch,
+the producer leaves the region alone and the consumer omits its SHM payload.
 
 ## Region layout
 
@@ -32,9 +35,11 @@ The monitor creates and sizes the region. Sections remain back to back:
 [ Header ][ Breadcrumb state ][ Crash context ][ Settings ][ Attachments ][ Screenshots ][ Canary ]
 ```
 
-The screenshot ring dominates the roughly 50 MB region. Schema v2 reuses
-previously reserved words for generations, so the 64-byte header, payload
-offsets, and total region size remain unchanged from version 1.
+The screenshot ring dominates the roughly 50 MB region. Schema v2 reused
+previously reserved words for generations. Schema v3 replaces the wire C
+`bool` with a fixed-width byte and adds semantic constants. The 64-byte header,
+every payload offset, and the total region size remain unchanged across versions
+1, 2, and 3, but that layout overlap does not make the versions compatible.
 
 ### Header (64 bytes)
 
@@ -51,6 +56,55 @@ schema. Besides immutable dimensions, it contains these publication words:
 Each generation starts at zero. Odd values mean a write is in progress and even
 values, including zero, are stable. Generation wraparound is allowed. Only the
 screenshot-slot protocol gives zero the additional meaning “unpublished.”
+
+## Wire-value validity
+
+Shared memory is untrusted input. Publication generations establish that a
+copied unit is stable; they do not make its integers or byte arrays valid Rust
+values. The consumer first copies wire integers as integers and validates their
+meaning before constructing a typed report value.
+
+`sut_crash_context_t.git_dirty` is a `uint8_t`, not a C `bool`. Its wire
+contract is `0` = false and every nonzero byte = true. Consumers therefore read
+the byte before converting it; values such as `1`, `2`, and `255` all mean true.
+
+Breadcrumb categories are the inclusive range `0..=SUT_CRUMB_CATEGORY_MAX`
+(`0..=10`). Severities are `SUT_CRUMB_SEV_INFO = 0`,
+`SUT_CRUMB_SEV_WARN = 1`, and `SUT_CRUMB_SEV_ERROR = 2`, with
+`SUT_CRUMB_SEVERITY_MAX = 2`. The producer writes only these schema constants.
+The consumer drops a breadcrumb entry whose category or severity is outside
+those ranges; it keeps other valid entries from the same ring.
+
+Section counts must also fit their declared arrays: `ring_count` is
+`0..=SUT_CRUMB_MAX_THREADS`, `annotation_count` is
+`0..=SUT_CRASH_MAX_ANNOTATIONS`, and attachment `count` is
+`0..=SUT_SHM_MAX_ATTACHMENTS`. An out-of-range value rejects the owning
+breadcrumb registry, context, or attachment section instead of being clamped
+into an apparently valid value. A ring's `count` and `write_idx` are different:
+they are monotonic publication counters, so wrap indexing and limiting the
+number of returned records to the ring capacity are valid operations.
+
+Every fixed-width C `char` array that is consumed as text follows one strict
+contract:
+
+1. A NUL byte must occur within that array's fixed bound. The consumer never
+   searches into the next field, and bytes after the first NUL are ignored.
+2. The bytes before that NUL must be valid UTF-8. There is no lossy decoding.
+3. The decoded text must contain no Unicode control character.
+
+Consequently, an `N`-byte array carries at most `N - 1` text bytes plus its NUL;
+for example, `file[16]` and `git_hash[16]` carry at most 15 bytes. Version 3
+deliberately rejects producers that filled every byte without a terminator,
+including older exact-width hashes or filenames. Attachment paths are also
+UTF-8 wire text, so a native Unix path containing non-UTF-8 bytes cannot be
+published through this typed field.
+
+If any check fails, the consumer omits the owning typed unit rather than
+constructing a partial or replacement-character value. Thus an invalid
+breadcrumb file/message drops that breadcrumb, an invalid context or settings
+string omits that typed section, and an invalid attachment label/path omits that
+attachment slot. Independent stable units remain available. Raw owned-snapshot
+sanitization for torn generations is a separate publication-integrity rule.
 
 ## Capture ownership boundary
 

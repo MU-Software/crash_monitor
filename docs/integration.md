@@ -28,8 +28,10 @@ At startup the child should:
 1. Read `CRASH_MONITOR_SHM` from its environment — the monitor sets it to the
    region name before `exec`.
 2. `shm_open` + `mmap` the complete schema-sized region, then verify both the
-   header magic and the exact `SUT_SHM_VERSION`. A version mismatch means the
-   producer must not derive payload addresses or write to the mapping.
+   header magic and the exact `SUT_SHM_VERSION`. The current schema is version
+   3; version 1 and version 2 are rejected with no fallback, even though their
+   total size and many offsets are unchanged. A mismatch means the producer
+   must not derive payload addresses or write to the mapping.
 3. Write into the shared sections using the acquire/release and nonblocking
    seqlock helpers from `schema/crash_shm_atomic.h` (see
    [shared-memory.md](shared-memory.md)):
@@ -42,6 +44,24 @@ At startup the child should:
 
 Everything here is best-effort: if the mapping fails the app runs normally and
 the monitor still produces crash/thread/memory reports.
+
+All producer text fields are fixed-width C arrays. Each value must include a
+NUL within its own array bound; the bytes before it must be valid UTF-8 and must
+not contain Unicode control characters. The consumer omits a malformed typed
+unit. `git_dirty` is the fixed-width `uint8_t` wire boolean: zero means false and
+every nonzero value means true. Breadcrumb producers use the schema's category
+range `0..=SUT_CRUMB_CATEGORY_MAX` and the `SUT_CRUMB_SEV_*` constants; the
+consumer drops an entry with an out-of-range category or severity. See the
+[wire-value validity contract](shared-memory.md#wire-value-validity) for the
+complete consumer policy.
+
+Keep `ring_count`, `annotation_count`, and attachment `count` within their
+schema maxima. The consumer rejects the owning registry, context, or attachment
+section when one of these array bounds is invalid; it does not clamp the value.
+
+An `N`-byte text field therefore holds at most `N - 1` bytes plus its NUL. Do
+not publish an exact-width unterminated hash, filename, or path; attachment paths
+must also be representable as UTF-8.
 
 ## Data directory
 

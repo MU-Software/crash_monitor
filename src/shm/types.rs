@@ -44,6 +44,11 @@ pub const SHM_CANARY: u32 = ffi::SUT_SHM_CANARY;
 // Schema-derived from crash_shm.h #defines (via bindgen).
 pub const CRUMB_RING_CAPACITY: usize = ffi::SUT_CRUMB_RING_CAPACITY as usize;
 pub const CRUMB_MAX_THREADS: usize = ffi::SUT_CRUMB_MAX_THREADS as usize;
+pub const CRUMB_CATEGORY_MAX: u16 = checked_wire_u16(ffi::SUT_CRUMB_CATEGORY_MAX);
+pub const CRUMB_SEVERITY_INFO: u16 = checked_wire_u16(ffi::SUT_CRUMB_SEV_INFO);
+pub const CRUMB_SEVERITY_WARN: u16 = checked_wire_u16(ffi::SUT_CRUMB_SEV_WARN);
+pub const CRUMB_SEVERITY_ERROR: u16 = checked_wire_u16(ffi::SUT_CRUMB_SEV_ERROR);
+pub const CRUMB_SEVERITY_MAX: u16 = checked_wire_u16(ffi::SUT_CRUMB_SEVERITY_MAX);
 pub const MAX_ANNOTATIONS: usize = ffi::SUT_CRASH_MAX_ANNOTATIONS as usize;
 pub const MAX_ATTACHMENTS: usize = ffi::SUT_SHM_MAX_ATTACHMENTS as usize;
 pub const SCREENSHOT_SLOTS: u32 = ffi::SUT_SCREENSHOT_SLOTS;
@@ -51,6 +56,18 @@ pub const SCREENSHOT_WIDTH: u32 = ffi::SUT_SCREENSHOT_WIDTH;
 pub const SCREENSHOT_HEIGHT: u32 = ffi::SUT_SCREENSHOT_HEIGHT;
 pub const SCREENSHOT_BYTES_PER_SLOT: usize =
     (SCREENSHOT_WIDTH as usize) * (SCREENSHOT_HEIGHT as usize) * 4;
+
+const fn checked_wire_u16(value: u32) -> u16 {
+    assert!(value <= 65_535);
+    #[allow(clippy::cast_possible_truncation)] // guarded by the const assertion above
+    {
+        value as u16
+    }
+}
+
+const _: () = assert!(CRUMB_SEVERITY_INFO == 0);
+const _: () = assert!(CRUMB_SEVERITY_WARN == 1);
+const _: () = assert!(CRUMB_SEVERITY_ERROR == CRUMB_SEVERITY_MAX);
 
 // ═══════════════════════════════════════════════════
 //  Compile-time layout assertions (validate the bindgen output)
@@ -72,6 +89,7 @@ const _: () = assert!(size_of::<SutCrumbState>() == 262_280);
 const _: () = assert!(offset_of!(SutCrumbState, ring_count) == 262_272);
 const _: () = assert!(size_of::<SutCrashAnnotation>() == 96);
 const _: () = assert!(size_of::<SutCrashContext>() == 1760);
+const _: fn(SutCrashContext) -> u8 = |context| context.git_dirty;
 const _: () = assert!(size_of::<SutCrashSettingsSnapshot>() == 160);
 const _: () = assert!(size_of::<ShmAttachmentSlot>() == 288);
 const _: () = assert!(size_of::<ShmAttachmentSection>() == 1160);
