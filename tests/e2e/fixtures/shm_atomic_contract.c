@@ -25,6 +25,13 @@ int main(void) {
     sut_shm_atomic_u64_store_release(&value64, UINT64_C(0x0123456789ABCDEF));
     CHECK(sut_shm_atomic_u64_load_acquire(&value64) == UINT64_C(0x0123456789ABCDEF));
 
+    sut_shm_header_t header = {0};
+    sut_crash_context_t context = {0};
+    sut_shm_atomic_u64_store_release(&context.heartbeat_counter, 0);
+    sut_shm_atomic_u32_store_release(&header.producer_ready, SUT_SHM_PRODUCER_READY);
+    CHECK(sut_shm_atomic_u32_load_acquire(&header.producer_ready) == SUT_SHM_PRODUCER_READY);
+    CHECK(sut_shm_atomic_u64_load_acquire(&context.heartbeat_counter) == 0);
+
     uint32_t generation = 0;
     uint32_t odd_generation = 0;
     CHECK(sut_shm_seqlock_try_begin(&generation, &odd_generation));

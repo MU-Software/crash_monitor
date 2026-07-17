@@ -11,7 +11,8 @@ use nix::libc;
 use crate::shm::SharedMemory;
 use crate::shm::types::{
     CRUMB_MAX_THREADS, CRUMB_RING_CAPACITY, FOOTER_OFFSET, SCREENSHOT_HEIGHT, SCREENSHOT_SLOTS,
-    SCREENSHOT_WIDTH, SHM_CANARY, SHM_MAGIC, SHM_TOTAL_SIZE, SHM_VERSION, ShmHeader,
+    SCREENSHOT_WIDTH, SHM_CANARY, SHM_MAGIC, SHM_PRODUCER_NOT_READY, SHM_TOTAL_SIZE, SHM_VERSION,
+    ShmHeader,
 };
 
 /// Create a new POSIX shared memory region for the given monitor PID.
@@ -102,6 +103,7 @@ pub fn create_shared_memory(monitor_pid: u32) -> Result<SharedMemory, String> {
         (*header).context_generation = 0;
         (*header).settings_generation = 0;
         (*header).attachments_generation = 0;
+        (*header).producer_ready = SHM_PRODUCER_NOT_READY;
     }
 
     // Write canary

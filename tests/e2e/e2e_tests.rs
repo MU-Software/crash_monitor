@@ -113,6 +113,29 @@ fn find_all_reports(dir: &Path) -> Vec<PathBuf> {
     find_reports(dir, "")
 }
 
+/// List every file left anywhere in the crash artifact lifecycle tree.
+fn find_all_crash_artifacts(data_dir: &Path) -> Vec<PathBuf> {
+    let mut pending_dirs = vec![data_dir.join("crashes")];
+    let mut artifacts = Vec::new();
+
+    while let Some(dir) = pending_dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending_dirs.push(path);
+            } else {
+                artifacts.push(path);
+            }
+        }
+    }
+
+    artifacts.sort();
+    artifacts
+}
+
 /// Check prerequisites. Skip test if binaries don't exist or lack entitlements.
 fn check_prerequisites() -> bool {
     let monitor = monitor_path();
@@ -225,7 +248,7 @@ fn test_e2e_crash_sigsegv() {
     assert!(json["termination"]["runtime_ms"].as_u64().is_some());
     let breadcrumbs = json["breadcrumbs"]
         .as_array()
-        .expect("v3 C producer breadcrumb payload");
+        .expect("v4 C producer breadcrumb payload");
     assert!(
         breadcrumbs.iter().any(|breadcrumb| {
             breadcrumb["cat"] == "LIFECYCLE"
@@ -233,11 +256,11 @@ fn test_e2e_crash_sigsegv() {
                 && breadcrumb["file"] == "crash_app.c"
                 && breadcrumb["msg"] == "scenario=sigsegv"
         }),
-        "expected schema-v3 C producer breadcrumb, got {breadcrumbs:?}"
+        "expected schema-v4 C producer breadcrumb, got {breadcrumbs:?}"
     );
     assert_eq!(
         json["crash_context"]["annotations"]["active_tool"], "e2e_producer",
-        "schema-v3 C producer context must survive strict wire validation"
+        "schema-v4 C producer context must survive strict wire validation"
     );
 }
 
@@ -441,6 +464,36 @@ fn test_e2e_nonexistent_executable_is_monitor_failure() {
     assert!(
         find_all_reports(&archive).is_empty(),
         "monitor-internal exec failure must not produce a child termination report"
+    );
+}
+
+#[test]
+fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
+    if !check_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+
+    let output = monitor_cmd(data_dir.path())
+        .env("CRASH_MONITOR_ANR_WARMUP_MS", "100")
+        .env("CRASH_MONITOR_ANR_THRESHOLD_MS", "100")
+        .env("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", "50")
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("uninstrumented")
+        .output()
+        .expect("failed to run crash_monitor");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "uninstrumented child should exit cleanly; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let artifacts = find_all_crash_artifacts(data_dir.path());
+    assert!(
+        artifacts.is_empty(),
+        "uninstrumented child must not leave ANR or termination artifacts: {artifacts:?}"
     );
 }
 

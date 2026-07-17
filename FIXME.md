@@ -107,11 +107,11 @@
 
 ### P0-10. producer readiness와 monitor 시간을 ANR에서 분리한다
 
-- [ ] `producer_ready` handshake 또는 명시적인 ANR opt-in을 도입한다.
-- [ ] 최초 heartbeat publication 전에는 watchdog을 시작하지 않는다.
-- [ ] monitor가 child를 suspend하거나 pipeline을 처리한 시간은 hang duration에서 제외한다.
-- [ ] event 처리 후 heartbeat 기준 시각/accumulator를 안전하게 재설정한다.
-- [ ] SHM 미연동 장기 실행 child와 느린 snapshot 직후의 false ANR 회귀 테스트를 추가한다.
+- [x] `producer_ready` handshake 또는 명시적인 ANR opt-in을 도입한다.
+- [x] 최초 heartbeat publication 전에는 watchdog을 시작하지 않는다.
+- [x] monitor가 child를 suspend하거나 pipeline을 처리한 시간은 hang duration에서 제외한다.
+- [x] event 처리 후 heartbeat 기준 시각/accumulator를 안전하게 재설정한다.
+- [x] SHM 미연동 장기 실행 child와 느린 snapshot 직후의 false ANR 회귀 테스트를 추가한다.
 
 범위: `src/main.rs`, `src/event_loop.rs`, `src/watchdog.rs`.
 

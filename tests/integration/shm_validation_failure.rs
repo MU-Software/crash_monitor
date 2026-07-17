@@ -132,6 +132,7 @@ fn test_exact_old_and_future_schema_versions_are_rejected() {
     for version in [
         1,
         2,
+        3,
         SHM_VERSION.checked_add(1).expect("future schema version"),
     ] {
         let shm = SharedMemory::create(unique_pid()).expect("shm create");

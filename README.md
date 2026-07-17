@@ -1,11 +1,11 @@
 # crash_monitor
 
 Out-of-process crash monitor for native macOS applications. It launches a target
-program as a child, watches it over a Mach exception port and a shared-memory
-heartbeat, and on a crash, hang, or manual snapshot captures full per-thread
-diagnostic state into a JSON report — then provides offline CLI tools to inspect
-it. Running out-of-process means the reporter still works when the target's own
-address space is corrupt.
+program as a child, watches it over a Mach exception port and an explicitly
+enabled shared-memory heartbeat, and on a crash, hang, or manual snapshot
+captures full per-thread diagnostic state into a JSON report — then provides
+offline CLI tools to inspect it. Running out-of-process means the reporter still
+works when the target's own address space is corrupt.
 
 ## How it works
 
@@ -13,7 +13,7 @@ address space is corrupt.
 crash_monitor (parent)  ──fork+exec──▶  target app (child)
   Mach exception port                     maps POSIX shared memory
   SIGUSR1 snapshot listener               writes breadcrumbs / context / heartbeat
-  ANR watchdog (heartbeat poll)           (via the shared schema — see docs)
+  ANR watchdog (ready + heartbeat poll)   (via the shared schema — see docs)
   plugin pipeline → JSON report
 ```
 

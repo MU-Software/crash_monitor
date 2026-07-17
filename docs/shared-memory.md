@@ -10,7 +10,7 @@ atomic alignment, schema version, and memory ordering.
 [`schema/crash_shm.h`](../schema/crash_shm.h) is the authoritative layout. It
 defines the 64-byte header, breadcrumb rings, crash context, settings,
 attachments, screenshots, and their fixed-size constants. The current ABI is
-**schema version 3**.
+**schema version 4**.
 
 - C producers include `crash_shm.h` and use the publication helpers in
   [`schema/crash_shm_atomic.h`](../schema/crash_shm_atomic.h).
@@ -22,10 +22,10 @@ attachments, screenshots, and their fixed-size constants. The current ABI is
 
 A producer must verify both `SUT_SHM_MAGIC` and the exact `SUT_SHM_VERSION`
 before deriving payload addresses or writing anything. The monitor likewise
-accepts only its exact schema version. Version 3 rejects version 1 and version 2
-regions, and a version 3 producer must not write either older version. There is
-no fallback based on common sizes or preserved offsets: on any version mismatch,
-the producer leaves the region alone and the consumer omits its SHM payload.
+accepts only its exact schema version. Version 4 rejects versions 1, 2, and 3,
+and a version 4 producer must not write an older version. There is no fallback
+based on common sizes or preserved offsets: on any version mismatch, the
+producer leaves the region alone and the consumer omits its SHM payload.
 Producer and monitor releases therefore have to upgrade in lockstep. In
 particular, a legacy producer that ignores the version cannot be made safe by a
 new monitor merely placing a newer version in the monitor-owned header; mixing
@@ -42,9 +42,10 @@ The monitor creates and sizes the region. Sections remain back to back:
 The screenshot ring dominates the roughly 50 MB region. Schema v2 reused
 reserved or padding words and also changed the meaning of the former header
 offset-16 `ring_count` and screenshot `valid` words. Schema v3 replaces the wire
-C `bool` with a fixed-width byte and adds semantic constants. The 64-byte header,
-every payload offset, and the total region size remain unchanged across versions
-1, 2, and 3, but the publication semantics are intentionally incompatible.
+C `bool` with a fixed-width byte and adds semantic constants. Schema v4 uses a
+reserved header word for producer readiness. The 64-byte header, every payload
+offset, and the total region size remain unchanged across versions 1 through 4,
+but the publication semantics are intentionally incompatible.
 
 ### Header (64 bytes)
 
@@ -57,10 +58,15 @@ schema. Besides immutable dimensions, it contains these publication words:
 | 32 | `context_generation` | crash context except heartbeat |
 | 36 | `settings_generation` | settings snapshot |
 | 40 | `attachments_generation` | attachment section |
+| 44 | `producer_ready` | ANR opt-in after the first heartbeat publication |
 
-Each generation starts at zero. Odd values mean a write is in progress and even
-values, including zero, are stable. Generation wraparound is allowed. Only the
-screenshot-slot protocol gives zero the additional meaning “unpublished.”
+The first four rows are generations: zero is stable, odd values mean a write is
+in progress, and nonzero even values are stable. Generation wraparound is
+allowed. Only the screenshot-slot protocol gives zero the additional meaning
+“unpublished.” `producer_ready` is not a generation. It is a monotonic atomic
+handshake whose only valid values are `SUT_SHM_PRODUCER_NOT_READY = 0` and
+`SUT_SHM_PRODUCER_READY = 1`; every other untrusted value is treated as not
+ready.
 
 ## Wire-value validity
 
@@ -98,9 +104,10 @@ contract:
 3. The decoded text must contain no Unicode control character.
 
 Consequently, an `N`-byte array carries at most `N - 1` text bytes plus its NUL;
-for example, `file[16]` and `git_hash[16]` carry at most 15 bytes. Version 3
-deliberately rejects producers that filled every byte without a terminator,
-including older exact-width hashes or filenames. Attachment paths are also
+for example, `file[16]` and `git_hash[16]` carry at most 15 bytes. This strict
+rule was introduced in version 3 and remains part of version 4; it rejects
+producers that fill every byte without a terminator, including older exact-width
+hashes or filenames. Attachment paths are also
 UTF-8 wire text, so a native Unix path containing non-UTF-8 bytes cannot be
 published through this typed field.
 
@@ -128,8 +135,8 @@ or Stage 1 persistence, the monitor sanitizes that unit in the owned snapshot so
 torn payload bytes are not retained in either output path.
 
 If suspension fails under the fatal-crash best-effort policy, the monitor skips
-all non-atomic SHM payload reads. The watchdog heartbeat is the sole live-state
-exception and uses its dedicated atomic API.
+all non-atomic SHM payload reads. The watchdog readiness/heartbeat pair is the
+sole live-state exception and uses a dedicated ordered atomic API.
 
 ## Publication protocol
 
@@ -176,9 +183,20 @@ session, build identity, annotation count, and annotation payload, then ends the
 generation. An odd or changed value drops the context as one unit.
 
 The heartbeat is deliberately independent because the watchdog must observe it
-while the child is running. The producer release-stores an aligned `uint64_t`;
-the monitor acquire-loads the matching aligned Rust `AtomicU64`. A heartbeat
-operation publishes no other context field and does not participate in
+while the child is running. ANR monitoring is explicitly producer-owned:
+
+1. The producer release-stores its first aligned `uint64_t` heartbeat. The
+   initial value may be zero.
+2. Once the heartbeat source can continue running, the producer release-stores
+   `SUT_SHM_PRODUCER_READY` to `header.producer_ready` and never clears it.
+3. The producer continues release-storing heartbeat updates from the observed
+   application loop.
+
+The monitor acquire-loads readiness first and arms the watchdog only for the
+exact ready value. It then acquire-loads the matching Rust `AtomicU64`. The
+first ready observation establishes only the heartbeat baseline; elapsed time
+from before readiness is never considered a hang. A heartbeat operation
+publishes no other context field and does not participate in
 `context_generation`.
 
 ### Settings
@@ -220,7 +238,8 @@ operations:
 - C uses the acquire/release and seqlock helpers in `crash_shm_atomic.h`.
 - Rust uses aligned `AtomicU32`/`AtomicU64` acquire and release operations.
 - The Rust whole-mapping copy is split around every atomic word; ordinary raw
-  copy instructions never read a generation, `ring_count`, or heartbeat word.
+  copy instructions never read a generation, readiness, `ring_count`, or
+  heartbeat word.
 - The ABI is accepted only when atomic size and alignment match the underlying
   integer and the target reports the operations as always lock-free.
 
@@ -232,7 +251,8 @@ neither makes a cross-process data race safe nor detects torn multi-field data.
 A producer reads `CRASH_MONITOR_SHM`, opens and maps that name, checks the
 mapping size plus header magic/version, and follows the publication sequence for
 every unit it writes. Nothing is mandatory: the monitor can still capture
-threads, memory, and images for a child that writes no SHM payload. Breadcrumbs,
-context, and a regularly advanced heartbeat make reports and ANR detection more
-useful. The standalone example is
+threads, memory, and images for a child that writes no SHM payload. ANR remains
+dormant for such a child. A producer opts into ANR only through the ordered first
+heartbeat plus `producer_ready` handshake above. Breadcrumbs and context remain
+independently optional. The standalone example is
 [`tests/e2e/fixtures/crash_app.c`](../tests/e2e/fixtures/crash_app.c).

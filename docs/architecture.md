@@ -11,7 +11,7 @@ producing a report. This is the core reason for the out-of-process design.
 ┌─ crash_monitor (parent) ─────────────┐        ┌─ target app (child) ─────────┐
 │  Mach exception port (crashes)       │        │  maps POSIX shared memory    │
 │  SIGUSR1 listener (manual snapshot)  │◀──shm──▶│  writes breadcrumbs/context  │
-│  ANR watchdog (heartbeat polling)    │        │  bumps the heartbeat counter │
+│  ANR watchdog (ready + heartbeat)    │        │  opts in, then bumps heartbeat│
 │  plugin pipeline → JSON report       │        │  (optionally) raises SIGUSR1 │
 └──────────────────────────────────────┘        └──────────────────────────────┘
              ▲  fork + exec, task port acquired, exception port pre-installed
@@ -35,7 +35,7 @@ All sources feed a single event loop as a `MonitorEvent`:
 |--------|-------|-------------|
 | Mach exception port | `Crash` (SIGSEGV/SIGBUS/SIGABRT/SIGFPE …) | `crash` |
 | `SIGUSR1` (self-pipe) | `Snapshot` | `snapshot` |
-| ANR watchdog (inline) | fired when the heartbeat counter stalls | `anr` |
+| ANR watchdog (inline) | fired when an opted-in producer's heartbeat stalls | `anr` |
 | `waitpid` | non-zero child exit | `exit_failure` |
 | `waitpid` | primary SIGKILL termination with OOM detection enabled | `oom` (probable OOM) |
 | `waitpid` | other primary signal termination | `signal_failure` |
@@ -44,11 +44,16 @@ A clean child exit ends the loop without a report. A Mach exception remains
 the primary `crash` incident; the later wait status is attached as termination
 metadata rather than firing a second waitpid-based report.
 
-The **ANR watchdog** is a pure state machine polled from the event loop: it
-reads the heartbeat counter from shared memory every *check interval*; if the
-value does not advance for the *threshold*, it emits an ANR event, then enters a
-cooldown. A *warmup* delay suppresses false positives during startup. All four
-timings are configurable (see [integration.md](integration.md)).
+The **ANR watchdog** is a pure state machine polled from the event loop. It stays
+disarmed until the producer release-publishes its first heartbeat and then the
+explicit `producer_ready` handshake. Once armed, it reads the heartbeat every
+*check interval*; if the value does not advance for the *threshold*, it emits an
+ANR event, then enters a cooldown. A *warmup* delay starts only after readiness.
+After synchronous Snapshot/ANR capture resumes the child, the event loop samples
+the heartbeat again and removes exactly the monitor-owned interval from the ANR
+clock. Unchanged-heartbeat stale time from before capture remains observable;
+heartbeat progress establishes a fresh baseline. All four timings are
+configurable (see [integration.md](integration.md)).
 
 The event loop is driven through an `EventSource` trait, so it can be exercised
 in-process with a synthetic source — no real child or Mach ports required.

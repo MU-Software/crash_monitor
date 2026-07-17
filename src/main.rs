@@ -491,7 +491,9 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     eprintln!("[monitor] Monitoring active. Press F8 in app for manual snapshot.");
 
     // ANR watchdog config (used inline by event_loop, no dedicated thread).
-    // Environment overrides allow E2E tests to use shorter timeouts.
+    // Configuration alone does not arm it: the child must publish its first
+    // heartbeat and the shared-memory producer-ready handshake. Environment
+    // overrides allow E2E tests to use shorter timeouts.
     let anr_config = pl
         .report_enabled(pipeline::ReportType::Anr)
         .then(|| event_loop::AnrConfig {

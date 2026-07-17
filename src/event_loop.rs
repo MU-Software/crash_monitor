@@ -16,7 +16,9 @@ use crate::pipeline::worker::{
 use crate::pipeline::{CaptureOutcome, CrashEvent, Pipeline, ReportType, TerminationReason};
 use crate::platform::macos::ReceivedMachMessage;
 use crate::shm::SharedMemory;
-use crate::watchdog::{WatchdogState, update_watchdog_state};
+use crate::watchdog::{
+    MonitorWorkRebase, WatchdogState, exclude_monitor_work_from_anr_clock, update_watchdog_state,
+};
 
 // ═══════════════════════════════════════════════════
 //  MonitorEvent + EventSource trait
@@ -265,11 +267,37 @@ fn finalize_contained_capture(pipeline: &Arc<Pipeline>, capture: CaptureOutcome)
     }
 }
 
+/// Finish ANR accounting for monitor-owned work that may have suspended the
+/// child. `CaptureWorker::capture` returns only after releasing its suspension
+/// guard, so the acquire sample below is the first post-resume observation.
+/// When the heartbeat is unchanged, pre-capture stale time remains valid and
+/// only the measured monitor interval is removed from the elapsed clock.
+fn finish_anr_monitor_work(
+    anr_state: Option<&mut WatchdogState>,
+    shm: Option<&SharedMemory>,
+    last_anr_check: &mut Instant,
+    monitor_work_started: Instant,
+) {
+    let (Some(state), Some(shm)) = (anr_state, shm) else {
+        return;
+    };
+    let rebase = state.rebase_after_monitor_work(shm.read_live_anr_heartbeat());
+    let monitor_work_finished = Instant::now();
+    *last_anr_check = match rebase {
+        MonitorWorkRebase::PreserveElapsed => exclude_monitor_work_from_anr_clock(
+            *last_anr_check,
+            monitor_work_started,
+            monitor_work_finished,
+        ),
+        MonitorWorkRebase::ResetElapsed => monitor_work_finished,
+    };
+}
+
 /// The extracted event loop. Returns a typed monitor outcome.
 ///
 /// ANR detection is integrated directly: if `shm` and `anr_config` are provided,
-/// the event loop polls the heartbeat counter and fires ANR events inline
-/// (no dedicated watchdog thread needed).
+/// the event loop waits for the producer-ready handshake, polls the heartbeat
+/// counter, and fires ANR events inline (no dedicated watchdog thread needed).
 /// Signal number for SIGKILL — used to identify probable OOM kills.
 const SIGKILL_NUM: i32 = 9;
 
@@ -284,21 +312,22 @@ pub fn event_loop(
     shm: Option<&Arc<SharedMemory>>,
     anr_config: Option<&AnrConfig>,
 ) -> EventLoopResult {
-    // Initialize ANR state if both shm and config are available
+    // Worker construction is monitor-owned setup time, so finish it before
+    // establishing the first ANR heartbeat/time baseline.
+    let mut capture_worker = CaptureWorker::start(pipeline.clone());
+    let background_worker = BackgroundFinalizeWorker::start(pipeline.clone());
+
+    // Initialize ANR state only when both SHM and config are available. A
+    // zeroed, unclaimed mapping yields `None` and remains unarmed until the
+    // producer publishes its readiness handshake.
     let mut anr_state = match (pipeline.report_enabled(ReportType::Anr), &shm, &anr_config) {
-        (true, Some(s), Some(cfg)) => Some((
-            WatchdogState {
-                prev_heartbeat: s.read_live_heartbeat(),
-                hang_accumulated_ms: 0,
-                cooldown_remaining_ms: 0,
-            },
+        (true, Some(s), Some(cfg)) => Some(WatchdogState::new(
             cfg.warmup_ms,
+            s.read_live_anr_heartbeat(),
         )),
         _ => None,
     };
     let mut last_anr_check = Instant::now();
-    let mut capture_worker = CaptureWorker::start(pipeline.clone());
-    let background_worker = BackgroundFinalizeWorker::start(pipeline.clone());
 
     loop {
         match source.poll() {
@@ -373,6 +402,7 @@ pub fn event_loop(
                 if !pipeline.report_enabled(ReportType::Snapshot) {
                     continue;
                 }
+                let monitor_work_started = Instant::now();
                 let event = CrashEvent {
                     report_type: ReportType::Snapshot,
                     exception_type: None,
@@ -401,6 +431,12 @@ pub fn event_loop(
                 if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {
                     let _ = background_worker.try_submit(captured);
                 }
+                finish_anr_monitor_work(
+                    anr_state.as_mut(),
+                    shm.map(Arc::as_ref),
+                    &mut last_anr_check,
+                    monitor_work_started,
+                );
             }
 
             Some(MonitorEvent::ChildTerminated(reason)) => {
@@ -427,62 +463,64 @@ pub fn event_loop(
 
             None => {
                 // ── Inline ANR check ──
-                if let (Some((state, warmup_remaining)), Some(s), Some(cfg)) =
-                    (&mut anr_state, &shm, &anr_config)
-                {
+                if let (Some(state), Some(s), Some(cfg)) = (&mut anr_state, &shm, &anr_config) {
                     #[allow(clippy::cast_possible_truncation)]
                     let elapsed = last_anr_check.elapsed().as_millis() as u64;
                     if elapsed >= cfg.check_interval_ms {
+                        let heartbeat = s.read_live_anr_heartbeat();
+                        let detected = update_watchdog_state(
+                            state,
+                            heartbeat,
+                            elapsed,
+                            cfg.threshold_ms,
+                            cfg.cooldown_ms,
+                        );
+                        // Sampling and state transition are monitor work too;
+                        // begin the next interval only after both complete.
                         last_anr_check = Instant::now();
 
-                        // Warmup: skip checks during startup
-                        if *warmup_remaining > 0 {
-                            *warmup_remaining = warmup_remaining.saturating_sub(elapsed);
-                        } else {
-                            let heartbeat = s.read_live_heartbeat();
-                            if let Some(hang_duration_ms) = update_watchdog_state(
-                                state,
-                                heartbeat,
-                                elapsed,
-                                cfg.threshold_ms,
-                                cfg.cooldown_ms,
-                            ) {
-                                eprintln!(
-                                    "[monitor] ANR detected: heartbeat stale for {hang_duration_ms}ms"
-                                );
-                                let event = CrashEvent {
-                                    report_type: ReportType::Anr,
-                                    exception_type: None,
-                                    exception_code: None,
-                                    exception_subcode: None,
-                                    exception_codes: Vec::new(),
-                                    crashed_thread: None,
-                                    bail_on_suspend_failure: true,
-                                    pid,
-                                    process_name: process_name.to_string(),
-                                    hang_duration_ms: Some(hang_duration_ms),
-                                    termination: None,
+                        if let Some(hang_duration_ms) = detected {
+                            let monitor_work_started = last_anr_check;
+                            eprintln!(
+                                "[monitor] ANR detected: heartbeat stale for {hang_duration_ms}ms"
+                            );
+                            let event = CrashEvent {
+                                report_type: ReportType::Anr,
+                                exception_type: None,
+                                exception_code: None,
+                                exception_subcode: None,
+                                exception_codes: Vec::new(),
+                                crashed_thread: None,
+                                bail_on_suspend_failure: true,
+                                pid,
+                                process_name: process_name.to_string(),
+                                hang_duration_ms: Some(hang_duration_ms),
+                                termination: None,
+                            };
+                            let capture = capture_worker.capture(
+                                event,
+                                task,
+                                Instant::now() + CAPTURE_DEADLINE,
+                            );
+                            if let Some(message) = task_control_monitor_failure(pipeline) {
+                                capture_worker.detach();
+                                finalize_contained_capture(pipeline, capture);
+                                background_worker.detach();
+                                return EventLoopResult {
+                                    outcome: MonitorOutcome::MonitorFailure(message),
+                                    crash_finalization: None,
+                                    crash_cleanup_required: false,
                                 };
-                                let capture = capture_worker.capture(
-                                    event,
-                                    task,
-                                    Instant::now() + CAPTURE_DEADLINE,
-                                );
-                                if let Some(message) = task_control_monitor_failure(pipeline) {
-                                    capture_worker.detach();
-                                    finalize_contained_capture(pipeline, capture);
-                                    background_worker.detach();
-                                    return EventLoopResult {
-                                        outcome: MonitorOutcome::MonitorFailure(message),
-                                        crash_finalization: None,
-                                        crash_cleanup_required: false,
-                                    };
-                                }
-                                if let crate::pipeline::CaptureOutcome::Captured(captured) = capture
-                                {
-                                    let _ = background_worker.try_submit(captured);
-                                }
                             }
+                            if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {
+                                let _ = background_worker.try_submit(captured);
+                            }
+                            finish_anr_monitor_work(
+                                Some(state),
+                                Some(s.as_ref()),
+                                &mut last_anr_check,
+                                monitor_work_started,
+                            );
                         }
                     }
                 }

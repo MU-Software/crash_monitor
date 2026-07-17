@@ -6,14 +6,14 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crash_monitor::event_loop::{
-    EXIT_CHILD_FAILURE, EXIT_DETECTED_CRASH, EXIT_MONITOR_INTERNAL, EventSource, MonitorEvent,
-    MonitorOutcome, event_loop,
+    AnrConfig, EXIT_CHILD_FAILURE, EXIT_DETECTED_CRASH, EXIT_MONITOR_INTERNAL, EventSource,
+    MonitorEvent, MonitorOutcome, event_loop,
 };
 use crash_monitor::pipeline::{
     CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PluginContext,
@@ -24,6 +24,9 @@ use crash_monitor::platform::ReceivedMachMessage;
 use crash_monitor::platform::mock::MockPlatform;
 use crash_monitor::platform::{PlatformOps, RESUME_ATTEMPT_LIMIT};
 use crash_monitor::postprocessors::ZIPArchiver;
+use crash_monitor::shm::{
+    CONTEXT_OFFSET, SECTION1_OFFSET, SHM_PRODUCER_READY, SharedMemory, ShmHeader, SutCrashContext,
+};
 
 type ReleaseGate = Arc<(Mutex<bool>, Condvar)>;
 
@@ -46,6 +49,29 @@ impl TestEventSource {
 impl EventSource for TestEventSource {
     fn poll(&mut self) -> Option<MonitorEvent> {
         self.events.pop_front()
+    }
+}
+
+/// A poll-by-poll script that can place idle iterations before a later event.
+/// `TestEventSource` cannot represent these intentional `None` entries because
+/// an empty queue is indistinguishable from an idle poll.
+struct ScriptedPollSource {
+    polls: VecDeque<Option<MonitorEvent>>,
+}
+
+impl ScriptedPollSource {
+    fn new(polls: Vec<Option<MonitorEvent>>) -> Self {
+        Self {
+            polls: polls.into(),
+        }
+    }
+}
+
+impl EventSource for ScriptedPollSource {
+    fn poll(&mut self) -> Option<MonitorEvent> {
+        self.polls
+            .pop_front()
+            .expect("event loop exhausted the scripted poll sequence")
     }
 }
 
@@ -73,6 +99,26 @@ fn make_test_pipeline_with_triggers(
         platform: Arc::new(MockPlatform::default()),
         output_dir: Some(tempdir.to_path_buf()),
     })
+}
+
+fn unique_event_loop_shm_id() -> u32 {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(2_100_000);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn publish_anr_readiness(shm: &SharedMemory, heartbeat_value: u64) {
+    let heartbeat_offset =
+        CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, heartbeat_counter);
+    let ready_offset = SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, producer_ready);
+
+    // SAFETY: both offsets are schema-asserted atomic locations inside this
+    // test-owned mapping, which remains alive through the event loop call.
+    #[allow(clippy::cast_ptr_alignment)]
+    let heartbeat = unsafe { &*shm.base_ptr().add(heartbeat_offset).cast::<AtomicU64>() };
+    #[allow(clippy::cast_ptr_alignment)]
+    let ready = unsafe { &*shm.base_ptr().add(ready_offset).cast::<AtomicU32>() };
+    heartbeat.store(heartbeat_value, Ordering::Release);
+    ready.store(SHM_PRODUCER_READY, Ordering::Release);
 }
 
 fn count_json_files(dir: &std::path::Path) -> usize {
@@ -103,6 +149,15 @@ fn read_only_report(dir: &std::path::Path) -> serde_json::Value {
     let report = reports.next().expect("one JSON report");
     assert!(reports.next().is_none(), "expected exactly one JSON report");
     serde_json::from_slice(&std::fs::read(report.path()).unwrap()).unwrap()
+}
+
+fn read_all_reports(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
+        .collect()
 }
 
 fn assert_task_resume_diagnostic(dir: &std::path::Path) {
@@ -227,6 +282,37 @@ struct BlockingPostProcessor {
 
 struct CountingCollector {
     calls: Arc<AtomicUsize>,
+}
+
+struct SlowCaptureCollector {
+    delay: Duration,
+}
+
+impl Plugin for SlowCaptureCollector {
+    fn name(&self) -> &'static str {
+        "SlowCaptureCollector"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Critical
+    }
+}
+
+impl Collector for SlowCaptureCollector {
+    fn collect(
+        &self,
+        _event: &CrashEvent,
+        _task: mach2::port::mach_port_t,
+        _data: &mut CollectedData,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        std::thread::sleep(self.delay);
+        Ok(())
+    }
 }
 
 impl Plugin for CountingCollector {
@@ -1013,6 +1099,307 @@ fn test_snapshot_event_continues() {
     assert!(
         json_count >= 1,
         "Should produce a snapshot report, got {json_count}"
+    );
+}
+
+#[test]
+fn test_unclaimed_shm_never_arms_anr_watchdog() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm = Arc::new(
+        SharedMemory::create(unique_event_loop_shm_id()).expect("create zeroed shared memory"),
+    );
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm.clone()),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    // Two idle iterations exceed this threshold by a wide margin. Without the
+    // producer-ready gate, the monitor-initialized zero heartbeat fires ANR.
+    let anr_config = AnrConfig {
+        warmup_ms: 0,
+        threshold_ms: 20,
+        check_interval_ms: 5,
+        cooldown_ms: 0,
+    };
+    let mut source = ScriptedPollSource::new(vec![None, None, Some(exited(0, 125))]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        Some(&shm),
+        Some(&anr_config),
+    );
+
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(platform.suspend_count(), 0);
+    assert_eq!(platform.resume_count(), 0);
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
+fn test_ready_stale_heartbeat_triggers_anr_capture() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
+    publish_anr_readiness(&shm, 7);
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm.clone()),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let anr_config = AnrConfig {
+        warmup_ms: 0,
+        threshold_ms: 100,
+        check_interval_ms: 5,
+        cooldown_ms: 1_000,
+    };
+    let mut source = ScriptedPollSource::new(vec![None, None, None, Some(exited(0, 175))]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        Some(&shm),
+        Some(&anr_config),
+    );
+
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(platform.suspend_count(), 1, "ANR capture must suspend once");
+    assert_eq!(platform.resume_count(), 1, "ANR capture must resume once");
+    let report = read_only_report(tempdir.path());
+    assert_eq!(report["header"]["type"], "anr");
+    assert!(
+        report["header"]["hang_duration_ms"]
+            .as_u64()
+            .is_some_and(|duration| duration >= anr_config.threshold_ms),
+        "ANR report must retain the detected hang duration"
+    );
+}
+
+#[test]
+fn test_slow_anr_capture_time_does_not_trigger_a_second_anr() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
+    publish_anr_readiness(&shm, 11);
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![Box::new(SlowCaptureCollector {
+            delay: Duration::from_millis(350),
+        })],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm.clone()),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let anr_config = AnrConfig {
+        warmup_ms: 0,
+        threshold_ms: 200,
+        check_interval_ms: 5,
+        cooldown_ms: 0,
+    };
+    // The first five idle polls make the ready heartbeat stale and cause one
+    // ANR. Capture then takes longer than the threshold. With cooldown disabled,
+    // the following idle poll would immediately cause a second ANR unless the
+    // event loop rebased its heartbeat and clock after the child resumed.
+    let mut source = ScriptedPollSource::new(vec![
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(exited(0, 700)),
+    ]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        Some(&shm),
+        Some(&anr_config),
+    );
+
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(platform.suspend_count(), 1, "exactly one ANR may suspend");
+    assert_eq!(
+        platform.resume_count(),
+        1,
+        "the ANR must resume exactly once"
+    );
+    let report = read_only_report(tempdir.path());
+    assert_eq!(report["header"]["type"], "anr");
+}
+
+#[test]
+fn test_slow_snapshot_monitor_time_does_not_trigger_false_anr() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
+    publish_anr_readiness(&shm, 7);
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![Box::new(SlowCaptureCollector {
+            delay: Duration::from_millis(175),
+        })],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm.clone()),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let anr_config = AnrConfig {
+        warmup_ms: 0,
+        threshold_ms: 200,
+        check_interval_ms: 5,
+        cooldown_ms: 0,
+    };
+    // Let the child run for one poll interval, then spend almost the complete
+    // threshold inside Snapshot capture. The post-capture poll keeps total
+    // application-running stale time below the threshold, while uncorrected
+    // wall time exceeds it. Only the monitor-owned interval must be excluded;
+    // the pure watchdog test separately verifies that real pre-capture stale
+    // time remains accumulated.
+    let mut source = ScriptedPollSource::new(vec![
+        None,
+        Some(MonitorEvent::Snapshot),
+        None,
+        Some(exited(0, 250)),
+    ]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        Some(&shm),
+        Some(&anr_config),
+    );
+
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(platform.suspend_count(), 1, "only Snapshot may suspend");
+    assert_eq!(
+        platform.resume_count(),
+        1,
+        "Snapshot must resume exactly once"
+    );
+    let report = read_only_report(tempdir.path());
+    assert_eq!(report["header"]["type"], "snapshot");
+}
+
+#[test]
+fn test_snapshot_preserves_real_stale_time_around_excluded_monitor_work() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
+    publish_anr_readiness(&shm, 13);
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![Box::new(SlowCaptureCollector {
+            delay: Duration::from_millis(350),
+        })],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm.clone()),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let anr_config = AnrConfig {
+        warmup_ms: 0,
+        threshold_ms: 250,
+        check_interval_ms: 5,
+        cooldown_ms: 1_000,
+    };
+    // Application-running stale time on either side of Snapshot is below the
+    // threshold, but their sum reaches it. Capture itself is longer than the
+    // threshold and must be excluded. A full post-event reset would miss the
+    // ANR; raw wall-clock accounting would report it too early.
+    let mut source = ScriptedPollSource::new(vec![
+        None,
+        None,
+        None,
+        Some(MonitorEvent::Snapshot),
+        None,
+        None,
+        None,
+        Some(exited(0, 1_100)),
+    ]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        Some(&shm),
+        Some(&anr_config),
+    );
+
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(
+        platform.suspend_count(),
+        2,
+        "Snapshot and the preserved-time ANR must each suspend once"
+    );
+    assert_eq!(platform.resume_count(), 2);
+    let reports = read_all_reports(tempdir.path());
+    assert_eq!(reports.len(), 2, "expected one Snapshot and one ANR report");
+    let mut report_types = reports
+        .iter()
+        .filter_map(|report| report["header"]["type"].as_str())
+        .collect::<Vec<_>>();
+    report_types.sort_unstable();
+    assert_eq!(report_types, ["anr", "snapshot"]);
+    let anr = reports
+        .iter()
+        .find(|report| report["header"]["type"] == "anr")
+        .expect("ANR report");
+    assert!(
+        anr["header"]["hang_duration_ms"]
+            .as_u64()
+            .is_some_and(|duration| duration >= anr_config.threshold_ms)
     );
 }
 

@@ -29,7 +29,7 @@ At startup the child should:
    region name before `exec`.
 2. `shm_open` + `mmap` the complete schema-sized region, then verify both the
    header magic and the exact `SUT_SHM_VERSION`. The current schema is version
-   3; version 1 and version 2 are rejected with no fallback, even though their
+   4; versions 1, 2, and 3 are rejected with no fallback, even though their
    total size and many offsets are unchanged. A mismatch means the producer
    must not derive payload addresses or write to the mapping.
 3. Write into the shared sections using the acquire/release and nonblocking
@@ -37,13 +37,19 @@ At startup the child should:
    [shared-memory.md](shared-memory.md)):
    - **breadcrumbs** — a short trail of recent activity;
    - **annotations** — domain state as `key`/`value` string pairs;
-   - **heartbeat** — bump the counter regularly from the main loop; this is what
-     the ANR watchdog observes.
+   - **heartbeat / ANR opt-in** — release-store the first heartbeat, then
+     release-store `SUT_SHM_PRODUCER_READY` to `header.producer_ready`, and keep
+     advancing the heartbeat from the observed application loop.
 4. (Optional) request a manual snapshot at any time by raising `SIGUSR1` — the
    monitor captures a `snapshot` report and the app keeps running.
 
 Everything here is best-effort: if the mapping fails the app runs normally and
 the monitor still produces crash/thread/memory reports.
+
+ANR monitoring is dormant until the exact producer-ready handshake is observed.
+A child that does not integrate SHM therefore cannot be reported as hung merely
+because the monitor-created region remains zero-filled. The first ready sample
+sets a baseline; warmup and hang accounting begin only after readiness.
 
 All producer text fields are fixed-width C arrays. Each value must include a
 NUL within its own array bound; the bytes before it must be valid UTF-8 and must
@@ -90,10 +96,18 @@ the environment (used mainly by tests to shorten them):
 
 | Variable | Meaning |
 |----------|---------|
-| `CRASH_MONITOR_ANR_WARMUP_MS` | grace period after start before checking |
+| `CRASH_MONITOR_ANR_WARMUP_MS` | grace period after producer readiness before checking |
 | `CRASH_MONITOR_ANR_THRESHOLD_MS` | how long the heartbeat may stall before it's an ANR |
 | `CRASH_MONITOR_ANR_CHECK_INTERVAL_MS` | polling interval |
 | `CRASH_MONITOR_ANR_COOLDOWN_MS` | quiet period after firing, to avoid repeats |
+
+Synchronous monitor capture time is excluded. After a Snapshot or ANR capture
+has resumed the child, the event loop acquire-samples readiness and heartbeat.
+If the heartbeat advanced, that sample becomes a fresh baseline and clears the
+hang accumulator. If it is unchanged, stale application-running time observed
+before capture remains valid while only the measured monitor-owned interval is
+removed from elapsed time. Existing warmup and cooldown budgets are preserved;
+background finalization does not stop the child and is not excluded.
 
 ## Configuration file
 

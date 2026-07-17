@@ -5,8 +5,8 @@
 //! On crash/snapshot, the monitor copies the complete mapped region into an
 //! immutable owned snapshot while the child is suspended. Payload parsers and
 //! Stage 1 persistence consume only those owned bytes after that boundary;
-//! only publication words and the watchdog heartbeat are read from the live
-//! mapping, always through aligned acquire atomics.
+//! only publication words plus the watchdog readiness/heartbeat handshake are
+//! read from the live mapping, always through aligned acquire atomics.
 //!
 //! All C ABI structs are generated from `schema/crash_shm.h`. Layout
 //! correctness is enforced by compile-time size/offset assertions and tests.

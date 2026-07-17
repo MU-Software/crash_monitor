@@ -36,6 +36,7 @@ const SETTINGS_GENERATION_OFFSET: usize =
     SECTION1_OFFSET + offset_of!(ShmHeader, settings_generation);
 const ATTACHMENTS_GENERATION_OFFSET: usize =
     SECTION1_OFFSET + offset_of!(ShmHeader, attachments_generation);
+const PRODUCER_READY_OFFSET: usize = SECTION1_OFFSET + offset_of!(ShmHeader, producer_ready);
 const RING_COUNT_OFFSET: usize = SECTION2_OFFSET + offset_of!(SutCrumbState, ring_count);
 const RINGS_OFFSET: usize = SECTION2_OFFSET + offset_of!(SutCrumbState, rings);
 const RING_GENERATION_OFFSET: usize = offset_of!(SutCrumbRing, generation);
@@ -68,7 +69,7 @@ impl LiveAtomicWord {
     }
 }
 
-const LIVE_ATOMIC_WORD_COUNT: usize = 4 + CRUMB_MAX_THREADS + 1 + 1 + SCREENSHOT_SLOTS as usize;
+const LIVE_ATOMIC_WORD_COUNT: usize = 5 + CRUMB_MAX_THREADS + 1 + 1 + SCREENSHOT_SLOTS as usize;
 
 const fn live_atomic_words() -> [LiveAtomicWord; LIVE_ATOMIC_WORD_COUNT] {
     let mut words = [LiveAtomicWord::U32(REGISTRY_GENERATION_OFFSET); LIVE_ATOMIC_WORD_COUNT];
@@ -81,6 +82,8 @@ const fn live_atomic_words() -> [LiveAtomicWord; LIVE_ATOMIC_WORD_COUNT] {
     words[index] = LiveAtomicWord::U32(SETTINGS_GENERATION_OFFSET);
     index += 1;
     words[index] = LiveAtomicWord::U32(ATTACHMENTS_GENERATION_OFFSET);
+    index += 1;
+    words[index] = LiveAtomicWord::U32(PRODUCER_READY_OFFSET);
     index += 1;
 
     let mut ring_index = 0;
@@ -115,6 +118,7 @@ const _: () = assert!(REGISTRY_GENERATION_OFFSET.is_multiple_of(align_of::<Atomi
 const _: () = assert!(CONTEXT_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
 const _: () = assert!(SETTINGS_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
 const _: () = assert!(ATTACHMENTS_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(PRODUCER_READY_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
 const _: () = assert!(RING_COUNT_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
 const _: () =
     assert!((RINGS_OFFSET + RING_GENERATION_OFFSET).is_multiple_of(align_of::<AtomicU32>()));
@@ -683,6 +687,7 @@ struct LivePublicationState {
     context_generation: u32,
     settings_generation: u32,
     attachments_generation: u32,
+    producer_ready: u32,
     screenshot_generations: [u32; SCREENSHOT_SLOTS as usize],
 }
 
@@ -695,6 +700,7 @@ impl Default for LivePublicationState {
             context_generation: 0,
             settings_generation: 0,
             attachments_generation: 0,
+            producer_ready: SHM_PRODUCER_NOT_READY,
             screenshot_generations: [0; SCREENSHOT_SLOTS as usize],
         }
     }
@@ -872,6 +878,7 @@ fn sanitize_publications(
         ATTACHMENTS_GENERATION_OFFSET,
         after.attachments_generation,
     );
+    write_owned_u32(bytes, PRODUCER_READY_OFFSET, after.producer_ready);
 
     check_snapshot_deadline(deadline)?;
     sanitize_breadcrumbs(bytes, before, after, &mut issues);
@@ -903,7 +910,7 @@ pub struct SharedMemory {
 // SAFETY: payload access never creates ordinary borrowed references into the
 // mapping. Complete payloads are copied through bounded raw pointers while the
 // caller owns task suspension. References are formed only for aligned atomic
-// publication words and the independently observed heartbeat.
+// publication words and the readiness-gated heartbeat observation.
 unsafe impl Send for SharedMemory {}
 unsafe impl Sync for SharedMemory {}
 
@@ -1023,6 +1030,9 @@ impl SharedMemory {
             attachments_generation: self
                 .load_atomic_u32_at(ATTACHMENTS_GENERATION_OFFSET)
                 .unwrap_or_default(),
+            producer_ready: self
+                .load_atomic_u32_at(PRODUCER_READY_OFFSET)
+                .unwrap_or(SHM_PRODUCER_NOT_READY),
             screenshot_generations,
         }
     }
@@ -1105,10 +1115,28 @@ impl SharedMemory {
         Ok(snapshot)
     }
 
+    /// Acquire the producer's ANR opt-in handshake and its heartbeat baseline.
+    ///
+    /// `producer_ready` is loaded first. Only the exact schema value `1` arms
+    /// ANR monitoring; every other untrusted value returns `None` without
+    /// treating zero-filled or malformed shared memory as a stalled producer.
+    /// The ready acquire synchronizes with the producer's ready release, making
+    /// the earlier initial-heartbeat store happen-before this observation. The
+    /// heartbeat itself is then acquire-loaded independently.
+    #[must_use]
+    pub fn read_live_anr_heartbeat(&self) -> Option<u64> {
+        let ready = self.load_atomic_u32_at(PRODUCER_READY_OFFSET)?;
+        if ready != SHM_PRODUCER_READY {
+            return None;
+        }
+        self.load_atomic_u64_at(HEARTBEAT_OFFSET)
+    }
+
     /// Read the heartbeat counter using an aligned acquire atomic load.
     ///
-    /// This is the only payload API used for ongoing observation outside
-    /// snapshot acquisition.
+    /// This raw heartbeat helper is retained for schema round-trip tests. ANR
+    /// monitoring must use [`Self::read_live_anr_heartbeat`] so producer
+    /// readiness is acquired before the heartbeat.
     #[must_use]
     pub fn read_live_heartbeat(&self) -> u64 {
         self.load_atomic_u64_at(HEARTBEAT_OFFSET)

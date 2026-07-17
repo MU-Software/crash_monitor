@@ -223,6 +223,37 @@ fn test_read_live_heartbeat_write_read() {
     assert_eq!(shm.read_live_heartbeat(), 42);
 }
 
+#[test]
+fn test_live_anr_heartbeat_requires_exact_ready_publication() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let ready = SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, producer_ready);
+    let heartbeat = CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, heartbeat_counter);
+
+    assert_eq!(shm.read_live_anr_heartbeat(), None);
+    unsafe {
+        store_u64_release(shm.base_ptr(), heartbeat, 42);
+        store_u32_release(shm.base_ptr(), ready, 2);
+    }
+    assert_eq!(
+        shm.read_live_anr_heartbeat(),
+        None,
+        "malformed readiness must fail closed"
+    );
+
+    unsafe {
+        // The first published heartbeat may legitimately be zero. The ready
+        // release is the handshake that distinguishes it from zero-filled SHM.
+        store_u64_release(shm.base_ptr(), heartbeat, 0);
+        store_u32_release(shm.base_ptr(), ready, SHM_PRODUCER_READY);
+    }
+    assert_eq!(shm.read_live_anr_heartbeat(), Some(0));
+
+    unsafe {
+        store_u64_release(shm.base_ptr(), heartbeat, 43);
+    }
+    assert_eq!(shm.read_live_anr_heartbeat(), Some(43));
+}
+
 // ── owned byte parser tests ──
 
 #[test]

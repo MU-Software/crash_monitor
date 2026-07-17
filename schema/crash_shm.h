@@ -23,9 +23,11 @@
 
 /* ── Region header — 64 bytes, initialized by the monitor ── */
 #define SUT_SHM_MAGIC   0x434D4F4Eu /* "CMON" (Crash MONitor) */
-#define SUT_SHM_VERSION 3u
+#define SUT_SHM_VERSION 4u
 #define SUT_SHM_CANARY  0xDEADBEEFu
 #define SUT_SHM_TOTAL_SIZE 50033364u
+#define SUT_SHM_PRODUCER_NOT_READY 0u
+#define SUT_SHM_PRODUCER_READY     1u
 
 typedef struct sut_shm_header {
     uint32_t magic;
@@ -44,7 +46,10 @@ typedef struct sut_shm_header {
     uint32_t context_generation;
     uint32_t settings_generation;
     uint32_t attachments_generation;
-    uint8_t reserved[20];
+
+    /* ANR opt-in: release-store 1 only after publishing the first heartbeat. */
+    uint32_t producer_ready;
+    uint8_t reserved[16];
 } sut_shm_header_t;
 
 _Static_assert(sizeof(sut_shm_header_t) == 64, "sut_shm_header_t must be 64 bytes");
@@ -60,6 +65,10 @@ _Static_assert(offsetof(sut_shm_header_t, settings_generation) == 36,
                "settings generation offset changed");
 _Static_assert(offsetof(sut_shm_header_t, attachments_generation) == 40,
                "attachments generation offset changed");
+_Static_assert(offsetof(sut_shm_header_t, producer_ready) == 44,
+               "producer readiness offset changed");
+_Static_assert(SUT_SHM_PRODUCER_NOT_READY == 0, "producer not-ready value changed");
+_Static_assert(SUT_SHM_PRODUCER_READY == 1, "producer ready value changed");
 
 /* ── Breadcrumb category ── */
 #define SUT_CRUMB_CATEGORY_MAX 10u

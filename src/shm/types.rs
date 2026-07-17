@@ -40,6 +40,8 @@ pub use ffi::{
 pub const SHM_MAGIC: u32 = ffi::SUT_SHM_MAGIC;
 pub const SHM_VERSION: u32 = ffi::SUT_SHM_VERSION;
 pub const SHM_CANARY: u32 = ffi::SUT_SHM_CANARY;
+pub const SHM_PRODUCER_NOT_READY: u32 = ffi::SUT_SHM_PRODUCER_NOT_READY;
+pub const SHM_PRODUCER_READY: u32 = ffi::SUT_SHM_PRODUCER_READY;
 
 // Schema-derived from crash_shm.h #defines (via bindgen).
 pub const CRUMB_RING_CAPACITY: usize = ffi::SUT_CRUMB_RING_CAPACITY as usize;
@@ -56,6 +58,9 @@ pub const SCREENSHOT_WIDTH: u32 = ffi::SUT_SCREENSHOT_WIDTH;
 pub const SCREENSHOT_HEIGHT: u32 = ffi::SUT_SCREENSHOT_HEIGHT;
 pub const SCREENSHOT_BYTES_PER_SLOT: usize =
     (SCREENSHOT_WIDTH as usize) * (SCREENSHOT_HEIGHT as usize) * 4;
+
+const _: () = assert!(SHM_PRODUCER_NOT_READY == 0);
+const _: () = assert!(SHM_PRODUCER_READY == 1);
 
 const fn checked_wire_u16(value: u32) -> u16 {
     assert!(value <= 65_535);
@@ -82,6 +87,7 @@ const _: () = assert!(offset_of!(ShmHeader, breadcrumb_registry_generation) == 1
 const _: () = assert!(offset_of!(ShmHeader, context_generation) == 32);
 const _: () = assert!(offset_of!(ShmHeader, settings_generation) == 36);
 const _: () = assert!(offset_of!(ShmHeader, attachments_generation) == 40);
+const _: () = assert!(offset_of!(ShmHeader, producer_ready) == 44);
 const _: () = assert!(size_of::<SutBreadcrumb>() == 64);
 const _: () = assert!(size_of::<SutCrumbRing>() == 32784);
 const _: () = assert!(offset_of!(SutCrumbRing, generation) == 32780);

@@ -6,13 +6,14 @@
  * region from $CRASH_MONITOR_SHM, publishes a breadcrumb + minimal context via
  * the schema's release/seqlock contract, then triggers the requested scenario.
  *
- * Usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean>
- *   sigsegv  — NULL pointer dereference
- *   sigabrt  — abort()
- *   sigterm  — terminate via an uncaught SIGTERM
- *   exit42   — immediate non-zero exit (42)
- *   anr      — hang forever (heartbeat never advances → ANR)
- *   clean    — normal exit (no report expected)
+ * Usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean|uninstrumented>
+ *   sigsegv       — NULL pointer dereference
+ *   sigabrt       — abort()
+ *   sigterm       — terminate via an uncaught SIGTERM
+ *   exit42        — immediate non-zero exit (42)
+ *   anr           — hang forever after publishing one heartbeat (ANR)
+ *   clean         — normal exit (no report expected)
+ *   uninstrumented — run longer than an E2E ANR threshold without using SHM
  *
  * The monitor initializes the 64-byte region header. Its layout, magic, and
  * schema version are defined by crash_shm.h and validated before any payload
@@ -21,6 +22,7 @@
 
 #include "crash_shm_atomic.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -36,6 +38,20 @@ static uint64_t now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static int sleep_ms(uint64_t duration_ms) {
+    struct timespec requested = {
+        .tv_sec = (time_t)(duration_ms / 1000u),
+        .tv_nsec = (long)((duration_ms % 1000u) * 1000000u),
+    };
+    struct timespec remaining;
+
+    while (nanosleep(&requested, &remaining) != 0) {
+        if (errno != EINTR) return -1;
+        requested = remaining;
+    }
+    return 0;
 }
 
 /* Map the monitor-created region and populate a breadcrumb + context so the
@@ -106,9 +122,7 @@ static void populate_shm(const char* scenario) {
                             registry_write_generation);
     }
 
-    /* Minimal context uses its own nonblocking seqlock. heartbeat_counter is
-     * an independent atomic live-state word and is intentionally left at 0:
-     * the `anr` scenario never advances it, which the watchdog detects. */
+    /* Minimal context uses its own nonblocking seqlock. */
     uint32_t context_write_generation;
     if (sut_shm_seqlock_try_begin(&header->context_generation, &context_write_generation)) {
         strncpy(ctx->annotations[0].key, "active_tool", sizeof(ctx->annotations[0].key) - 1);
@@ -121,16 +135,26 @@ static void populate_shm(const char* scenario) {
         sut_shm_seqlock_end(&header->context_generation, context_write_generation);
     }
 
+    /* Readiness is the final publication step: consumers that acquire-load it
+     * are guaranteed to observe an initialized heartbeat baseline. The ANR
+     * scenario intentionally leaves that first heartbeat unchanged. */
+    sut_shm_atomic_u64_store_release(&ctx->heartbeat_counter, 1u);
+    sut_shm_atomic_u32_store_release(&header->producer_ready, SUT_SHM_PRODUCER_READY);
+
     munmap(base, (size_t)st.st_size);
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean>\n");
+        fprintf(stderr,
+                "usage: crash_app "
+                "<sigsegv|sigabrt|sigterm|exit42|anr|clean|uninstrumented>\n");
         return 1;
     }
     const char* scenario = argv[1];
-    populate_shm(scenario);
+    if (strcmp(scenario, "uninstrumented") != 0) {
+        populate_shm(scenario);
+    }
 
     if (strcmp(scenario, "sigsegv") == 0) {
         volatile int* np = NULL;
@@ -158,10 +182,14 @@ int main(int argc, char* argv[]) {
         return 42;
     } else if (strcmp(scenario, "anr") == 0) {
         for (;;) {
-            pause(); /* hang; heartbeat never advances → ANR */
+            pause(); /* hang; the published heartbeat never advances → ANR */
         }
     } else if (strcmp(scenario, "clean") == 0) {
         return 0;
+    } else if (strcmp(scenario, "uninstrumented") == 0) {
+        /* Stay alive well past the E2E watchdog threshold, without mapping or
+         * populating CRASH_MONITOR_SHM, then exit normally. */
+        return sleep_ms(1500u) == 0 ? 0 : 125;
     } else {
         fprintf(stderr, "unknown scenario: %s\n", scenario);
         return 1;

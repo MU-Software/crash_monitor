@@ -49,6 +49,10 @@ _Static_assert(offsetof(sut_shm_header_t, attachments_generation) %
                        _Alignof(_Atomic(uint32_t)) ==
                    0,
                "attachments generation is not atomically aligned");
+_Static_assert(offsetof(sut_shm_header_t, producer_ready) %
+                       _Alignof(_Atomic(uint32_t)) ==
+                   0,
+               "producer readiness is not atomically aligned");
 _Static_assert(offsetof(sut_crumb_ring_t, generation) % _Alignof(_Atomic(uint32_t)) == 0,
                "breadcrumb ring generation is not atomically aligned");
 _Static_assert(offsetof(sut_crumb_state_t, ring_count) % _Alignof(_Atomic(uint32_t)) == 0,
