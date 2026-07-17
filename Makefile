@@ -1,9 +1,8 @@
 # crash_monitor — self-contained build / lint / test / coverage.
 #
-# Works standalone from a clone of just this repository. The end-to-end tests
-# (which need a crash-producing child that links a host app's C reporter) are
-# intentionally NOT here yet; they live in the embedding project's Makefile
-# until a schema-only producer lands in tests/e2e/fixtures/.
+# Works standalone from a clone of just this repository, including the
+# end-to-end tests: their crash-producing child (tests/e2e/fixtures/crash_app.c)
+# depends only on the shm schema, not on any host application.
 #
 # Common overrides:
 #   make build SIGN_IDENTITY="Developer ID Application: ..."   # different signer
@@ -12,7 +11,7 @@
 .DEFAULT_GOAL := build
 
 # Codesigning identity for the debugger entitlement (task_for_pid, vm_read).
-# Without it the monitor cannot inspect a crashing child.
+# Without it the monitor cannot inspect a crashing child (and e2e self-skips).
 SIGN_IDENTITY ?= Apple Development
 ENTITLEMENTS  := crash_monitor.entitlements
 
@@ -21,6 +20,10 @@ MONITOR_DIALOG_BIN := target/release/crash_dialog_macos
 
 INTEGRATION_TESTS := --test shm_round_trip --test shm_validation_failure \
                      --test alarm_timeout --test event_loop_test
+
+# Self-contained e2e crash producer (schema-only; no host app dependency).
+E2E_CHILD := tests/e2e/fixtures/crash_app
+E2E_SRC   := tests/e2e/fixtures/crash_app.c
 
 # Homebrew LLVM tools for cargo-llvm-cov (macOS).
 LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
@@ -32,8 +35,8 @@ LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
 #   platform/mod.rs  — FFI delegation wrappers
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
-.PHONY: build lint test unit-test integration-test \
-        coverage unit-coverage integration-coverage clean
+.PHONY: build lint test unit-test integration-test e2e-test e2e-child \
+        coverage unit-coverage integration-coverage e2e-coverage clean
 
 # ── Build (release + codesign) ────────────────────────────────
 build:
@@ -46,14 +49,26 @@ lint:
 	cargo fmt -- --check
 	cargo clippy -- -D warnings -A dead_code
 
-# ── Tests (unit + integration; e2e is host-side for now) ──────
+# ── E2E child (compiled from the shm schema alone) ────────────
+$(E2E_CHILD): $(E2E_SRC) schema/crash_shm.h
+	cc -std=c11 -Wall -Wextra -I schema -o $@ $<
+
+e2e-child: $(E2E_CHILD)
+
+# ── Tests ─────────────────────────────────────────────────────
 unit-test:
 	cargo test --lib
 
 integration-test:
 	cargo test $(INTEGRATION_TESTS)
 
-test: unit-test integration-test
+# e2e needs the codesigned release monitor (build), the child, and a debug build
+# (for the unsigned-fails-fast case). Tests self-skip if the entitlement is absent.
+e2e-test: build $(E2E_CHILD)
+	cargo build
+	cargo test --test e2e_tests
+
+test: unit-test integration-test e2e-test
 
 # ── Coverage (HTML reports under coverage-report*/) ───────────
 unit-coverage:
@@ -64,11 +79,16 @@ integration-coverage:
 	$(LLVM_COV_ENV) cargo llvm-cov $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report-integration
 	@echo "Integration coverage: coverage-report-integration/html/index.html"
 
-coverage:
-	$(LLVM_COV_ENV) cargo llvm-cov --lib $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report
+e2e-coverage: build $(E2E_CHILD)
+	$(LLVM_COV_ENV) cargo llvm-cov --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
+	@echo "E2E coverage: coverage-report-e2e/html/index.html"
+
+coverage: build $(E2E_CHILD)
+	$(LLVM_COV_ENV) cargo llvm-cov --lib $(INTEGRATION_TESTS) --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report
 	@echo "Coverage: coverage-report/html/index.html"
 
 # ── Clean ─────────────────────────────────────────────────────
 clean:
 	cargo clean
+	rm -f $(E2E_CHILD)
 	rm -rf coverage-report coverage-report-unit coverage-report-integration coverage-report-e2e
