@@ -107,7 +107,9 @@ If the heartbeat advanced, that sample becomes a fresh baseline and clears the
 hang accumulator. If it is unchanged, stale application-running time observed
 before capture remains valid while only the measured monitor-owned interval is
 removed from elapsed time. Existing warmup and cooldown budgets are preserved;
-background finalization does not stop the child and is not excluded.
+their remaining time advances only for application-running intervals on either
+side of capture. Background finalization does not stop the child and is not
+excluded.
 
 ## Configuration file
 

@@ -17,7 +17,8 @@ pub(crate) enum MonitorWorkRebase {
     PreserveElapsed,
     /// Readiness changed or the heartbeat advanced, so the completed sample is
     /// a new baseline and elapsed time from before it cannot be attributed to
-    /// the new heartbeat value.
+    /// the new heartbeat value. Pre-monitor application time still consumes an
+    /// active warmup or cooldown budget.
     ResetElapsed,
 }
 
@@ -70,14 +71,16 @@ impl WatchdogState {
 
     /// Establish a new heartbeat baseline after monitor-owned work.
     ///
-    /// A live observation never changes an active warmup or cooldown. If the
+    /// Monitor-owned time never consumes an active warmup or cooldown. If the
     /// heartbeat is unchanged, already-observed application-running stale time
-    /// remains valid and the caller removes only the monitor-owned duration
-    /// from its clock. A changed heartbeat establishes a fresh baseline.
-    /// Losing producer readiness fully disarms the watchdog.
+    /// remains valid and the caller removes only the monitor interval from its
+    /// clock. A changed heartbeat establishes a fresh hang baseline while the
+    /// supplied pre-monitor application time still consumes any active grace
+    /// budget. Losing producer readiness fully disarms the watchdog.
     pub(crate) fn rebase_after_monitor_work(
         &mut self,
         current_heartbeat: Option<u64>,
+        application_elapsed_before_monitor_ms: u64,
     ) -> MonitorWorkRebase {
         let Some(current_heartbeat) = current_heartbeat else {
             self.disarm();
@@ -90,11 +93,24 @@ impl WatchdogState {
                 MonitorWorkRebase::ResetElapsed
             }
             Some(previous_heartbeat) if previous_heartbeat != current_heartbeat => {
+                self.consume_active_grace(application_elapsed_before_monitor_ms);
                 self.prev_heartbeat = Some(current_heartbeat);
                 self.hang_accumulated_ms = 0;
                 MonitorWorkRebase::ResetElapsed
             }
             Some(_) => MonitorWorkRebase::PreserveElapsed,
+        }
+    }
+
+    /// Apply application-running time that cannot safely be attributed to a
+    /// heartbeat value but still belongs to a wall-clock grace budget. As in a
+    /// regular watchdog tick, the interval that crosses the boundary is fully
+    /// excluded from hang accumulation.
+    fn consume_active_grace(&mut self, elapsed_ms: u64) {
+        if self.warmup_remaining_ms > 0 {
+            self.warmup_remaining_ms = self.warmup_remaining_ms.saturating_sub(elapsed_ms);
+        } else if self.cooldown_remaining_ms > 0 {
+            self.cooldown_remaining_ms = self.cooldown_remaining_ms.saturating_sub(elapsed_ms);
         }
     }
 

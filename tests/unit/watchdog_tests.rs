@@ -193,7 +193,7 @@ fn test_rebase_resets_hang_and_preserves_warmup() {
     assert_eq!(state.warmup_remaining_ms, 60);
 
     assert_eq!(
-        state.rebase_after_monitor_work(Some(2)),
+        state.rebase_after_monitor_work(Some(2), 0),
         MonitorWorkRebase::ResetElapsed
     );
 
@@ -204,13 +204,27 @@ fn test_rebase_resets_hang_and_preserves_warmup() {
 }
 
 #[test]
+fn test_changed_heartbeat_rebase_consumes_pre_monitor_warmup_time() {
+    let mut state = WatchdogState::new(1_000, Some(1));
+
+    assert_eq!(
+        state.rebase_after_monitor_work(Some(2), 900),
+        MonitorWorkRebase::ResetElapsed
+    );
+
+    assert_eq!(state.prev_heartbeat, Some(2));
+    assert_eq!(state.warmup_remaining_ms, 100);
+    assert_eq!(state.hang_accumulated_ms, 0);
+}
+
+#[test]
 fn test_rebase_preserves_pre_event_hang_when_heartbeat_is_unchanged() {
     let mut state = WatchdogState::new(0, Some(2));
     assert!(update_watchdog_state(&mut state, Some(2), 75, 100, 500).is_none());
     assert_eq!(state.hang_accumulated_ms, 75);
 
     assert_eq!(
-        state.rebase_after_monitor_work(Some(2)),
+        state.rebase_after_monitor_work(Some(2), 0),
         MonitorWorkRebase::PreserveElapsed
     );
 
@@ -230,7 +244,7 @@ fn test_rebase_resets_hang_and_preserves_cooldown() {
     );
 
     assert_eq!(
-        state.rebase_after_monitor_work(Some(10)),
+        state.rebase_after_monitor_work(Some(10), 0),
         MonitorWorkRebase::ResetElapsed
     );
 
@@ -239,6 +253,24 @@ fn test_rebase_resets_hang_and_preserves_cooldown() {
     assert_eq!(state.cooldown_remaining_ms, 300);
     assert!(update_watchdog_state(&mut state, Some(10), 50, 100, 300).is_none());
     assert_eq!(state.cooldown_remaining_ms, 250);
+}
+
+#[test]
+fn test_changed_heartbeat_rebase_consumes_pre_monitor_cooldown_time() {
+    let mut state = WatchdogState::new(0, Some(9));
+    assert_eq!(
+        update_watchdog_state(&mut state, Some(9), 100, 100, 300),
+        Some(100)
+    );
+
+    assert_eq!(
+        state.rebase_after_monitor_work(Some(10), 225),
+        MonitorWorkRebase::ResetElapsed
+    );
+
+    assert_eq!(state.prev_heartbeat, Some(10));
+    assert_eq!(state.cooldown_remaining_ms, 75);
+    assert_eq!(state.hang_accumulated_ms, 0);
 }
 
 #[test]
@@ -251,7 +283,7 @@ fn test_rebase_without_ready_producer_fully_disarms() {
     );
 
     assert_eq!(
-        state.rebase_after_monitor_work(None),
+        state.rebase_after_monitor_work(None, 5_000),
         MonitorWorkRebase::ResetElapsed
     );
 

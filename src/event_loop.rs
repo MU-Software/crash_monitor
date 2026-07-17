@@ -281,7 +281,16 @@ fn finish_anr_monitor_work(
     let (Some(state), Some(shm)) = (anr_state, shm) else {
         return;
     };
-    let rebase = state.rebase_after_monitor_work(shm.read_live_anr_heartbeat());
+    let application_elapsed_before_monitor_ms = u64::try_from(
+        monitor_work_started
+            .saturating_duration_since(*last_anr_check)
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    let rebase = state.rebase_after_monitor_work(
+        shm.read_live_anr_heartbeat(),
+        application_elapsed_before_monitor_ms,
+    );
     let monitor_work_finished = Instant::now();
     *last_anr_check = match rebase {
         MonitorWorkRebase::PreserveElapsed => exclude_monitor_work_from_anr_clock(
