@@ -167,9 +167,10 @@ impl CaptureWorker {
         if Instant::now() >= deadline {
             finish_suspend(&mut suspend_guard);
             return with_task_control_diagnostics(
-                timed_out_capture(
+                timed_out_capture_with_snapshot(
                     event,
                     "absolute capture deadline elapsed during shm snapshot",
+                    shm_snapshot.as_deref(),
                 ),
                 suspend_error,
                 snapshot_error,
@@ -180,6 +181,10 @@ impl CaptureWorker {
         let cancelled = Arc::new(AtomicBool::new(false));
         let (result_tx, result_rx) = sync_channel(1);
         let event_for_result = event.clone();
+        // Keep a cheap Arc clone on the guard-owning thread. If the worker
+        // handoff fails or times out, Stage 1 can still persist the immutable
+        // bytes that were already copied while the task was suspended.
+        let fallback_shm_snapshot = shm_snapshot.clone();
         let job = CaptureJob {
             event,
             task,
@@ -191,7 +196,11 @@ impl CaptureWorker {
         let Some(sender) = &self.sender else {
             finish_suspend(&mut suspend_guard);
             return with_task_control_diagnostics(
-                failed_capture(job.event, "capture worker is unavailable"),
+                failed_capture_with_snapshot(
+                    job.event,
+                    "capture worker is unavailable",
+                    fallback_shm_snapshot.as_deref(),
+                ),
                 suspend_error,
                 snapshot_error,
                 &failure_sink,
@@ -205,7 +214,11 @@ impl CaptureWorker {
             finish_suspend(&mut suspend_guard);
             self.retire("capture worker queue unavailable");
             return with_task_control_diagnostics(
-                failed_capture(event, "capture worker queue unavailable"),
+                failed_capture_with_snapshot(
+                    event,
+                    "capture worker queue unavailable",
+                    fallback_shm_snapshot.as_deref(),
+                ),
                 suspend_error,
                 snapshot_error,
                 &failure_sink,
@@ -225,14 +238,19 @@ impl CaptureWorker {
             Ok(payload) => CaptureOutcome::Captured(CapturedEvent::new(event_for_result, payload)),
             Err(RecvTimeoutError::Timeout) => {
                 self.retire("capture worker exceeded absolute deadline");
-                timed_out_capture(
+                timed_out_capture_with_snapshot(
                     event_for_result,
                     "capture worker exceeded absolute deadline",
+                    fallback_shm_snapshot.as_deref(),
                 )
             }
             Err(RecvTimeoutError::Disconnected) => {
                 self.retire("capture worker disconnected");
-                failed_capture(event_for_result, "capture worker disconnected")
+                failed_capture_with_snapshot(
+                    event_for_result,
+                    "capture worker disconnected",
+                    fallback_shm_snapshot.as_deref(),
+                )
             }
         };
         with_task_control_diagnostics(outcome, suspend_error, snapshot_error, &failure_sink)
@@ -281,14 +299,54 @@ fn with_task_control_diagnostics(
 }
 
 fn timed_out_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {
-    minimal_capture(event, reason, PluginStatus::TimedOut)
+    minimal_capture(event, reason, PluginStatus::TimedOut, None)
+}
+
+fn timed_out_capture_with_snapshot(
+    event: super::CrashEvent,
+    reason: &str,
+    snapshot: Option<&crate::shm::OwnedShmSnapshot>,
+) -> CaptureOutcome {
+    minimal_capture(
+        event,
+        reason,
+        PluginStatus::TimedOut,
+        raw_shm_from_snapshot(snapshot),
+    )
 }
 
 fn failed_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {
-    minimal_capture(event, reason, PluginStatus::Error(reason.to_string()))
+    minimal_capture(event, reason, PluginStatus::Error(reason.to_string()), None)
 }
 
-fn minimal_capture(event: super::CrashEvent, reason: &str, status: PluginStatus) -> CaptureOutcome {
+fn failed_capture_with_snapshot(
+    event: super::CrashEvent,
+    reason: &str,
+    snapshot: Option<&crate::shm::OwnedShmSnapshot>,
+) -> CaptureOutcome {
+    minimal_capture(
+        event,
+        reason,
+        PluginStatus::Error(reason.to_string()),
+        raw_shm_from_snapshot(snapshot),
+    )
+}
+
+fn raw_shm_from_snapshot(
+    snapshot: Option<&crate::shm::OwnedShmSnapshot>,
+) -> Option<super::RawShmSnapshot> {
+    snapshot.map(|snapshot| super::RawShmSnapshot {
+        breadcrumbs: snapshot.raw_breadcrumb_bytes_owned(),
+        context: snapshot.raw_context_bytes_owned(),
+    })
+}
+
+fn minimal_capture(
+    event: super::CrashEvent,
+    reason: &str,
+    status: PluginStatus,
+    raw_shm: Option<super::RawShmSnapshot>,
+) -> CaptureOutcome {
     eprintln!("[monitor] {reason}; continuing with minimum capture payload");
     let mut diagnostics = Diagnostics::new();
     diagnostics.record_immediate("CaptureWorker", status);
@@ -296,7 +354,7 @@ fn minimal_capture(event: super::CrashEvent, reason: &str, status: PluginStatus)
         event,
         CapturePayload {
             data: super::CollectedData::default(),
-            raw_shm: None,
+            raw_shm,
             diagnostics,
         },
     ))
@@ -682,6 +740,58 @@ mod tests {
         store_shm_context_generation(shm, 2);
     }
 
+    fn write_shm_breadcrumb_marker(shm: &crate::shm::SharedMemory, value: u8) {
+        let offset = crate::shm::SECTION2_OFFSET
+            + std::mem::offset_of!(crate::shm::SutCrumbState, rings)
+            + std::mem::offset_of!(crate::shm::SutCrumbRing, buf)
+            + std::mem::offset_of!(crate::shm::SutBreadcrumb, message);
+        // SAFETY: the marker is one byte inside the complete live mapping and
+        // is written before capture starts.
+        unsafe {
+            *shm.base_ptr().add(offset) = value;
+        }
+    }
+
+    fn assert_preserved_stage1_shm(
+        captured: &CapturedEvent,
+        expected_app_version: &str,
+        expected_breadcrumb_marker: u8,
+    ) {
+        let raw_shm = captured
+            .raw_shm
+            .as_ref()
+            .expect("fallback must retain the already-owned SHM bytes");
+        assert_eq!(raw_shm.breadcrumbs.len(), crate::shm::SECTION2_SIZE);
+        let marker_offset = std::mem::offset_of!(crate::shm::SutCrumbState, rings)
+            + std::mem::offset_of!(crate::shm::SutCrumbRing, buf)
+            + std::mem::offset_of!(crate::shm::SutBreadcrumb, message);
+        assert_eq!(
+            raw_shm.breadcrumbs[marker_offset],
+            expected_breadcrumb_marker
+        );
+
+        let expected_context_len = std::mem::size_of::<crate::shm::SutCrashContext>()
+            + std::mem::size_of::<crate::shm::SutCrashSettingsSnapshot>();
+        assert_eq!(raw_shm.context.len(), expected_context_len);
+        let app_version_offset = std::mem::offset_of!(crate::shm::SutCrashContext, app_version);
+        assert_eq!(
+            &raw_shm.context[app_version_offset..app_version_offset + expected_app_version.len()],
+            expected_app_version.as_bytes()
+        );
+        assert_eq!(
+            raw_shm.context[app_version_offset + expected_app_version.len()],
+            0
+        );
+        assert!(
+            captured
+                .diagnostics
+                .plugins
+                .iter()
+                .all(|entry| entry.name != "ShmSnapshot"),
+            "a stable owned snapshot must not add a success diagnostic"
+        );
+    }
+
     struct WorkerFixture {
         pipeline: Arc<Pipeline>,
         entered_rx: Receiver<()>,
@@ -872,11 +982,13 @@ mod tests {
 
     #[test]
     fn timed_out_worker_reads_owned_shm_after_resume() {
+        const BREADCRUMB_MARKER: u8 = 0xA5;
         let tempdir = tempfile::tempdir().unwrap();
         let shm = Arc::new(
             crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"),
         );
         write_shm_app_version(&shm, "before-resume");
+        write_shm_breadcrumb_marker(&shm, BREADCRUMB_MARKER);
 
         let platform = Arc::new(MockPlatform::default());
         let (entered_tx, entered_rx) = sync_channel(1);
@@ -930,7 +1042,19 @@ mod tests {
             7,
             Instant::now() + Duration::from_secs(1),
         );
-        assert!(matches!(outcome, CaptureOutcome::Captured(_)));
+        let CaptureOutcome::Captured(captured) = outcome else {
+            panic!("a timed-out worker should return the Stage 1 fallback");
+        };
+        assert_preserved_stage1_shm(&captured, "before-resume", BREADCRUMB_MARKER);
+        assert!(matches!(
+            captured
+                .diagnostics
+                .plugins
+                .iter()
+                .find(|entry| entry.name == "CaptureWorker")
+                .map(|entry| &entry.status),
+            Some(PluginStatus::TimedOut)
+        ));
         assert_eq!(platform.resume_count(), 1);
         assert_eq!(
             observed_rx
@@ -940,6 +1064,56 @@ mod tests {
         );
 
         mutator.join().expect("mutator thread");
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn unavailable_sender_after_snapshot_preserves_owned_shm() {
+        const BREADCRUMB_MARKER: u8 = 0x5A;
+        let tempdir = tempfile::tempdir().unwrap();
+        let shm = Arc::new(
+            crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"),
+        );
+        write_shm_app_version(&shm, "sender-missing");
+        write_shm_breadcrumb_marker(&shm, BREADCRUMB_MARKER);
+
+        let platform = Arc::new(MockPlatform::default());
+        let pipeline = Arc::new(Pipeline {
+            enabled: true,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            filters: vec![],
+            collectors: vec![],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: Some(shm),
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+        let mut worker = CaptureWorker::start(pipeline);
+        worker.sender.take();
+
+        let outcome = worker.capture(
+            captured(45).event,
+            8,
+            Instant::now() + Duration::from_secs(2),
+        );
+        let CaptureOutcome::Captured(captured) = outcome else {
+            panic!("an unavailable sender should return the Stage 1 fallback");
+        };
+        assert_preserved_stage1_shm(&captured, "sender-missing", BREADCRUMB_MARKER);
+        assert!(matches!(
+            captured
+                .diagnostics
+                .plugins
+                .iter()
+                .find(|entry| entry.name == "CaptureWorker")
+                .map(|entry| &entry.status),
+            Some(PluginStatus::Error(error)) if error == "capture worker is unavailable"
+        ));
+        assert_eq!(platform.suspend_count(), 1);
+        assert_eq!(platform.resume_count(), 1);
+
         worker.shutdown(Duration::from_secs(1));
     }
 
