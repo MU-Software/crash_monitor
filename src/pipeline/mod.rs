@@ -224,6 +224,20 @@ impl Pipeline {
             .transpose()
     }
 
+    /// Describe a successful snapshot whose publication checks rejected one
+    /// or more units. The snapshot remains usable because its reader has
+    /// already sanitized only the affected byte ranges.
+    pub(super) fn snapshot_consistency_error(
+        snapshot: Option<&crate::shm::OwnedShmSnapshot>,
+    ) -> Option<String> {
+        let issues = snapshot?.consistency_issues();
+        let first = issues.first()?;
+        Some(format!(
+            "shared-memory snapshot contained {} unstable publication unit(s); affected bytes were sanitized; first issue: {first:?}",
+            issues.len()
+        ))
+    }
+
     /// Process a crash/snapshot event synchronously.
     ///
     /// Production Mach events use [`worker`] so finalization cannot delay
@@ -272,7 +286,12 @@ impl Pipeline {
 
         let shm_snapshot = if suspend_guard.is_some() {
             match self.snapshot_shm_while_suspended(None) {
-                Ok(snapshot) => snapshot,
+                Ok(snapshot) => {
+                    if let Some(error) = Self::snapshot_consistency_error(snapshot.as_deref()) {
+                        diagnostics.record_immediate("ShmSnapshot", PluginStatus::Error(error));
+                    }
+                    snapshot
+                }
                 Err(error) => {
                     diagnostics.record_immediate("ShmSnapshot", PluginStatus::Error(error));
                     None

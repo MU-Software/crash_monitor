@@ -24,6 +24,8 @@ INTEGRATION_TESTS := --test shm_round_trip --test shm_validation_failure \
 # Self-contained e2e crash producer (schema-only; no host app dependency).
 E2E_CHILD := tests/e2e/fixtures/crash_app
 E2E_SRC   := tests/e2e/fixtures/crash_app.c
+SHM_ATOMIC_TEST     := target/shm_atomic_contract_test
+SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
 
 # Homebrew LLVM tools for cargo-llvm-cov (macOS).
 LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
@@ -35,7 +37,7 @@ LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
 #   platform/mod.rs  — FFI delegation wrappers
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
-.PHONY: build lint test unit-test integration-test e2e-test e2e-child \
+.PHONY: build lint test unit-test integration-test e2e-test e2e-child shm-atomic-test \
         coverage unit-coverage integration-coverage e2e-coverage clean
 
 # ── Build (release + codesign) ────────────────────────────────
@@ -50,13 +52,20 @@ lint:
 	cargo clippy -- -D warnings -A dead_code
 
 # ── E2E child (compiled from the shm schema alone) ────────────
-$(E2E_CHILD): $(E2E_SRC) schema/crash_shm.h
-	cc -std=c11 -Wall -Wextra -I schema -o $@ $<
+$(E2E_CHILD): $(E2E_SRC) schema/crash_shm.h schema/crash_shm_atomic.h
+	cc -std=c11 -Wall -Wextra -Werror -I schema -o $@ $<
 
 e2e-child: $(E2E_CHILD)
 
+$(SHM_ATOMIC_TEST): $(SHM_ATOMIC_TEST_SRC) schema/crash_shm.h schema/crash_shm_atomic.h
+	mkdir -p $(@D)
+	cc -std=c11 -Wall -Wextra -Werror -I schema -o $@ $<
+
+shm-atomic-test: $(SHM_ATOMIC_TEST)
+	./$(SHM_ATOMIC_TEST)
+
 # ── Tests ─────────────────────────────────────────────────────
-unit-test:
+unit-test: shm-atomic-test
 	cargo test --lib
 
 integration-test:

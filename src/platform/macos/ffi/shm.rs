@@ -5,7 +5,6 @@
 
 use std::ffi::CString;
 use std::ptr;
-use std::sync::atomic::Ordering;
 
 use nix::libc;
 
@@ -93,10 +92,16 @@ pub fn create_shared_memory(monitor_pid: u32) -> Result<SharedMemory, String> {
             (*header).ring_capacity_per_thread = CRUMB_RING_CAPACITY as u32;
             (*header).max_threads = CRUMB_MAX_THREADS as u32;
         }
-        (*header).ring_count.store(0, Ordering::Release);
+        // The region is not shared with a producer yet, so plain zero
+        // initialization is valid here. All live access to these words uses
+        // the atomic publication contract.
+        (*header).breadcrumb_registry_generation = 0;
         (*header).screenshot_slots = SCREENSHOT_SLOTS;
         (*header).screenshot_width = SCREENSHOT_WIDTH;
         (*header).screenshot_height = SCREENSHOT_HEIGHT;
+        (*header).context_generation = 0;
+        (*header).settings_generation = 0;
+        (*header).attachments_generation = 0;
     }
 
     // Write canary

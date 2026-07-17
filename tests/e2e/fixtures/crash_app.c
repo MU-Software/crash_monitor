@@ -3,8 +3,8 @@
  *
  * Standalone: depends ONLY on the shared-memory schema (schema/crash_shm.h),
  * NOT on any host application's crash reporter. It maps the monitor-created
- * region from $CRASH_MONITOR_SHM, writes a breadcrumb + minimal context via the
- * schema layout, then triggers the requested scenario.
+ * region from $CRASH_MONITOR_SHM, publishes a breadcrumb + minimal context via
+ * the schema's release/seqlock contract, then triggers the requested scenario.
  *
  * Usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean>
  *   sigsegv  — NULL pointer dereference
@@ -14,13 +14,12 @@
  *   anr      — hang forever (heartbeat never advances → ANR)
  *   clean    — normal exit (no report expected)
  *
- * The region header (magic + version, 64 bytes) is monitor-owned and, by design,
- * NOT part of the schema (see the monitor's src/shm/types.rs). A producer only
- * needs two facts about it, mirrored below: it is 64 bytes and starts with the
- * magic word. Everything else is derived from the schema struct sizes.
+ * The monitor initializes the 64-byte region header. Its layout, magic, and
+ * schema version are defined by crash_shm.h and validated before any payload
+ * address is derived.
  */
 
-#include "crash_shm.h"
+#include "crash_shm_atomic.h"
 
 #include <fcntl.h>
 #include <signal.h>
@@ -32,10 +31,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-
-/* Monitor-owned region header — authoritative definition in src/shm/types.rs. */
-#define SHM_HEADER_SIZE 64u
-#define SHM_MAGIC 0x434D4F4Eu /* "CMON" (Crash MONitor) */
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -58,41 +53,75 @@ static void populate_shm(const char* scenario) {
         close(fd);
         return;
     }
+    const size_t required = SUT_SHM_TOTAL_SIZE;
+    if (st.st_size < 0 || (uintmax_t)st.st_size < (uintmax_t)required) {
+        close(fd);
+        return;
+    }
     void* base = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (base == MAP_FAILED) return;
 
-    /* Sanity: the monitor stamps the magic when it creates the region. */
-    if (((const uint32_t*)base)[0] != SHM_MAGIC) return;
+    sut_shm_header_t* header = (sut_shm_header_t*)base;
+    if (sut_shm_atomic_u32_load_acquire(&header->magic) != SUT_SHM_MAGIC ||
+        sut_shm_atomic_u32_load_acquire(&header->version) != SUT_SHM_VERSION) {
+        munmap(base, (size_t)st.st_size);
+        return;
+    }
 
     uint8_t* p = (uint8_t*)base;
-    sut_crumb_state_t* crumbs = (sut_crumb_state_t*)(p + SHM_HEADER_SIZE);
-    sut_crash_context_t* ctx = (sut_crash_context_t*)(p + SHM_HEADER_SIZE + sizeof(sut_crumb_state_t));
+    sut_crumb_state_t* crumbs = (sut_crumb_state_t*)(p + sizeof(sut_shm_header_t));
+    sut_crash_context_t* ctx =
+        (sut_crash_context_t*)(p + sizeof(sut_shm_header_t) + sizeof(sut_crumb_state_t));
 
-    /* One breadcrumb into the thread-0 ring, then publish ring_count so the
-     * monitor sees a complete ring (release-store pairs with its acquire read). */
-    sut_crumb_ring_t* ring = &crumbs->rings[0];
-    ring->tid = 1;
-    sut_breadcrumb_t* e = &ring->buf[ring->write_idx & (SUT_CRUMB_RING_CAPACITY - 1)];
-    e->timestamp_ns = now_ns();
-    e->thread_id = ring->tid;
-    e->category = (uint16_t)SUT_CRUMB_CAT_LIFECYCLE;
-    e->severity = 0;
-    strncpy(e->file, "crash_app.c", sizeof(e->file) - 1);
-    e->line = (uint16_t)__LINE__;
-    snprintf(e->message, sizeof(e->message), "scenario=%s", scenario);
-    ring->write_idx++;
-    ring->count++;
-    __atomic_store_n(&crumbs->ring_count, 1u, __ATOMIC_RELEASE);
+    /* Register ring 0 without waiting for another writer. The registry
+     * generation protects registration metadata, the per-ring generation
+     * protects the ring payload, and ring_count is the final release-published
+     * bound consumed by the monitor. */
+    uint32_t registry_write_generation;
+    if (sut_shm_seqlock_try_begin(&header->breadcrumb_registry_generation,
+                                  &registry_write_generation)) {
+        const uint32_t ring_index = sut_shm_atomic_u32_load_acquire(&crumbs->ring_count);
+        if (ring_index < SUT_CRUMB_MAX_THREADS) {
+            sut_crumb_ring_t* ring = &crumbs->rings[ring_index];
+            uint32_t ring_write_generation;
+            if (sut_shm_seqlock_try_begin(&ring->generation, &ring_write_generation)) {
+                ring->tid = 1;
+                sut_breadcrumb_t* e =
+                    &ring->buf[ring->write_idx & (SUT_CRUMB_RING_CAPACITY - 1u)];
+                e->timestamp_ns = now_ns();
+                e->thread_id = ring->tid;
+                e->category = (uint16_t)SUT_CRUMB_CAT_LIFECYCLE;
+                e->severity = 0;
+                strncpy(e->file, "crash_app.c", sizeof(e->file) - 1);
+                e->line = (uint16_t)__LINE__;
+                snprintf(e->message, sizeof(e->message), "scenario=%s", scenario);
+                ring->write_idx++;
+                ring->count++;
+                sut_shm_seqlock_end(&ring->generation, ring_write_generation);
+                sut_shm_atomic_u32_store_release(&crumbs->ring_count, ring_index + 1u);
+            }
+        }
+        sut_shm_seqlock_end(&header->breadcrumb_registry_generation,
+                            registry_write_generation);
+    }
 
-    /* Minimal context: one generic annotation + session. heartbeat_counter is
-     * intentionally left at 0 — the `anr` scenario never advances it, which is
-     * exactly what the watchdog detects. */
-    strncpy(ctx->annotations[0].key, "active_tool", sizeof(ctx->annotations[0].key) - 1);
-    strncpy(ctx->annotations[0].value, "e2e_producer", sizeof(ctx->annotations[0].value) - 1);
-    ctx->annotation_count = 1;
-    strncpy(ctx->session_id, "00000000-0000-4000-8000-000000000000", sizeof(ctx->session_id) - 1);
-    ctx->session_start_ns = now_ns();
+    /* Minimal context uses its own nonblocking seqlock. heartbeat_counter is
+     * an independent atomic live-state word and is intentionally left at 0:
+     * the `anr` scenario never advances it, which the watchdog detects. */
+    uint32_t context_write_generation;
+    if (sut_shm_seqlock_try_begin(&header->context_generation, &context_write_generation)) {
+        strncpy(ctx->annotations[0].key, "active_tool", sizeof(ctx->annotations[0].key) - 1);
+        strncpy(ctx->annotations[0].value, "e2e_producer",
+                sizeof(ctx->annotations[0].value) - 1);
+        ctx->annotation_count = 1;
+        strncpy(ctx->session_id, "00000000-0000-4000-8000-000000000000",
+                sizeof(ctx->session_id) - 1);
+        ctx->session_start_ns = now_ns();
+        sut_shm_seqlock_end(&header->context_generation, context_write_generation);
+    }
+
+    munmap(base, (size_t)st.st_size);
 }
 
 int main(int argc, char* argv[]) {

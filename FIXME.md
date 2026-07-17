@@ -79,18 +79,18 @@
 - [x] raw pointer에서 bounded owned bytes/typed snapshot으로 복사한다.
 - [x] 모든 section과 Stage 1 SHM dump를 child resume 전에 snapshot한다.
 - [x] resume 후에는 해당 이벤트의 payload section을 다시 읽지 않는다. watchdog heartbeat처럼 계속 관측해야 하는 live state는 별도 atomic API로만 읽는다.
-- [ ] generation counter 또는 seqlock으로 torn snapshot을 탐지한다.
+- [x] generation counter 또는 seqlock으로 torn snapshot을 탐지한다.
 
 범위: `src/shm/reader.rs`, `src/pipeline/mod.rs`, `src/pipeline/safety.rs`.
 
 ### P0-08. SHM release/acquire와 일관성 계약을 구현한다
 
-- [ ] C producer의 release store와 Rust consumer의 정렬된 `AtomicU32`/`AtomicU64` acquire load를 실제 ABI로 구현한다.
-- [ ] heartbeat, valid flag, ring state, payload publication 순서를 하나의 명시적 계약으로 정한다.
-- [ ] C/Rust 양쪽에 atomic alignment, size, 핵심 offset compile-time assertion을 둔다.
-- [ ] multi-field snapshot에는 generation/seqlock을 적용한다.
-- [ ] concurrent producer/consumer stress test와 torn-write fixture를 추가한다.
-- [ ] `docs/shared-memory.md`의 acquire 설명과 volatile 설명 사이 모순을 제거한다.
+- [x] C producer의 release store와 Rust consumer의 정렬된 `AtomicU32`/`AtomicU64` acquire load를 실제 ABI로 구현한다.
+- [x] heartbeat, valid flag, ring state, payload publication 순서를 하나의 명시적 계약으로 정한다.
+- [x] C/Rust 양쪽에 atomic alignment, size, 핵심 offset compile-time assertion을 둔다.
+- [x] multi-field snapshot에는 generation/seqlock을 적용한다.
+- [x] concurrent producer/consumer stress test와 torn-write fixture를 추가한다.
+- [x] `docs/shared-memory.md`의 acquire 설명과 volatile 설명 사이 모순을 제거한다.
 
 범위: `schema/crash_shm.h`, `src/shm/reader.rs`, `docs/shared-memory.md`.
 

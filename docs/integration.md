@@ -27,8 +27,11 @@ At startup the child should:
 
 1. Read `CRASH_MONITOR_SHM` from its environment — the monitor sets it to the
    region name before `exec`.
-2. `shm_open` + `mmap` that name and verify the header magic.
-3. Write into the shared sections (see
+2. `shm_open` + `mmap` the complete schema-sized region, then verify both the
+   header magic and the exact `SUT_SHM_VERSION`. A version mismatch means the
+   producer must not derive payload addresses or write to the mapping.
+3. Write into the shared sections using the acquire/release and nonblocking
+   seqlock helpers from `schema/crash_shm_atomic.h` (see
    [shared-memory.md](shared-memory.md)):
    - **breadcrumbs** — a short trail of recent activity;
    - **annotations** — domain state as `key`/`value` string pairs;

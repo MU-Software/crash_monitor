@@ -5,10 +5,11 @@
 //! On crash/snapshot, the monitor copies the complete mapped region into an
 //! immutable owned snapshot while the child is suspended. Payload parsers and
 //! Stage 1 persistence consume only those owned bytes after that boundary;
-//! only the watchdog heartbeat remains a live acquire-atomic read.
+//! only publication words and the watchdog heartbeat are read from the live
+//! mapping, always through aligned acquire atomics.
 //!
-//! All `#[repr(C)]` structs mirror the C definitions in `sut_crash_reporter.h`.
-//! Layout correctness is enforced by compile-time size assertions and CI tests.
+//! All C ABI structs are generated from `schema/crash_shm.h`. Layout
+//! correctness is enforced by compile-time size/offset assertions and tests.
 
 pub mod reader;
 pub mod types;

@@ -1,9 +1,9 @@
 //! `SharedMemory` handle and immutable, owned snapshots of its payload.
 
 use std::fmt;
-use std::mem::{offset_of, size_of};
+use std::mem::{align_of, offset_of, size_of};
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 use std::time::Instant;
 
 #[allow(clippy::wildcard_imports)] // re-export convenience — all types are public
@@ -26,7 +26,37 @@ const ANNOTATION_VALUE_LEN: usize = 64;
 const SETTINGS_EXTRA_LEN: usize = 128;
 const ATTACHMENT_LABEL_LEN: usize = 32;
 const ATTACHMENT_PATH_LEN: usize = 256;
-const ATTACHMENT_SLOT_COUNT: usize = 4;
+const ATTACHMENT_SLOT_COUNT: usize = MAX_ATTACHMENTS;
+
+const REGISTRY_GENERATION_OFFSET: usize =
+    SECTION1_OFFSET + offset_of!(ShmHeader, breadcrumb_registry_generation);
+const CONTEXT_GENERATION_OFFSET: usize =
+    SECTION1_OFFSET + offset_of!(ShmHeader, context_generation);
+const SETTINGS_GENERATION_OFFSET: usize =
+    SECTION1_OFFSET + offset_of!(ShmHeader, settings_generation);
+const ATTACHMENTS_GENERATION_OFFSET: usize =
+    SECTION1_OFFSET + offset_of!(ShmHeader, attachments_generation);
+const RING_COUNT_OFFSET: usize = SECTION2_OFFSET + offset_of!(SutCrumbState, ring_count);
+const RINGS_OFFSET: usize = SECTION2_OFFSET + offset_of!(SutCrumbState, rings);
+const RING_GENERATION_OFFSET: usize = offset_of!(SutCrumbRing, generation);
+const SCREENSHOT_GENERATIONS_OFFSET: usize =
+    SECTION4_OFFSET + offset_of!(SutScreenshotSection, valid);
+const SCREENSHOT_TIMESTAMPS_OFFSET: usize =
+    SECTION4_OFFSET + offset_of!(SutScreenshotSection, timestamp);
+const SCREENSHOT_TIERS_OFFSET: usize = SECTION4_OFFSET + offset_of!(SutScreenshotSection, tier);
+const SCREENSHOT_DATA_OFFSET: usize = SECTION4_OFFSET + offset_of!(SutScreenshotSection, data);
+const HEARTBEAT_OFFSET: usize = CONTEXT_OFFSET + offset_of!(SutCrashContext, heartbeat_counter);
+
+const _: () = assert!(REGISTRY_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(CONTEXT_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(SETTINGS_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(ATTACHMENTS_GENERATION_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(RING_COUNT_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
+const _: () =
+    assert!((RINGS_OFFSET + RING_GENERATION_OFFSET).is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(size_of::<SutCrumbRing>().is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(SCREENSHOT_GENERATIONS_OFFSET.is_multiple_of(align_of::<AtomicU32>()));
+const _: () = assert!(HEARTBEAT_OFFSET.is_multiple_of(align_of::<AtomicU64>()));
 
 /// Failure to copy or validate an immutable shared-memory snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,6 +106,42 @@ impl fmt::Display for ShmSnapshotError {
 
 impl std::error::Error for ShmSnapshotError {}
 
+/// A publication unit that could not be proven stable during a snapshot.
+///
+/// The affected bytes are sanitized in the owned snapshot while unrelated
+/// publication units remain available to collectors and Stage 1 persistence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShmConsistencyIssue {
+    BreadcrumbRegistry {
+        generation_before: u32,
+        generation_after: u32,
+        ring_count_before: u32,
+        ring_count_after: u32,
+    },
+    BreadcrumbRing {
+        index: usize,
+        generation_before: u32,
+        generation_after: u32,
+    },
+    Context {
+        generation_before: u32,
+        generation_after: u32,
+    },
+    Settings {
+        generation_before: u32,
+        generation_after: u32,
+    },
+    Attachments {
+        generation_before: u32,
+        generation_after: u32,
+    },
+    ScreenshotSlot {
+        index: usize,
+        generation_before: u32,
+        generation_after: u32,
+    },
+}
+
 /// Immutable bytes copied from the complete shared-memory mapping.
 ///
 /// No method on this type reads the live mapping. Parsing uses checked byte
@@ -83,21 +149,35 @@ impl std::error::Error for ShmSnapshotError {}
 /// materialized as a bindgen-generated Rust struct.
 pub struct OwnedShmSnapshot {
     bytes: Vec<u8>,
+    consistency_issues: Vec<ShmConsistencyIssue>,
 }
 
 impl fmt::Debug for OwnedShmSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OwnedShmSnapshot")
             .field("len", &self.bytes.len())
+            .field("consistency_issues", &self.consistency_issues)
             .finish_non_exhaustive()
     }
 }
 
 impl OwnedShmSnapshot {
-    fn from_owned_bytes(bytes: Vec<u8>) -> Result<Self, ShmSnapshotError> {
-        let snapshot = Self { bytes };
+    fn from_owned_bytes(
+        bytes: Vec<u8>,
+        consistency_issues: Vec<ShmConsistencyIssue>,
+    ) -> Result<Self, ShmSnapshotError> {
+        let snapshot = Self {
+            bytes,
+            consistency_issues,
+        };
         snapshot.validate()?;
         Ok(snapshot)
+    }
+
+    /// Publication units rejected because their generation changed or was odd.
+    #[must_use]
+    pub fn consistency_issues(&self) -> &[ShmConsistencyIssue] {
+        &self.consistency_issues
     }
 
     fn validate(&self) -> Result<(), ShmSnapshotError> {
@@ -196,6 +276,13 @@ impl OwnedShmSnapshot {
     /// Read crash context from this immutable snapshot.
     #[must_use]
     pub fn read_context(&self) -> Option<RawCrashContext> {
+        if self
+            .consistency_issues
+            .iter()
+            .any(|issue| matches!(issue, ShmConsistencyIssue::Context { .. }))
+        {
+            return None;
+        }
         let field = |offset| CONTEXT_OFFSET.checked_add(offset);
         let heartbeat_counter =
             self.read_u64(field(offset_of!(SutCrashContext, heartbeat_counter))?)?;
@@ -278,6 +365,13 @@ impl OwnedShmSnapshot {
     /// Read settings from this immutable snapshot.
     #[must_use]
     pub fn read_settings(&self) -> Option<RawSettingsSnapshot> {
+        if self
+            .consistency_issues
+            .iter()
+            .any(|issue| matches!(issue, ShmConsistencyIssue::Settings { .. }))
+        {
+            return None;
+        }
         let field = |offset| SETTINGS_OFFSET.checked_add(offset);
         let world_min = field(offset_of!(SutCrashSettingsSnapshot, world_bound_min))?;
         let world_max = field(offset_of!(SutCrashSettingsSnapshot, world_bound_max))?;
@@ -298,6 +392,13 @@ impl OwnedShmSnapshot {
     /// Read registered attachment paths from this immutable snapshot.
     #[must_use]
     pub fn read_attachments(&self) -> Vec<RawAttachment> {
+        if self
+            .consistency_issues
+            .iter()
+            .any(|issue| matches!(issue, ShmConsistencyIssue::Attachments { .. }))
+        {
+            return Vec::new();
+        }
         let Some(count_offset) =
             ATTACHMENT_OFFSET.checked_add(offset_of!(ShmAttachmentSection, count))
         else {
@@ -360,7 +461,9 @@ impl OwnedShmSnapshot {
             else {
                 break;
             };
-            if valid == 0 {
+            // `valid` is a per-slot generation: zero is empty, odd is being
+            // written, and a non-zero even value is published.
+            if valid == 0 || !valid.is_multiple_of(2) {
                 continue;
             }
             let Some(timestamp_ns) = indexed_offset(timestamp_offset, index, size_of::<u64>())
@@ -468,6 +571,227 @@ fn indexed_offset(base: usize, index: usize, stride: usize) -> Option<usize> {
     base.checked_add(index.checked_mul(stride)?)
 }
 
+fn check_snapshot_deadline(deadline: Option<Instant>) -> Result<(), ShmSnapshotError> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err(ShmSnapshotError::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LivePublicationState {
+    registry_generation: u32,
+    ring_count: u32,
+    ring_generations: [u32; CRUMB_MAX_THREADS],
+    context_generation: u32,
+    settings_generation: u32,
+    attachments_generation: u32,
+    screenshot_generations: [u32; SCREENSHOT_SLOTS as usize],
+}
+
+impl Default for LivePublicationState {
+    fn default() -> Self {
+        Self {
+            registry_generation: 0,
+            ring_count: 0,
+            ring_generations: [0; CRUMB_MAX_THREADS],
+            context_generation: 0,
+            settings_generation: 0,
+            attachments_generation: 0,
+            screenshot_generations: [0; SCREENSHOT_SLOTS as usize],
+        }
+    }
+}
+
+const fn stable_generation(before: u32, after: u32) -> bool {
+    before == after && before.is_multiple_of(2)
+}
+
+fn zero_owned_range(bytes: &mut [u8], offset: usize, len: usize) {
+    let Some(end) = offset.checked_add(len) else {
+        return;
+    };
+    if let Some(range) = bytes.get_mut(offset..end) {
+        range.fill(0);
+    }
+}
+
+fn write_owned_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    let Some(end) = offset.checked_add(size_of::<u32>()) else {
+        return;
+    };
+    if let Some(range) = bytes.get_mut(offset..end) {
+        range.copy_from_slice(&value.to_ne_bytes());
+    }
+}
+
+fn write_owned_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    let Some(end) = offset.checked_add(size_of::<u64>()) else {
+        return;
+    };
+    if let Some(range) = bytes.get_mut(offset..end) {
+        range.copy_from_slice(&value.to_ne_bytes());
+    }
+}
+
+fn sanitize_breadcrumbs(
+    bytes: &mut [u8],
+    before: &LivePublicationState,
+    after: &LivePublicationState,
+    issues: &mut Vec<ShmConsistencyIssue>,
+) {
+    let registry_is_stable =
+        stable_generation(before.registry_generation, after.registry_generation)
+            && before.ring_count == after.ring_count;
+    if registry_is_stable {
+        write_owned_u32(bytes, RING_COUNT_OFFSET, after.ring_count);
+        // Stage 1 persists the complete fixed ring array, so inactive slots
+        // must be checked too while registration is in progress.
+        for index in 0..CRUMB_MAX_THREADS {
+            let generation_before = before.ring_generations[index];
+            let generation_after = after.ring_generations[index];
+            let Some(ring_offset) = indexed_offset(RINGS_OFFSET, index, size_of::<SutCrumbRing>())
+            else {
+                continue;
+            };
+            if stable_generation(generation_before, generation_after) {
+                if let Some(generation_offset) = ring_offset.checked_add(RING_GENERATION_OFFSET) {
+                    write_owned_u32(bytes, generation_offset, generation_after);
+                }
+            } else {
+                zero_owned_range(bytes, ring_offset, size_of::<SutCrumbRing>());
+                issues.push(ShmConsistencyIssue::BreadcrumbRing {
+                    index,
+                    generation_before,
+                    generation_after,
+                });
+            }
+        }
+    } else {
+        zero_owned_range(bytes, SECTION2_OFFSET, SECTION2_SIZE);
+        issues.push(ShmConsistencyIssue::BreadcrumbRegistry {
+            generation_before: before.registry_generation,
+            generation_after: after.registry_generation,
+            ring_count_before: before.ring_count,
+            ring_count_after: after.ring_count,
+        });
+    }
+}
+
+fn sanitize_context_settings_attachments(
+    bytes: &mut [u8],
+    before: &LivePublicationState,
+    after: &LivePublicationState,
+    issues: &mut Vec<ShmConsistencyIssue>,
+) {
+    if !stable_generation(before.context_generation, after.context_generation) {
+        zero_owned_range(bytes, CONTEXT_OFFSET, size_of::<SutCrashContext>());
+        issues.push(ShmConsistencyIssue::Context {
+            generation_before: before.context_generation,
+            generation_after: after.context_generation,
+        });
+    }
+
+    if !stable_generation(before.settings_generation, after.settings_generation) {
+        zero_owned_range(
+            bytes,
+            SETTINGS_OFFSET,
+            size_of::<SutCrashSettingsSnapshot>(),
+        );
+        issues.push(ShmConsistencyIssue::Settings {
+            generation_before: before.settings_generation,
+            generation_after: after.settings_generation,
+        });
+    }
+
+    if !stable_generation(before.attachments_generation, after.attachments_generation) {
+        zero_owned_range(bytes, ATTACHMENT_OFFSET, size_of::<ShmAttachmentSection>());
+        issues.push(ShmConsistencyIssue::Attachments {
+            generation_before: before.attachments_generation,
+            generation_after: after.attachments_generation,
+        });
+    }
+}
+
+fn sanitize_screenshots(
+    bytes: &mut [u8],
+    before: &LivePublicationState,
+    after: &LivePublicationState,
+    issues: &mut Vec<ShmConsistencyIssue>,
+    deadline: Option<Instant>,
+) -> Result<(), ShmSnapshotError> {
+    for index in 0..SCREENSHOT_SLOTS as usize {
+        check_snapshot_deadline(deadline)?;
+        let generation_before = before.screenshot_generations[index];
+        let generation_after = after.screenshot_generations[index];
+        let Some(generation_offset) =
+            indexed_offset(SCREENSHOT_GENERATIONS_OFFSET, index, size_of::<u32>())
+        else {
+            continue;
+        };
+        if stable_generation(generation_before, generation_after) {
+            write_owned_u32(bytes, generation_offset, generation_after);
+        } else {
+            write_owned_u32(bytes, generation_offset, 0);
+            if let Some(offset) =
+                indexed_offset(SCREENSHOT_TIMESTAMPS_OFFSET, index, size_of::<u64>())
+            {
+                zero_owned_range(bytes, offset, size_of::<u64>());
+            }
+            if let Some(offset) = indexed_offset(SCREENSHOT_TIERS_OFFSET, index, size_of::<u32>()) {
+                zero_owned_range(bytes, offset, size_of::<u32>());
+            }
+            if let Some(offset) =
+                indexed_offset(SCREENSHOT_DATA_OFFSET, index, SCREENSHOT_BYTES_PER_SLOT)
+            {
+                zero_owned_range(bytes, offset, SCREENSHOT_BYTES_PER_SLOT);
+            }
+            issues.push(ShmConsistencyIssue::ScreenshotSlot {
+                index,
+                generation_before,
+                generation_after,
+            });
+        }
+    }
+    check_snapshot_deadline(deadline)
+}
+
+fn sanitize_publications(
+    bytes: &mut [u8],
+    before: &LivePublicationState,
+    after: &LivePublicationState,
+    heartbeat: u64,
+    deadline: Option<Instant>,
+) -> Result<Vec<ShmConsistencyIssue>, ShmSnapshotError> {
+    let mut issues = Vec::new();
+
+    // Keep the copied header's publication words aligned with the acquire
+    // observations used to approve or reject each payload unit.
+    write_owned_u32(bytes, REGISTRY_GENERATION_OFFSET, after.registry_generation);
+    write_owned_u32(bytes, CONTEXT_GENERATION_OFFSET, after.context_generation);
+    write_owned_u32(bytes, SETTINGS_GENERATION_OFFSET, after.settings_generation);
+    write_owned_u32(
+        bytes,
+        ATTACHMENTS_GENERATION_OFFSET,
+        after.attachments_generation,
+    );
+
+    check_snapshot_deadline(deadline)?;
+    sanitize_breadcrumbs(bytes, before, after, &mut issues);
+    check_snapshot_deadline(deadline)?;
+    sanitize_context_settings_attachments(bytes, before, after, &mut issues);
+    check_snapshot_deadline(deadline)?;
+    sanitize_screenshots(bytes, before, after, &mut issues, deadline)?;
+
+    // Heartbeat publication is independent from the context seqlock. Always
+    // replace the raw-copy bytes with one aligned acquire load taken after the
+    // copy, including when the rest of context was rejected and zeroed.
+    write_owned_u64(bytes, HEARTBEAT_OFFSET, heartbeat);
+
+    Ok(issues)
+}
+
 // ═══════════════════════════════════════════════════
 //  SharedMemory handle
 // ═══════════════════════════════════════════════════
@@ -480,14 +804,83 @@ pub struct SharedMemory {
     pub(crate) size: usize,
 }
 
-// SAFETY: payload access never creates borrowed references into the mapping.
-// Complete payloads are copied through bounded raw pointers while the caller
-// owns task suspension. The one running-child observation is an aligned atomic
-// heartbeat load.
+// SAFETY: payload access never creates ordinary borrowed references into the
+// mapping. Complete payloads are copied through bounded raw pointers while the
+// caller owns task suspension. References are formed only for aligned atomic
+// publication words and the independently observed heartbeat.
 unsafe impl Send for SharedMemory {}
 unsafe impl Sync for SharedMemory {}
 
 impl SharedMemory {
+    fn load_atomic_u32_at(&self, offset: usize) -> Option<u32> {
+        let end = offset.checked_add(size_of::<AtomicU32>())?;
+        if end > self.size || !offset.is_multiple_of(align_of::<AtomicU32>()) {
+            return None;
+        }
+
+        // SAFETY: the checked range lies inside the live mapping. mmap returns
+        // page-aligned storage and the offset alignment is checked above. The
+        // producer accesses every publication word through the matching C
+        // atomic ABI; this atomic reference is the intentional exception to
+        // the no-borrowed-references rule for live shared memory.
+        #[allow(clippy::cast_ptr_alignment)] // checked immediately above
+        let value = unsafe { &*self.base.add(offset).cast::<AtomicU32>() };
+        Some(value.load(Ordering::Acquire))
+    }
+
+    fn load_atomic_u64_at(&self, offset: usize) -> Option<u64> {
+        let end = offset.checked_add(size_of::<AtomicU64>())?;
+        if end > self.size || !offset.is_multiple_of(align_of::<AtomicU64>()) {
+            return None;
+        }
+
+        // SAFETY: see `load_atomic_u32_at`; this is the aligned 64-bit atomic
+        // form used by the independently published heartbeat counter.
+        #[allow(clippy::cast_ptr_alignment)] // checked immediately above
+        let value = unsafe { &*self.base.add(offset).cast::<AtomicU64>() };
+        Some(value.load(Ordering::Acquire))
+    }
+
+    fn load_publication_state(&self) -> LivePublicationState {
+        let mut ring_generations = [0; CRUMB_MAX_THREADS];
+        for (index, generation) in ring_generations.iter_mut().enumerate() {
+            let offset = indexed_offset(RINGS_OFFSET, index, size_of::<SutCrumbRing>())
+                .and_then(|ring| ring.checked_add(RING_GENERATION_OFFSET));
+            if let Some(offset) = offset {
+                *generation = self.load_atomic_u32_at(offset).unwrap_or_default();
+            }
+        }
+
+        let mut screenshot_generations = [0; SCREENSHOT_SLOTS as usize];
+        for (index, generation) in screenshot_generations.iter_mut().enumerate() {
+            if let Some(offset) =
+                indexed_offset(SCREENSHOT_GENERATIONS_OFFSET, index, size_of::<u32>())
+            {
+                *generation = self.load_atomic_u32_at(offset).unwrap_or_default();
+            }
+        }
+
+        LivePublicationState {
+            registry_generation: self
+                .load_atomic_u32_at(REGISTRY_GENERATION_OFFSET)
+                .unwrap_or_default(),
+            ring_count: self
+                .load_atomic_u32_at(RING_COUNT_OFFSET)
+                .unwrap_or_default(),
+            ring_generations,
+            context_generation: self
+                .load_atomic_u32_at(CONTEXT_GENERATION_OFFSET)
+                .unwrap_or_default(),
+            settings_generation: self
+                .load_atomic_u32_at(SETTINGS_GENERATION_OFFSET)
+                .unwrap_or_default(),
+            attachments_generation: self
+                .load_atomic_u32_at(ATTACHMENTS_GENERATION_OFFSET)
+                .unwrap_or_default(),
+            screenshot_generations,
+        }
+    }
+
     /// Create a new shared memory region. Delegates to platform-specific implementation.
     ///
     /// # Errors
@@ -505,8 +898,9 @@ impl SharedMemory {
     /// Copy the complete mapping into immutable owned bytes before `deadline`.
     ///
     /// The caller must invoke this while it owns target-process suspension. A
-    /// deadline is checked at every bounded copy chunk; no borrowed reference
-    /// or slice is ever formed over the live mapping.
+    /// deadline is checked at every bounded copy chunk and screenshot
+    /// sanitization slot; no ordinary borrowed reference or slice is ever
+    /// formed over the live mapping.
     ///
     /// # Errors
     /// Returns an error for a short mapping, elapsed deadline, or invalid copied
@@ -530,6 +924,8 @@ impl SharedMemory {
                 requested: SHM_TOTAL_SIZE,
             }
         })?;
+
+        let publication_before = self.load_publication_state();
         while bytes.len() < SHM_TOTAL_SIZE {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(ShmSnapshotError::DeadlineExceeded);
@@ -551,10 +947,26 @@ impl SharedMemory {
             }
         }
 
+        // Pair the bounded raw copy with the producer's release publication.
+        // Each acquire-loaded generation is compared with the corresponding
+        // pre-copy value below; there is deliberately no retry or spin.
+        fence(Ordering::Acquire);
+        let publication_after = self.load_publication_state();
+        let heartbeat = self
+            .load_atomic_u64_at(HEARTBEAT_OFFSET)
+            .unwrap_or_default();
+
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(ShmSnapshotError::DeadlineExceeded);
         }
-        let snapshot = OwnedShmSnapshot::from_owned_bytes(bytes)?;
+        let consistency_issues = sanitize_publications(
+            &mut bytes,
+            &publication_before,
+            &publication_after,
+            heartbeat,
+            deadline,
+        )?;
+        let snapshot = OwnedShmSnapshot::from_owned_bytes(bytes, consistency_issues)?;
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(ShmSnapshotError::DeadlineExceeded);
         }
@@ -563,20 +975,12 @@ impl SharedMemory {
 
     /// Read the heartbeat counter using an aligned acquire atomic load.
     ///
-    /// This is the only API that observes the mapping while the child runs.
+    /// This is the only payload API used for ongoing observation outside
+    /// snapshot acquisition.
     #[must_use]
     pub fn read_live_heartbeat(&self) -> u64 {
-        const HEARTBEAT_OFFSET: usize =
-            CONTEXT_OFFSET + offset_of!(SutCrashContext, heartbeat_counter);
-        const _: () = assert!(HEARTBEAT_OFFSET.is_multiple_of(align_of::<AtomicU64>()));
-        debug_assert!(self.size >= HEARTBEAT_OFFSET + size_of::<AtomicU64>());
-
-        // SAFETY: the mapping is live for `self`; the compile-time assertion
-        // establishes alignment and creation always maps the full schema. The C
-        // producer accesses this exact ABI word atomically.
-        #[allow(clippy::cast_ptr_alignment)] // proven by the const assertion above
-        let heartbeat = unsafe { &*self.base.add(HEARTBEAT_OFFSET).cast::<AtomicU64>() };
-        heartbeat.load(Ordering::Acquire)
+        self.load_atomic_u64_at(HEARTBEAT_OFFSET)
+            .unwrap_or_default()
     }
 
     /// Total shared memory size.

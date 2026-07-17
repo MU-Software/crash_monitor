@@ -25,7 +25,8 @@ fn main() {
         // The breadcrumb category enum is unused in Rust (category is read as
         // u16); blocklisting it drops bindgen's redundant typedef alias.
         .blocklist_type("sut_crumb_category.*")
-        // No Default derive; the shm structs are read via ptr::read_volatile.
+        // No Default derive; owned snapshots are decoded from checked byte
+        // ranges instead of materializing bindgen-generated C structs.
         .derive_default(false)
         .generate()
         .expect("bindgen failed to generate crash_shm bindings");

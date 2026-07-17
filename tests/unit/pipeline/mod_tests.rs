@@ -98,7 +98,7 @@ fn unique_shm_pid() -> u32 {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
 }
 
-fn write_shm_app_version(shm: &crate::shm::SharedMemory, value: &str) {
+fn write_shm_app_version_bytes(shm: &crate::shm::SharedMemory, value: &str) {
     const FIELD_LEN: usize = 16;
     assert!(value.len() < FIELD_LEN);
     let offset =
@@ -110,6 +110,46 @@ fn write_shm_app_version(shm: &crate::shm::SharedMemory, value: &str) {
         std::ptr::write_bytes(field, 0, FIELD_LEN);
         std::ptr::copy_nonoverlapping(value.as_ptr(), field, value.len());
     }
+}
+
+fn write_shm_history_max(shm: &crate::shm::SharedMemory, value: i32) {
+    let offset = crate::shm::SETTINGS_OFFSET
+        + std::mem::offset_of!(crate::shm::SutCrashSettingsSnapshot, history_max);
+    // SAFETY: the test owns this mapping and writes one in-bounds schema field
+    // before any snapshot operation starts.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            value.to_ne_bytes().as_ptr(),
+            shm.base_ptr().add(offset),
+            std::mem::size_of::<i32>(),
+        );
+    }
+}
+
+fn store_shm_context_generation(shm: &crate::shm::SharedMemory, value: u32) {
+    let offset = crate::shm::SECTION1_OFFSET
+        + std::mem::offset_of!(crate::shm::ShmHeader, context_generation);
+    // SAFETY: the schema guarantees this publication word is naturally
+    // aligned, and the test keeps the mapping alive for the atomic store.
+    #[allow(clippy::cast_ptr_alignment)] // schema offset is compile-time aligned
+    let generation = unsafe { &*shm.base_ptr().add(offset).cast::<AtomicU32>() };
+    generation.store(value, Ordering::Release);
+}
+
+fn store_shm_settings_generation(shm: &crate::shm::SharedMemory, value: u32) {
+    let offset = crate::shm::SECTION1_OFFSET
+        + std::mem::offset_of!(crate::shm::ShmHeader, settings_generation);
+    // SAFETY: the schema guarantees this publication word is naturally
+    // aligned, and the test keeps the mapping alive for the atomic store.
+    #[allow(clippy::cast_ptr_alignment)] // schema offset is compile-time aligned
+    let generation = unsafe { &*shm.base_ptr().add(offset).cast::<AtomicU32>() };
+    generation.store(value, Ordering::Release);
+}
+
+fn publish_shm_app_version(shm: &crate::shm::SharedMemory, value: &str) {
+    store_shm_context_generation(shm, 1);
+    write_shm_app_version_bytes(shm, value);
+    store_shm_context_generation(shm, 2);
 }
 
 #[test]
@@ -246,7 +286,7 @@ fn test_stage1_shm_dump_uses_pre_resume_owned_bytes() {
     let tempdir = tempfile::tempdir().unwrap();
     let shm =
         Arc::new(crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"));
-    write_shm_app_version(&shm, "before-resume");
+    publish_shm_app_version(&shm, "before-resume");
     let platform = Arc::new(MockPlatform::default());
     let pipeline = Pipeline {
         enabled: true,
@@ -265,9 +305,17 @@ fn test_stage1_shm_dump_uses_pre_resume_owned_bytes() {
         panic!("capture should succeed");
     };
     assert_eq!(platform.resume_count(), 1);
+    assert!(
+        !captured
+            .diagnostics
+            .plugins
+            .iter()
+            .any(|entry| entry.name == "ShmSnapshot"),
+        "a stable snapshot must not produce a consistency diagnostic"
+    );
 
     // Simulate the child changing the live mapping immediately after resume.
-    write_shm_app_version(&shm, "after-resume");
+    publish_shm_app_version(&shm, "after-resume");
     let _ = pipeline.finalize_captured(captured);
 
     let raw_context = std::fs::read_dir(tempdir.path())
@@ -290,6 +338,118 @@ fn test_stage1_shm_dump_uses_pre_resume_owned_bytes() {
         !bytes
             .windows("after-resume".len())
             .any(|window| window == b"after-resume")
+    );
+}
+
+#[test]
+fn test_torn_context_snapshot_is_diagnosed_and_sanitized_without_live_reaccess() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"));
+    store_shm_context_generation(&shm, 1);
+    write_shm_app_version_bytes(&shm, "torn-context");
+    store_shm_settings_generation(&shm, 1);
+    write_shm_history_max(&shm, 321);
+    store_shm_settings_generation(&shm, 2);
+
+    let platform = Arc::new(MockPlatform::default());
+    let mut pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![Box::new(crate::collectors::ContextCollector::new())],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm.clone()),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+
+    let CaptureOutcome::Captured(captured) = pipeline.capture_event(&make_event(), 7) else {
+        panic!("capture should retain sanitized stable sections");
+    };
+    assert_eq!(platform.resume_count(), 1);
+    assert!(captured.diagnostics.succeeded("ContextCollector"));
+    let snapshot_diagnostic = captured
+        .diagnostics
+        .plugins
+        .iter()
+        .find(|entry| entry.name == "ShmSnapshot")
+        .expect("torn context consistency diagnostic");
+    assert!(
+        matches!(
+            &snapshot_diagnostic.status,
+            PluginStatus::Error(error) if error.contains("Context") && error.contains("sanitized")
+        ),
+        "unexpected snapshot diagnostic: {:?}",
+        snapshot_diagnostic.status
+    );
+
+    assert!(
+        captured.data.raw.crash_context.is_none(),
+        "the torn context must not reach collectors"
+    );
+    assert_eq!(
+        captured
+            .data
+            .raw
+            .settings_snapshot
+            .as_ref()
+            .expect("stable settings remain readable")
+            .history_max,
+        321
+    );
+
+    let raw_context = &captured
+        .raw_shm
+        .as_ref()
+        .expect("sanitized Stage 1 snapshot remains available")
+        .context;
+    let context_len = std::mem::size_of::<crate::shm::SutCrashContext>();
+    assert!(
+        raw_context[..context_len].iter().all(|byte| *byte == 0),
+        "the rejected context bytes must be zeroed"
+    );
+    let history_max_offset =
+        context_len + std::mem::offset_of!(crate::shm::SutCrashSettingsSnapshot, history_max);
+    assert_eq!(
+        i32::from_ne_bytes(
+            raw_context[history_max_offset..history_max_offset + std::mem::size_of::<i32>()]
+                .try_into()
+                .unwrap()
+        ),
+        321,
+        "the stable settings bytes must be preserved"
+    );
+    let expected_stage1 = raw_context.clone();
+
+    // Remove the last live-mapping owners before finalization. Any accidental
+    // post-resume mapping access would now fail; Stage 1 must use owned bytes.
+    drop(pipeline.shm.take());
+    drop(shm);
+    let diagnostics = pipeline.finalize_captured(captured);
+    assert!(
+        diagnostics
+            .plugins
+            .iter()
+            .any(|entry| entry.name == "ShmSnapshot"),
+        "the consistency diagnostic must survive finalization"
+    );
+
+    let raw_context_path = std::fs::read_dir(tempdir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with("_raw_context.bin")
+        })
+        .expect("Stage 1 context dump");
+    assert_eq!(
+        std::fs::read(raw_context_path.path()).unwrap(),
+        expected_stage1
     );
 }
 

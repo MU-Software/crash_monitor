@@ -13,13 +13,54 @@
 #ifndef CRASH_SHM_H_
 #define CRASH_SHM_H_
 
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Fields that are accessed atomically by the producer are declared with plain
- * integer types here (not _Atomic): atomicity is an access property, not a
- * layout property, and _Atomic is not representable by bindgen. The C producer
- * uses __atomic_* builtins on these fields; the monitor reads them volatile. */
+/* Fields accessed atomically remain plain fixed-width integers in this layout
+ * header because bindgen does not model C _Atomic fields. Both processes MUST
+ * access those words through their language's aligned atomic operations. C
+ * producers use the helpers in crash_shm_atomic.h. */
+
+/* ── Region header — 64 bytes, initialized by the monitor ── */
+#define SUT_SHM_MAGIC   0x434D4F4Eu /* "CMON" (Crash MONitor) */
+#define SUT_SHM_VERSION 2u
+#define SUT_SHM_CANARY  0xDEADBEEFu
+#define SUT_SHM_TOTAL_SIZE 50033364u
+
+typedef struct sut_shm_header {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t ring_capacity_per_thread;
+    uint32_t max_threads;
+
+    /* Seqlock for ring registration and the breadcrumb-state ring_count. */
+    uint32_t breadcrumb_registry_generation;
+
+    uint32_t screenshot_slots;
+    uint32_t screenshot_width;
+    uint32_t screenshot_height;
+
+    /* Independent seqlocks for the corresponding multi-field sections. */
+    uint32_t context_generation;
+    uint32_t settings_generation;
+    uint32_t attachments_generation;
+    uint8_t reserved[20];
+} sut_shm_header_t;
+
+_Static_assert(sizeof(sut_shm_header_t) == 64, "sut_shm_header_t must be 64 bytes");
+_Static_assert(offsetof(sut_shm_header_t, magic) == 0, "header magic offset changed");
+_Static_assert(offsetof(sut_shm_header_t, version) == 4, "header version offset changed");
+_Static_assert(offsetof(sut_shm_header_t, breadcrumb_registry_generation) == 16,
+               "breadcrumb registry generation offset changed");
+_Static_assert(offsetof(sut_shm_header_t, screenshot_slots) == 20,
+               "screenshot slot-count offset changed");
+_Static_assert(offsetof(sut_shm_header_t, context_generation) == 32,
+               "context generation offset changed");
+_Static_assert(offsetof(sut_shm_header_t, settings_generation) == 36,
+               "settings generation offset changed");
+_Static_assert(offsetof(sut_shm_header_t, attachments_generation) == 40,
+               "attachments generation offset changed");
 
 /* ── Breadcrumb category ── */
 typedef enum sut_crumb_category {
@@ -36,7 +77,7 @@ typedef enum sut_crumb_category {
     SUT_CRUMB_CAT_USER,
 } sut_crumb_category_t;
 
-/* ── Breadcrumb entry — 64 bytes, cache-line aligned ── */
+/* ── Breadcrumb entry — 64-byte fixed stride ── */
 typedef struct sut_breadcrumb {
     uint64_t timestamp_ns; /* monotonic nanoseconds */
     uint32_t thread_id;    /* Mach thread ID (macOS) or pthread ID */
@@ -56,17 +97,24 @@ _Static_assert(sizeof(sut_breadcrumb_t) == 64, "sut_breadcrumb_t must be 64 byte
 
 typedef struct sut_crumb_ring {
     sut_breadcrumb_t buf[SUT_CRUMB_RING_CAPACITY];
-    uint32_t write_idx; /* this thread only — no atomic needed */
-    uint32_t count;     /* total recorded (for wrap detection) */
-    uint32_t tid;       /* Mach/pthread thread ID */
-    uint32_t _pad;
+    uint32_t write_idx;  /* this thread only; protected by generation */
+    uint32_t count;      /* total recorded (for wrap detection) */
+    uint32_t tid;        /* Mach/pthread thread ID */
+    uint32_t generation; /* per-ring seqlock; odd means write in progress */
 } sut_crumb_ring_t;
 
 /* Global breadcrumb state (placed in shared memory) */
 typedef struct sut_crumb_state {
     sut_crumb_ring_t rings[SUT_CRUMB_MAX_THREADS];
-    uint32_t ring_count; /* atomic: number of registered threads */
+    uint32_t ring_count; /* published with a release store */
 } sut_crumb_state_t;
+
+_Static_assert(sizeof(sut_crumb_ring_t) == 32784, "sut_crumb_ring_t size changed");
+_Static_assert(offsetof(sut_crumb_ring_t, generation) == 32780,
+               "breadcrumb ring generation offset changed");
+_Static_assert(sizeof(sut_crumb_state_t) == 262280, "sut_crumb_state_t size changed");
+_Static_assert(offsetof(sut_crumb_state_t, ring_count) == 262272,
+               "breadcrumb ring_count offset changed");
 
 /* ── App-supplied annotation (generic key-value) ──
  * Domain state (active tool, counts, undo depth, user tags, ...) is recorded as
@@ -107,6 +155,12 @@ typedef struct sut_crash_context {
     sut_crash_annotation_t annotations[SUT_CRASH_MAX_ANNOTATIONS];
 } sut_crash_context_t;
 
+_Static_assert(sizeof(sut_crash_context_t) == 1760, "sut_crash_context_t size changed");
+_Static_assert(offsetof(sut_crash_context_t, heartbeat_counter) == 0,
+               "heartbeat counter offset changed");
+_Static_assert(offsetof(sut_crash_context_t, annotation_count) == 216,
+               "annotation count offset changed");
+
 /* ── Settings snapshot ── */
 typedef struct sut_crash_settings_snapshot {
     int32_t world_bound_min[3];
@@ -116,19 +170,61 @@ typedef struct sut_crash_settings_snapshot {
     char extra[128];
 } sut_crash_settings_snapshot_t;
 
+_Static_assert(sizeof(sut_crash_settings_snapshot_t) == 160,
+               "sut_crash_settings_snapshot_t size changed");
+
+/* ── Registered attachment paths ── */
+#define SUT_SHM_MAX_ATTACHMENTS 4
+
+typedef struct sut_shm_attachment_slot {
+    char label[32];
+    char path[256];
+} sut_shm_attachment_slot_t;
+
+typedef struct sut_shm_attachment_section {
+    uint32_t count;
+    uint32_t _pad; /* keep slots 8-byte aligned and preserve the v1 layout */
+    sut_shm_attachment_slot_t slots[SUT_SHM_MAX_ATTACHMENTS];
+} sut_shm_attachment_section_t;
+
+_Static_assert(sizeof(sut_shm_attachment_slot_t) == 288,
+               "sut_shm_attachment_slot_t size changed");
+_Static_assert(sizeof(sut_shm_attachment_section_t) == 1160,
+               "sut_shm_attachment_section_t size changed");
+_Static_assert(offsetof(sut_shm_attachment_section_t, slots) == 8,
+               "attachment slots offset changed");
+
 /* ── Screenshot ring (RGBA slots, newest wins) ──
- * Producer writes data[], then timestamp[]/tier[], then publishes valid[]
- * with release semantics; the monitor reads valid[] with acquire. */
+ * valid[i] is a per-slot generation: 0 means unpublished, odd means a write is
+ * in progress, and nonzero even means published. Producer publication is
+ * begin(odd), data/timestamp/tier writes, end(even release). */
 #define SUT_SCREENSHOT_SLOTS  96
 #define SUT_SCREENSHOT_WIDTH  480
 #define SUT_SCREENSHOT_HEIGHT 270
 #define SUT_SCREENSHOT_BYTES  (SUT_SCREENSHOT_WIDTH * SUT_SCREENSHOT_HEIGHT * 4)
 
 typedef struct sut_screenshot_section {
-    uint32_t valid[SUT_SCREENSHOT_SLOTS]; /* published via __atomic_store_n (release) */
+    uint32_t valid[SUT_SCREENSHOT_SLOTS];
     uint64_t timestamp[SUT_SCREENSHOT_SLOTS];
     uint32_t tier[SUT_SCREENSHOT_SLOTS];
     uint8_t data[SUT_SCREENSHOT_SLOTS][SUT_SCREENSHOT_BYTES];
 } sut_screenshot_section_t;
+
+_Static_assert(sizeof(sut_screenshot_section_t) == 49767936,
+               "sut_screenshot_section_t size changed");
+_Static_assert(offsetof(sut_screenshot_section_t, valid) == 0,
+               "screenshot generation offset changed");
+_Static_assert(offsetof(sut_screenshot_section_t, timestamp) == 384,
+               "screenshot timestamp offset changed");
+_Static_assert(offsetof(sut_screenshot_section_t, tier) == 1152,
+               "screenshot tier offset changed");
+_Static_assert(offsetof(sut_screenshot_section_t, data) == 1536,
+               "screenshot data offset changed");
+_Static_assert(SUT_SHM_TOTAL_SIZE ==
+                   sizeof(sut_shm_header_t) + sizeof(sut_crumb_state_t) +
+                       sizeof(sut_crash_context_t) + sizeof(sut_crash_settings_snapshot_t) +
+                       sizeof(sut_shm_attachment_section_t) +
+                       sizeof(sut_screenshot_section_t) + sizeof(uint32_t),
+               "shared-memory total size changed");
 
 #endif /* CRASH_SHM_H_ */

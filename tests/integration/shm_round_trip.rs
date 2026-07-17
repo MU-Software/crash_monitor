@@ -1,9 +1,11 @@
 //! Integration tests: write data to `SharedMemory` via raw pointers, read back through public API.
 
 use std::mem::{offset_of, size_of};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crash_monitor::shm::*;
+use nix::libc;
 
 /// Unique PID per test to avoid shm name collisions.
 fn unique_pid() -> u32 {
@@ -27,6 +29,142 @@ unsafe fn write_val<T: Copy>(base: *mut u8, offset: usize, val: T) {
     unsafe {
         let src = (&raw const val).cast::<u8>();
         std::ptr::copy_nonoverlapping(src, base.add(offset), size_of::<T>());
+    }
+}
+
+unsafe fn store_u64_release(base: *mut u8, offset: usize, val: u64) {
+    #[allow(clippy::cast_ptr_alignment)]
+    let value = unsafe { &*base.add(offset).cast::<AtomicU64>() };
+    value.store(val, Ordering::Release);
+}
+
+struct ForkChild {
+    pid: libc::pid_t,
+}
+
+impl ForkChild {
+    fn wait_until(&mut self, deadline: Instant) -> libc::c_int {
+        loop {
+            let mut status = 0;
+            let result = unsafe { libc::waitpid(self.pid, &raw mut status, libc::WNOHANG) };
+            if result == self.pid {
+                self.pid = 0;
+                return status;
+            }
+            assert!(
+                result >= 0,
+                "waitpid failed: {}",
+                std::io::Error::last_os_error()
+            );
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(self.pid, libc::SIGKILL);
+                    libc::waitpid(self.pid, &raw mut status, 0);
+                }
+                self.pid = 0;
+                panic!("forked SHM producer exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+impl Drop for ForkChild {
+    fn drop(&mut self) {
+        if self.pid > 0 {
+            let mut status = 0;
+            unsafe {
+                libc::kill(self.pid, libc::SIGKILL);
+                libc::waitpid(self.pid, &raw mut status, 0);
+            }
+        }
+    }
+}
+
+const FORK_STRESS_MAX_ITERATIONS: u32 = 100_000_000;
+
+#[derive(Clone, Copy)]
+struct ContextPublicationOffsets {
+    generation: usize,
+    heartbeat: usize,
+    session_start: usize,
+    build_number: usize,
+}
+
+unsafe fn run_forked_context_producer(base: *mut u8, offsets: ContextPublicationOffsets) -> ! {
+    // The child never runs Rust destructors and has a hard process-level
+    // deadline, so a failed parent assertion cannot leave it spinning.
+    unsafe {
+        libc::alarm(8);
+        #[allow(clippy::cast_ptr_alignment)]
+        let generation = &*base.add(offsets.generation).cast::<AtomicU32>();
+        #[allow(clippy::cast_ptr_alignment)]
+        let heartbeat = &*base.add(offsets.heartbeat).cast::<AtomicU64>();
+
+        if generation
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            libc::_exit(4);
+        }
+        write_val::<u64>(base, offsets.session_start, 1);
+        heartbeat.store(1, Ordering::Release);
+
+        let mut released = false;
+        for _ in 0..1_000_000 {
+            if heartbeat.load(Ordering::Acquire) == 2 {
+                released = true;
+                break;
+            }
+            libc::sched_yield();
+        }
+        if !released {
+            libc::_exit(3);
+        }
+
+        write_val::<u32>(base, offsets.build_number, 1);
+        generation.store(2, Ordering::Release);
+        let mut stopped = false;
+        for sequence in 2..=FORK_STRESS_MAX_ITERATIONS {
+            if heartbeat.load(Ordering::Acquire) == 3 {
+                stopped = true;
+                break;
+            }
+            let odd_generation = sequence * 2 - 1;
+            if generation
+                .compare_exchange(
+                    odd_generation - 1,
+                    odd_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                libc::_exit(5);
+            }
+            write_val::<u64>(base, offsets.session_start, u64::from(sequence));
+            for _ in 0..256 {
+                std::hint::spin_loop();
+            }
+            write_val::<u32>(base, offsets.build_number, sequence);
+            generation.store(odd_generation + 1, Ordering::Release);
+        }
+        if !stopped && heartbeat.load(Ordering::Acquire) != 3 {
+            libc::_exit(6);
+        }
+
+        libc::alarm(0);
+        libc::_exit(0);
+    }
+}
+
+fn wait_for_live_heartbeat(shm: &SharedMemory, expected: u64, deadline: Instant) {
+    while shm.read_live_heartbeat() != expected {
+        assert!(
+            Instant::now() < deadline,
+            "forked producer did not publish readiness"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -207,4 +345,90 @@ fn test_settings_round_trip() {
         .expect("read_settings should succeed");
     assert_eq!(s.world_bound_min, [-150, 0, -150]);
     assert_eq!(s.world_bound_max, [150, 300, 150]);
+}
+
+#[test]
+fn test_forked_context_producer_never_exposes_torn_fields() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let base = shm.base_ptr();
+    let offsets = ContextPublicationOffsets {
+        generation: SECTION1_OFFSET + offset_of!(ShmHeader, context_generation),
+        heartbeat: CONTEXT_OFFSET + offset_of!(SutCrashContext, heartbeat_counter),
+        session_start: CONTEXT_OFFSET + offset_of!(SutCrashContext, session_start_ns),
+        build_number: CONTEXT_OFFSET + offset_of!(SutCrashContext, build_number),
+    };
+
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+    if pid == 0 {
+        unsafe { run_forked_context_producer(base, offsets) };
+    }
+
+    let mut child = ForkChild { pid };
+    wait_for_live_heartbeat(&shm, 1, Instant::now() + Duration::from_secs(3));
+
+    let odd_snapshot = shm
+        .snapshot_owned_until(Some(Instant::now() + Duration::from_secs(3)))
+        .expect("odd snapshot must return without retrying");
+    assert!(odd_snapshot.read_context().is_none());
+    assert!(matches!(
+        odd_snapshot.consistency_issues(),
+        [ShmConsistencyIssue::Context {
+            generation_before: 1,
+            generation_after: 1,
+        }]
+    ));
+
+    unsafe {
+        store_u64_release(base, offsets.heartbeat, 2);
+    }
+
+    let mut saw_changed_generation = false;
+    for _ in 0..12 {
+        let snapshot = shm
+            .snapshot_owned_until(Some(Instant::now() + Duration::from_secs(3)))
+            .expect("bounded concurrent snapshot");
+        saw_changed_generation |= snapshot.consistency_issues().iter().any(|issue| {
+            matches!(
+                issue,
+                ShmConsistencyIssue::Context {
+                    generation_before,
+                    generation_after,
+                } if generation_before != generation_after
+            )
+        });
+        if let Some(context) = snapshot.read_context() {
+            assert_eq!(context.session_start_ns, u64::from(context.build_number));
+        } else {
+            assert!(
+                snapshot
+                    .consistency_issues()
+                    .iter()
+                    .any(|issue| matches!(issue, ShmConsistencyIssue::Context { .. }))
+            );
+        }
+    }
+
+    unsafe {
+        store_u64_release(base, offsets.heartbeat, 3);
+    }
+
+    let status = child.wait_until(Instant::now() + Duration::from_secs(8));
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+    assert!(
+        saw_changed_generation,
+        "stress loop never exercised a before/after generation mismatch"
+    );
+
+    let final_context = shm
+        .snapshot_owned_until(Some(Instant::now() + Duration::from_secs(3)))
+        .expect("final stable snapshot")
+        .read_context()
+        .expect("final context must be published");
+    assert_eq!(
+        final_context.session_start_ns,
+        u64::from(final_context.build_number)
+    );
+    assert!(final_context.build_number >= 1);
 }

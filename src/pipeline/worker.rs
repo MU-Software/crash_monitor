@@ -151,7 +151,10 @@ impl CaptureWorker {
         let mut snapshot_error = None;
         let shm_snapshot = if suspend_guard.is_some() {
             match self.pipeline.snapshot_shm_while_suspended(Some(deadline)) {
-                Ok(snapshot) => snapshot,
+                Ok(snapshot) => {
+                    snapshot_error = Pipeline::snapshot_consistency_error(snapshot.as_deref());
+                    snapshot
+                }
                 Err(error) => {
                     snapshot_error = Some(error);
                     None
@@ -653,11 +656,22 @@ mod tests {
         NEXT_PID.fetch_add(1, Ordering::Relaxed)
     }
 
+    fn store_shm_context_generation(shm: &crate::shm::SharedMemory, value: u32) {
+        let offset = crate::shm::SECTION1_OFFSET
+            + std::mem::offset_of!(crate::shm::ShmHeader, context_generation);
+        // SAFETY: the schema guarantees natural alignment and the test keeps
+        // the complete mapping alive while performing the atomic store.
+        #[allow(clippy::cast_ptr_alignment)] // schema offset is compile-time aligned
+        let generation = unsafe { &*shm.base_ptr().add(offset).cast::<AtomicU32>() };
+        generation.store(value, Ordering::Release);
+    }
+
     fn write_shm_app_version(shm: &crate::shm::SharedMemory, value: &str) {
         const FIELD_LEN: usize = 16;
         assert!(value.len() < FIELD_LEN);
         let offset = crate::shm::CONTEXT_OFFSET
             + std::mem::offset_of!(crate::shm::SutCrashContext, app_version);
+        store_shm_context_generation(shm, 1);
         // SAFETY: this test writes one bounded schema field. The initial write
         // precedes capture; the second happens only after resume.
         unsafe {
@@ -665,6 +679,7 @@ mod tests {
             std::ptr::write_bytes(field, 0, FIELD_LEN);
             std::ptr::copy_nonoverlapping(value.as_ptr(), field, value.len());
         }
+        store_shm_context_generation(shm, 2);
     }
 
     struct WorkerFixture {
@@ -795,6 +810,63 @@ mod tests {
         assert_eq!(platform.suspend_count(), 0);
         assert_eq!(platform.resume_count(), 0);
         assert!(std::fs::read_dir(tempdir.path()).unwrap().next().is_none());
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn capture_worker_diagnoses_and_retains_sanitized_torn_snapshot() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let shm = Arc::new(
+            crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"),
+        );
+        write_shm_app_version(&shm, "published");
+        // Model a producer that began the next context publication but did not
+        // finish before the monitor suspended it.
+        store_shm_context_generation(&shm, 3);
+
+        let platform = Arc::new(MockPlatform::default());
+        let pipeline = Arc::new(Pipeline {
+            enabled: true,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            filters: vec![],
+            collectors: vec![],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: Some(shm),
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+        let mut worker = CaptureWorker::start(pipeline);
+
+        let outcome = worker.capture(
+            captured(10).event,
+            123,
+            Instant::now() + Duration::from_secs(2),
+        );
+        let CaptureOutcome::Captured(captured) = outcome else {
+            panic!("worker should retain the sanitized snapshot");
+        };
+        assert_eq!(platform.resume_count(), 1);
+        let snapshot_diagnostic = captured
+            .diagnostics
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "ShmSnapshot")
+            .expect("worker consistency diagnostic");
+        assert!(matches!(
+            &snapshot_diagnostic.status,
+            PluginStatus::Error(error) if error.contains("Context") && error.contains("sanitized")
+        ));
+
+        let raw_context = &captured
+            .raw_shm
+            .as_ref()
+            .expect("sanitized snapshot remains attached")
+            .context;
+        let context_len = std::mem::size_of::<crate::shm::SutCrashContext>();
+        assert!(raw_context[..context_len].iter().all(|byte| *byte == 0));
+
         worker.shutdown(Duration::from_secs(1));
     }
 

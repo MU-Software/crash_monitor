@@ -6,9 +6,8 @@
 //! below validate that generated layout against known values
 //! (belt-and-suspenders with bindgen's own layout checks).
 
-use std::mem::{offset_of, size_of};
-use std::os::raw::c_char;
-use std::sync::atomic::AtomicU32;
+use std::mem::{align_of, offset_of, size_of};
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 /// Bindgen-generated C shm types. Non-idiomatic names are contained here and
 /// re-exported with Rust-style aliases below.
@@ -30,20 +29,23 @@ pub use ffi::{
     sut_crash_context_t as SutCrashContext,
     sut_crash_settings_snapshot_t as SutCrashSettingsSnapshot, sut_crumb_ring_t as SutCrumbRing,
     sut_crumb_state_t as SutCrumbState, sut_screenshot_section_t as SutScreenshotSection,
+    sut_shm_attachment_section_t as ShmAttachmentSection,
+    sut_shm_attachment_slot_t as ShmAttachmentSlot, sut_shm_header_t as ShmHeader,
 };
 
 // ═══════════════════════════════════════════════════
 //  Constants
 // ═══════════════════════════════════════════════════
 
-pub const SHM_MAGIC: u32 = 0x434D_4F4E; // "CMON" (Crash MONitor)
-pub const SHM_VERSION: u32 = 1;
-pub const SHM_CANARY: u32 = 0xDEAD_BEEF;
+pub const SHM_MAGIC: u32 = ffi::SUT_SHM_MAGIC;
+pub const SHM_VERSION: u32 = ffi::SUT_SHM_VERSION;
+pub const SHM_CANARY: u32 = ffi::SUT_SHM_CANARY;
 
 // Schema-derived from crash_shm.h #defines (via bindgen).
 pub const CRUMB_RING_CAPACITY: usize = ffi::SUT_CRUMB_RING_CAPACITY as usize;
 pub const CRUMB_MAX_THREADS: usize = ffi::SUT_CRUMB_MAX_THREADS as usize;
 pub const MAX_ANNOTATIONS: usize = ffi::SUT_CRASH_MAX_ANNOTATIONS as usize;
+pub const MAX_ATTACHMENTS: usize = ffi::SUT_SHM_MAX_ATTACHMENTS as usize;
 pub const SCREENSHOT_SLOTS: u32 = ffi::SUT_SCREENSHOT_SLOTS;
 pub const SCREENSHOT_WIDTH: u32 = ffi::SUT_SCREENSHOT_WIDTH;
 pub const SCREENSHOT_HEIGHT: u32 = ffi::SUT_SCREENSHOT_HEIGHT;
@@ -51,54 +53,34 @@ pub const SCREENSHOT_BYTES_PER_SLOT: usize =
     (SCREENSHOT_WIDTH as usize) * (SCREENSHOT_HEIGHT as usize) * 4;
 
 // ═══════════════════════════════════════════════════
-//  Rust-only / monitor-owned mirrors (not part of crash_shm.h)
-// ═══════════════════════════════════════════════════
-
-/// Shared memory header — Section 1 (64 bytes). Written by the monitor
-/// (magic/canary); the producer only skips past it. Monitor-owned, so it is
-/// not part of the C schema.
-#[repr(C)]
-pub struct ShmHeader {
-    pub magic: u32,
-    pub version: u32,
-    pub ring_capacity_per_thread: u32,
-    pub max_threads: u32,
-    pub ring_count: AtomicU32,
-    pub screenshot_slots: u32,
-    pub screenshot_width: u32,
-    pub screenshot_height: u32,
-    reserved: [u8; 32],
-}
-
-/// Attachment slot in shared memory (mirrors the C producer's struct in
-/// `sut_crash_reporter.c`; not yet migrated into `crash_shm.h`).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ShmAttachmentSlot {
-    pub label: [c_char; 32],
-    pub path: [c_char; 256],
-}
-
-/// Attachment section in shared memory.
-#[repr(C)]
-pub struct ShmAttachmentSection {
-    pub count: u32,
-    pad: [u8; 4], // align to 8
-    pub slots: [ShmAttachmentSlot; 4],
-}
-
-// ═══════════════════════════════════════════════════
 //  Compile-time layout assertions (validate the bindgen output)
 // ═══════════════════════════════════════════════════
 
+const _: () = assert!(size_of::<AtomicU32>() == size_of::<u32>());
+const _: () = assert!(align_of::<AtomicU32>() == align_of::<u32>());
+const _: () = assert!(size_of::<AtomicU64>() == size_of::<u64>());
+const _: () = assert!(align_of::<AtomicU64>() == align_of::<u64>());
 const _: () = assert!(size_of::<ShmHeader>() == 64);
+const _: () = assert!(offset_of!(ShmHeader, breadcrumb_registry_generation) == 16);
+const _: () = assert!(offset_of!(ShmHeader, context_generation) == 32);
+const _: () = assert!(offset_of!(ShmHeader, settings_generation) == 36);
+const _: () = assert!(offset_of!(ShmHeader, attachments_generation) == 40);
 const _: () = assert!(size_of::<SutBreadcrumb>() == 64);
 const _: () = assert!(size_of::<SutCrumbRing>() == 32784);
+const _: () = assert!(offset_of!(SutCrumbRing, generation) == 32780);
 const _: () = assert!(size_of::<SutCrumbState>() == 262_280);
+const _: () = assert!(offset_of!(SutCrumbState, ring_count) == 262_272);
 const _: () = assert!(size_of::<SutCrashAnnotation>() == 96);
 const _: () = assert!(size_of::<SutCrashContext>() == 1760);
 const _: () = assert!(size_of::<SutCrashSettingsSnapshot>() == 160);
 const _: () = assert!(size_of::<ShmAttachmentSlot>() == 288);
+const _: () = assert!(size_of::<ShmAttachmentSection>() == 1160);
+const _: () = assert!(offset_of!(ShmAttachmentSection, slots) == 8);
+const _: () = assert!(size_of::<SutScreenshotSection>() == 49_767_936);
+const _: () = assert!(offset_of!(SutScreenshotSection, valid) == 0);
+const _: () = assert!(offset_of!(SutScreenshotSection, timestamp) == 384);
+const _: () = assert!(offset_of!(SutScreenshotSection, tier) == 1152);
+const _: () = assert!(offset_of!(SutScreenshotSection, data) == 1536);
 
 // Offset assertions for SutCrashContext (app-agnostic layout)
 const _: () = assert!(offset_of!(SutCrashContext, heartbeat_counter) == 0);
@@ -140,8 +122,17 @@ pub const SECTION4_SIZE: usize = SCREENSHOT_META_SIZE + SCREENSHOT_DATA_SIZE;
 /// Section 5: Footer (canary)
 pub const FOOTER_OFFSET: usize = SECTION4_OFFSET + SECTION4_SIZE;
 
-/// Total shared memory size
-pub const SHM_TOTAL_SIZE: usize = FOOTER_OFFSET + 4; // canary u32
+/// Total shared memory size, fixed by the C ABI schema.
+pub const SHM_TOTAL_SIZE: usize = ffi::SUT_SHM_TOTAL_SIZE as usize;
+
+const _: () = assert!(SECTION2_OFFSET == 64);
+const _: () = assert!(CONTEXT_OFFSET == 262_344);
+const _: () = assert!(SETTINGS_OFFSET == 264_104);
+const _: () = assert!(ATTACHMENT_OFFSET == 264_264);
+const _: () = assert!(SECTION4_OFFSET == 265_424);
+const _: () = assert!(FOOTER_OFFSET == 50_033_360);
+const _: () = assert!(SHM_TOTAL_SIZE == FOOTER_OFFSET + size_of::<u32>());
+const _: () = assert!(SHM_TOTAL_SIZE == 50_033_364);
 
 // ═══════════════════════════════════════════════════
 //  Rust-native types (read from shm)

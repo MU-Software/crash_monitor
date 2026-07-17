@@ -2,8 +2,8 @@ use super::*;
 
 use std::mem::size_of;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Generate a unique fake PID per test to avoid shm name collisions.
 fn unique_pid() -> u32 {
@@ -17,6 +17,18 @@ unsafe fn write_val<T: Copy>(base: *mut u8, offset: usize, val: T) {
         let src = (&raw const val).cast::<u8>();
         std::ptr::copy_nonoverlapping(src, base.add(offset), size_of::<T>());
     }
+}
+
+unsafe fn store_u32_release(base: *mut u8, offset: usize, val: u32) {
+    #[allow(clippy::cast_ptr_alignment)]
+    let value = unsafe { &*base.add(offset).cast::<AtomicU32>() };
+    value.store(val, Ordering::Release);
+}
+
+unsafe fn store_u64_release(base: *mut u8, offset: usize, val: u64) {
+    #[allow(clippy::cast_ptr_alignment)]
+    let value = unsafe { &*base.add(offset).cast::<AtomicU64>() };
+    value.store(val, Ordering::Release);
 }
 
 /// Helper: write a NUL-terminated string into the shm buffer at `offset`.
@@ -352,7 +364,7 @@ fn test_read_screenshots_one_valid_slot() {
         write_val::<u32>(
             base,
             SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, valid),
-            1,
+            2,
         );
         write_val::<u64>(
             base,
@@ -392,7 +404,7 @@ fn test_read_screenshots_last_slot_stays_within_owned_snapshot() {
         + index * SCREENSHOT_BYTES_PER_SLOT;
     assert_eq!(data_offset + SCREENSHOT_BYTES_PER_SLOT, FOOTER_OFFSET);
     unsafe {
-        write_val::<u32>(shm.base_ptr(), valid_offset, 1);
+        write_val::<u32>(shm.base_ptr(), valid_offset, 2);
         write_val::<u64>(shm.base_ptr(), timestamp_offset, 999_000);
         *shm.base_ptr()
             .add(data_offset + SCREENSHOT_BYTES_PER_SLOT - 1) = 0xEF;
@@ -476,6 +488,316 @@ fn test_read_breadcrumbs_with_entry() {
     assert_eq!(c.line, 77);
     assert_eq!(c.file, "app.c");
     assert_eq!(c.message, "boom");
+}
+
+#[test]
+fn test_odd_context_is_dropped_without_retry_and_stable_settings_survive() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let context_generation = SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, context_generation);
+    let heartbeat_offset =
+        CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, heartbeat_counter);
+    unsafe {
+        let base = shm.base_ptr();
+        store_u32_release(base, context_generation, 1);
+        store_u64_release(base, heartbeat_offset, 321);
+        write_cstr(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, app_version),
+            "torn",
+        );
+        write_val::<i32>(
+            base,
+            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, palette_count),
+            23,
+        );
+    }
+
+    let owned = shm
+        .snapshot_owned_until(Some(Instant::now() + Duration::from_secs(10)))
+        .expect("odd generation must be rejected without spinning");
+
+    assert_eq!(
+        owned.consistency_issues(),
+        &[ShmConsistencyIssue::Context {
+            generation_before: 1,
+            generation_after: 1,
+        }]
+    );
+    assert!(owned.read_context().is_none());
+    assert_eq!(
+        owned
+            .read_settings()
+            .expect("stable settings")
+            .palette_count,
+        23
+    );
+
+    let raw = owned.raw_context_bytes_owned();
+    assert_eq!(u64::from_ne_bytes(raw[..8].try_into().unwrap()), 321);
+    assert!(
+        raw[8..size_of::<SutCrashContext>()]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+}
+
+#[test]
+fn test_odd_breadcrumb_ring_is_zeroed_while_stable_units_survive() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let ring0 = SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, rings);
+    let ring1 = ring0 + size_of::<SutCrumbRing>();
+    unsafe {
+        let base = shm.base_ptr();
+        store_u32_release(
+            base,
+            SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, ring_count),
+            2,
+        );
+        store_u32_release(
+            base,
+            ring0 + std::mem::offset_of!(SutCrumbRing, generation),
+            1,
+        );
+        write_val::<u64>(base, ring0 + std::mem::offset_of!(SutCrumbRing, buf), 44);
+        write_val::<u32>(
+            base,
+            ring0 + std::mem::offset_of!(SutCrumbRing, write_idx),
+            1,
+        );
+        write_val::<u32>(base, ring0 + std::mem::offset_of!(SutCrumbRing, count), 1);
+
+        write_val::<u64>(base, ring1 + std::mem::offset_of!(SutCrumbRing, buf), 55);
+        write_val::<u32>(
+            base,
+            ring1 + std::mem::offset_of!(SutCrumbRing, write_idx),
+            1,
+        );
+        write_val::<u32>(base, ring1 + std::mem::offset_of!(SutCrumbRing, count), 1);
+        store_u32_release(
+            base,
+            ring1 + std::mem::offset_of!(SutCrumbRing, generation),
+            2,
+        );
+        write_cstr(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, app_version),
+            "stable",
+        );
+    }
+
+    let owned = snapshot(&shm);
+    assert_eq!(
+        owned.consistency_issues(),
+        &[ShmConsistencyIssue::BreadcrumbRing {
+            index: 0,
+            generation_before: 1,
+            generation_after: 1,
+        }]
+    );
+    let breadcrumbs = owned.read_breadcrumbs();
+    assert_eq!(breadcrumbs.len(), 1);
+    assert_eq!(breadcrumbs[0].timestamp_ns, 55);
+    assert_eq!(
+        owned.read_context().expect("stable context").app_version,
+        "stable"
+    );
+    assert!(
+        owned.raw_breadcrumb_bytes_owned()[..size_of::<SutCrumbRing>()]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+}
+
+#[test]
+fn test_odd_inactive_breadcrumb_ring_is_sanitized_for_raw_persistence() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let ring0 = SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, rings);
+    unsafe {
+        let base = shm.base_ptr();
+        store_u32_release(
+            base,
+            ring0 + std::mem::offset_of!(SutCrumbRing, generation),
+            1,
+        );
+        *base.add(ring0) = 0xA5;
+    }
+
+    let owned = snapshot(&shm);
+    assert_eq!(
+        owned.consistency_issues(),
+        &[ShmConsistencyIssue::BreadcrumbRing {
+            index: 0,
+            generation_before: 1,
+            generation_after: 1,
+        }]
+    );
+    assert!(owned.read_breadcrumbs().is_empty());
+    assert!(
+        owned.raw_breadcrumb_bytes_owned()[..size_of::<SutCrumbRing>()]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+}
+
+#[test]
+fn test_odd_registry_zeros_complete_breadcrumb_section() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    unsafe {
+        let base = shm.base_ptr();
+        store_u32_release(
+            base,
+            SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, breadcrumb_registry_generation),
+            3,
+        );
+        store_u32_release(
+            base,
+            SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, ring_count),
+            1,
+        );
+        *base.add(SECTION2_OFFSET) = 0xA5;
+    }
+
+    let owned = snapshot(&shm);
+    assert_eq!(
+        owned.consistency_issues(),
+        &[ShmConsistencyIssue::BreadcrumbRegistry {
+            generation_before: 3,
+            generation_after: 3,
+            ring_count_before: 1,
+            ring_count_after: 1,
+        }]
+    );
+    assert!(
+        owned
+            .raw_breadcrumb_bytes_owned()
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+}
+
+#[test]
+fn test_odd_settings_and_attachments_are_dropped_independently() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    unsafe {
+        let base = shm.base_ptr();
+        store_u32_release(
+            base,
+            SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, settings_generation),
+            5,
+        );
+        store_u32_release(
+            base,
+            SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, attachments_generation),
+            7,
+        );
+        write_val::<i32>(
+            base,
+            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, palette_count),
+            99,
+        );
+        write_val::<u32>(
+            base,
+            ATTACHMENT_OFFSET + std::mem::offset_of!(ShmAttachmentSection, count),
+            1,
+        );
+        write_cstr(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, app_version),
+            "still-valid",
+        );
+    }
+
+    let owned = snapshot(&shm);
+    assert_eq!(
+        owned.consistency_issues(),
+        &[
+            ShmConsistencyIssue::Settings {
+                generation_before: 5,
+                generation_after: 5,
+            },
+            ShmConsistencyIssue::Attachments {
+                generation_before: 7,
+                generation_after: 7,
+            },
+        ]
+    );
+    assert!(owned.read_settings().is_none());
+    assert!(owned.read_attachments().is_empty());
+    assert_eq!(
+        owned.read_context().expect("stable context").app_version,
+        "still-valid"
+    );
+    let raw = owned.raw_context_bytes_owned();
+    let settings_start = size_of::<SutCrashContext>();
+    assert!(raw[settings_start..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn test_odd_screenshot_is_zeroed_and_last_stable_slot_survives() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let last = SCREENSHOT_SLOTS as usize - 1;
+    let valid = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, valid);
+    let timestamp = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, timestamp);
+    let tier = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, tier);
+    let data = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, data);
+    unsafe {
+        let base = shm.base_ptr();
+        store_u32_release(base, valid, 1);
+        write_val::<u64>(base, timestamp, 111);
+        write_val::<u32>(base, tier, 9);
+        *base.add(data) = 0xA5;
+
+        write_val::<u64>(base, timestamp + last * size_of::<u64>(), 999);
+        write_val::<u32>(base, tier + last * size_of::<u32>(), 4);
+        *base.add(data + last * SCREENSHOT_BYTES_PER_SLOT) = 0xEF;
+        store_u32_release(base, valid + last * size_of::<u32>(), 2);
+    }
+
+    let owned = snapshot(&shm);
+    assert_eq!(
+        owned.consistency_issues(),
+        &[ShmConsistencyIssue::ScreenshotSlot {
+            index: 0,
+            generation_before: 1,
+            generation_after: 1,
+        }]
+    );
+    let screenshots = owned.read_screenshots();
+    assert_eq!(screenshots.len(), 1);
+    assert_eq!(screenshots[0].timestamp_ns, 999);
+    assert_eq!(screenshots[0].rgba[0], 0xEF);
+
+    assert_eq!(owned.bytes[valid..valid + size_of::<u32>()], [0; 4]);
+    assert_eq!(owned.bytes[timestamp..timestamp + size_of::<u64>()], [0; 8]);
+    assert_eq!(owned.bytes[tier..tier + size_of::<u32>()], [0; 4]);
+    assert!(
+        owned.bytes[data..data + SCREENSHOT_BYTES_PER_SLOT]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+}
+
+#[test]
+fn test_screenshot_sanitizer_checks_deadline_before_large_slot_zero() {
+    let mut bytes = vec![0xA5; SCREENSHOT_DATA_OFFSET + SCREENSHOT_BYTES_PER_SLOT];
+    let mut before = LivePublicationState::default();
+    let mut after = LivePublicationState::default();
+    before.screenshot_generations.fill(1);
+    after.screenshot_generations.fill(1);
+    let mut issues = Vec::new();
+
+    assert_eq!(
+        sanitize_screenshots(
+            &mut bytes,
+            &before,
+            &after,
+            &mut issues,
+            Some(Instant::now()),
+        ),
+        Err(ShmSnapshotError::DeadlineExceeded)
+    );
+    assert!(issues.is_empty());
+    assert_eq!(bytes[SCREENSHOT_DATA_OFFSET], 0xA5);
 }
 
 #[test]

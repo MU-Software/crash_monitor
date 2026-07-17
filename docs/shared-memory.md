@@ -1,33 +1,56 @@
 # Shared-memory contract
 
-The child (producer) and the monitor (consumer) communicate through a single
-POSIX shared-memory region. Its byte layout is a strict cross-process,
-cross-language contract: the producer writes a field at some offset and the
-monitor reads it at the same offset, so both sides must agree exactly.
+The child (producer) and the monitor (consumer) communicate through one POSIX
+shared-memory region. Its byte layout and publication protocol are a strict
+cross-process, cross-language ABI: both sides must agree on field offsets,
+atomic alignment, schema version, and memory ordering.
 
 ## Single source of truth
 
-[`schema/crash_shm.h`](../schema/crash_shm.h) is the authoritative definition of
-every shared structure. It contains layout only — no logic, no API — and depends
-only on `<stdint.h>` / `<stdbool.h>`.
+[`schema/crash_shm.h`](../schema/crash_shm.h) is the authoritative layout. It
+defines the 64-byte header, breadcrumb rings, crash context, settings,
+attachments, screenshots, and their fixed-size constants. The current ABI is
+**schema version 2**.
 
-- The **C producer** includes this header directly.
-- The **Rust monitor** generates its mirror from the same header with `bindgen`
-  (see [`build.rs`](../build.rs)); compile-time size/offset assertions in
-  `src/shm/types.rs` re-validate the generated layout as a second check.
+- C producers include `crash_shm.h` and use the publication helpers in
+  [`schema/crash_shm_atomic.h`](../schema/crash_shm_atomic.h).
+- The Rust monitor generates the C structure mirrors from the schema with
+  `bindgen` (see [`build.rs`](../build.rs)).
+- Both headers and the Rust mirror use compile-time size, alignment, and key
+  offset assertions. The C helper additionally requires 32- and 64-bit atomic
+  operations to be always lock-free.
 
-Because the Rust types are generated from the C header, the two cannot drift.
+A producer must verify both `SUT_SHM_MAGIC` and the exact `SUT_SHM_VERSION`
+before deriving payload addresses or writing anything. A version mismatch is
+not a best-effort compatibility mode: the producer must leave the region alone.
 
 ## Region layout
 
-The monitor creates and sizes the region; sections are laid out back to back and
-their offsets are derived from the struct sizes (never hand-coded):
+The monitor creates and sizes the region. Sections remain back to back:
 
-```
+```text
 [ Header ][ Breadcrumb state ][ Crash context ][ Settings ][ Attachments ][ Screenshots ][ Canary ]
 ```
 
-The region is a few tens of MB, dominated by the screenshot ring.
+The screenshot ring dominates the roughly 50 MB region. Schema v2 reuses
+previously reserved words for generations, so the 64-byte header, payload
+offsets, and total region size remain unchanged from version 1.
+
+### Header (64 bytes)
+
+The monitor initializes the header, but its layout is part of the shared C
+schema. Besides immutable dimensions, it contains these publication words:
+
+| Offset | Field | Protected unit |
+|---:|---|---|
+| 16 | `breadcrumb_registry_generation` | ring registration and `ring_count` |
+| 32 | `context_generation` | crash context except heartbeat |
+| 36 | `settings_generation` | settings snapshot |
+| 40 | `attachments_generation` | attachment section |
+
+Each generation starts at zero. Odd values mean a write is in progress and even
+values, including zero, are stable. Generation wraparound is allowed. Only the
+screenshot-slot protocol gives zero the additional meaning “unpublished.”
 
 ## Capture ownership boundary
 
@@ -38,62 +61,114 @@ snapshot. Breadcrumb, context, settings, attachment, screenshot, and Stage 1
 raw-dump readers consume only that snapshot. The task may therefore resume even
 if a capture worker is still parsing payload bytes.
 
+Suspension prevents bytes from changing during the copy, while generations
+detect a producer that was suspended partway through a multi-field update. An
+odd generation makes only its protected unit unavailable; the consumer does not
+spin or resume the producer merely to finish that update. Before typed parsing
+or Stage 1 persistence, the monitor sanitizes that unit in the owned snapshot so
+torn payload bytes are not retained in either output path.
+
 If suspension fails under the fatal-crash best-effort policy, the monitor skips
 all non-atomic SHM payload reads. The watchdog heartbeat is the sole live-state
-exception and is loaded through a dedicated acquire-atomic API. Publication and
-torn-snapshot detection are specified in the next schema revision; until that
-producer contract is active, suspension is what makes the full payload copy
-stable.
+exception and uses its dedicated atomic API.
 
-### Header (monitor-owned, 64 bytes)
+## Publication protocol
 
-Written by the monitor when it creates the region; the producer only skips past
-it. It is deliberately **not** part of the schema. It carries a magic word
-(`"CMON"`), a version, and the ring/screenshot dimensions. A `0xDEADBEEF` canary
-at the very end of the region is checked to detect truncation/corruption.
+All writers use a single-attempt, nonblocking seqlock operation:
 
-### Breadcrumb rings
+1. `sut_shm_seqlock_try_begin` performs at most one compare-exchange from an
+   even generation to the following odd value.
+2. If it fails, the producer skips or defers that update. It never spins in a
+   crash-reporting path.
+3. After writing every field in the protected unit, the producer calls
+   `sut_shm_seqlock_end`, which release-stores the following even generation.
 
-A fixed set of per-thread ring buffers (each entry is 64 bytes: timestamp,
-thread id, category, severity, a truncated file name, line, and a short
-message). Each thread owns its own ring and advances a private `write_idx`, so
-recording a breadcrumb is lock-free. On capture the monitor merges all rings and
-sorts by timestamp.
+A concurrent consumer acquire-loads the generation, rejects an odd value,
+copies the unit, then acquire-loads it again. It accepts the copy only when the
+two values are identical and even. The monitor's suspended owned-snapshot path
+cannot observe a generation change during its copy, but it still rejects an odd
+value left by an interrupted producer. Consumers never wait for an odd value;
+they drop only that ring, section, or screenshot slot.
 
-### Crash context (app-agnostic)
+### Breadcrumb registry and rings
 
-Typed fields that are meaningful to any application:
+Ring registration is published in this order:
 
-- `heartbeat_counter` — bumped by the app; the ANR watchdog watches it.
-- session id + start time.
-- build identity (version, git hash/dirty, build type, compiler, OS, …),
-  populated by the host at init.
+1. Begin `header.breadcrumb_registry_generation`.
+2. Initialize the selected ring under that ring's own `generation` using
+   begin, payload writes, and end.
+3. Release-store the new `crumb_state.ring_count`.
+4. End `header.breadcrumb_registry_generation` with a release store.
 
-Application/domain state is **not** stored as typed fields. Instead it is carried
-as a generic **annotation** array — a small set of `key`/`value` string pairs.
-This keeps the schema and the monitor entirely app-agnostic: the monitor reads
-annotations into a map and emits them verbatim, without knowing any app's domain.
-A host records them via its own key/value API (e.g. `active_tool → "brush"`).
+The consumer validates the registry generation and acquire-loads `ring_count`
+before iterating. It then validates every ring independently. A ring writer
+begins that ring's `generation`, writes the breadcrumb plus `tid`, `write_idx`,
+and `count`, and ends the generation. An odd or changed ring generation drops
+only that ring; other registered rings remain usable.
+
+### Crash context
+
+`header.context_generation` protects all crash-context fields except
+`heartbeat_counter`. The producer begins the context generation, writes the
+session, build identity, annotation count, and annotation payload, then ends the
+generation. An odd or changed value drops the context as one unit.
+
+The heartbeat is deliberately independent because the watchdog must observe it
+while the child is running. The producer release-stores an aligned `uint64_t`;
+the monitor acquire-loads the matching aligned Rust `AtomicU64`. A heartbeat
+operation publishes no other context field and does not participate in
+`context_generation`.
+
+### Settings
+
+The producer begins `header.settings_generation`, writes the complete settings
+snapshot, and ends it. An odd or changed value drops the settings unit without
+retrying or affecting other sections.
+
+### Attachments
+
+The producer begins `header.attachments_generation`, writes slots first, writes
+the bounded `count`, and ends the generation. The padding word at attachment
+section offset 4 remains reserved for alignment; it is not another generation.
+An odd or changed header generation drops the entire attachment registration
+section. Attachment structures and the slot-count constant come from the C
+schema rather than a handwritten Rust mirror.
 
 ### Screenshots
 
-A ring of RGBA slots (newest wins). The producer fills a slot's pixels, then
-publishes it by storing into a per-slot `valid` flag with release ordering; the
-monitor reads `valid` with acquire ordering.
+Each `valid[i]` word is now the screenshot slot's generation, not a boolean:
 
-## Atomics
+- `0`: never published;
+- odd: pixels or metadata are being written;
+- nonzero even: published generation.
 
-Fields accessed atomically (the heartbeat counter, the screenshot `valid` flags)
-are declared with **plain** integer types in the schema — `_Atomic` is not
-representable by bindgen, and atomicity is an access property, not a layout one.
-The C producer accesses them with `__atomic_*` builtins; the monitor reads them
-volatile.
+The producer begins `valid[i]`, writes `data[i]`, `timestamp[i]`, and `tier[i]`,
+then ends `valid[i]` with a release store. The consumer acquire-loads the slot
+generation before and after copying its pixels and metadata and accepts only the
+same nonzero even value. An odd or changed value drops that slot without
+spinning; other slots remain eligible.
+
+## Atomic ABI rules
+
+Atomic words are declared as plain fixed-width integers in the schema because
+C `_Atomic` fields are not represented portably by bindgen. This does not make
+ordinary or volatile access valid. Every concurrent access uses aligned atomic
+operations:
+
+- C uses the acquire/release and seqlock helpers in `crash_shm_atomic.h`.
+- Rust uses aligned `AtomicU32`/`AtomicU64` acquire and release operations.
+- The ABI is accepted only when atomic size and alignment match the underlying
+  integer and the target reports the operations as always lock-free.
+
+There is no volatile fallback. Acquire/release orders publication; `volatile`
+neither makes a cross-process data race safe nor detects torn multi-field data.
 
 ## Producer responsibilities
 
-A child that wants rich reports should, at startup, read `CRASH_MONITOR_SHM` from
-its environment, `shm_open` + `mmap` that name, verify the header magic, and then
-write into the sections above. Nothing is mandatory — the monitor still captures
-threads/memory/images for a child that writes nothing — but breadcrumbs, context,
-and a regularly-advanced heartbeat are what make reports (and ANR detection)
-useful. See [integration.md](integration.md).
+A producer reads `CRASH_MONITOR_SHM`, opens and maps that name, checks the
+mapping size plus header magic/version, and follows the publication sequence for
+every unit it writes. Nothing is mandatory: the monitor can still capture
+threads, memory, and images for a child that writes no SHM payload. Breadcrumbs,
+context, and a regularly advanced heartbeat make reports and ANR detection more
+useful. The standalone example is
+[`tests/e2e/fixtures/crash_app.c`](../tests/e2e/fixtures/crash_app.c).
