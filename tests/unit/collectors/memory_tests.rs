@@ -30,10 +30,89 @@ fn test_collect_memory_map() {
         make_region(0x5000, 0x1000, 30, 5),
     ];
 
-    let regions = collect_memory_map(&plat, 0, &PluginContext::without_deadline()).unwrap();
+    let (regions, quality) =
+        collect_memory_map(&plat, 0, &PluginContext::without_deadline()).unwrap();
+    assert_eq!(quality, VmRegionEnumerationQuality::Complete);
     assert_eq!(regions.len(), 2);
     assert_eq!(regions[0].address, 0x1000);
     assert_eq!(regions[1].address, 0x5000);
+}
+
+#[test]
+fn test_memory_collector_preserves_partial_map_and_returns_quality_diagnostic() {
+    let mut platform = MockPlatform::default();
+    platform.regions = vec![make_region(0x1000, 0x2000, 1, 10)];
+    platform.vm_region_quality = VmRegionEnumerationQuality::QueryAttemptLimit;
+    let platform = std::sync::Arc::new(platform);
+    let collector = MemoryCollector::new(platform);
+    let event = CrashEvent {
+        report_type: crate::pipeline::ReportType::Crash,
+        termination: None,
+        exception_type: Some(1),
+        exception_code: None,
+        exception_subcode: None,
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 123,
+        process_name: "partial-memory-test".to_string(),
+        hang_duration_ms: None,
+    };
+    let mut data = CollectedData::default();
+
+    let error = collector
+        .collect(&event, 0, &mut data, &PluginContext::without_deadline())
+        .unwrap_err();
+
+    assert_eq!(data.raw.memory_map.len(), 1);
+    assert!(error.contains("partial data"));
+    assert!(error.contains("query attempt limit"));
+}
+
+#[test]
+fn test_partial_memory_quality_is_exposed_in_pipeline_diagnostics() {
+    let mut mock = MockPlatform::default();
+    mock.regions = vec![make_region(0x1000, 0x2000, 1, 10)];
+    mock.vm_region_quality = VmRegionEnumerationQuality::ConsecutiveErrorLimit;
+    let platform = std::sync::Arc::new(mock);
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = crate::pipeline::Pipeline {
+        enabled: true,
+        triggers: crate::pipeline::TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![Box::new(MemoryCollector::new(platform.clone()))],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: None,
+        platform,
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+    let event = CrashEvent {
+        report_type: crate::pipeline::ReportType::Crash,
+        termination: None,
+        exception_type: Some(1),
+        exception_code: None,
+        exception_subcode: None,
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 124,
+        process_name: "partial-memory-diagnostics-test".to_string(),
+        hang_duration_ms: None,
+    };
+
+    let diagnostics = pipeline.handle_event(&event, 0);
+    let status = diagnostics
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "MemoryCollector")
+        .map(|plugin| &plugin.status);
+
+    assert!(matches!(
+        status,
+        Some(crate::pipeline::PluginStatus::Error(error))
+            if error.contains("partial data") && error.contains("consecutive query error limit")
+    ));
+    assert!(diagnostics.report_path.is_some());
 }
 
 #[test]

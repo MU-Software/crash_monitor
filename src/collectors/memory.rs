@@ -7,7 +7,7 @@
 use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
 };
-use crate::platform::{PlatformOps, TaskVmSummary, VmRegionInfo};
+use crate::platform::{PlatformOps, TaskVmSummary, VmRegionEnumerationQuality, VmRegionInfo};
 use crate::utils::vm_tags;
 use mach2::port::mach_port_t;
 use std::collections::BTreeMap;
@@ -70,10 +70,17 @@ impl Collector for MemoryCollector {
     ) -> Result<(), String> {
         context.checkpoint()?;
         let platform = self.platform.as_ref();
-        data.raw.memory_map = collect_memory_map(platform, task, context)?;
+        let (memory_map, quality) = collect_memory_map(platform, task, context)?;
+        data.raw.memory_map = memory_map;
         data.raw.heap = collect_heap_summary(platform, task, &data.raw.memory_map, context)?;
         context.checkpoint()?;
-        Ok(())
+        if quality.is_complete() {
+            Ok(())
+        } else {
+            Err(format!(
+                "VM region enumeration returned partial data: {quality}"
+            ))
+        }
     }
 }
 
@@ -86,16 +93,9 @@ fn collect_memory_map(
     platform: &dyn PlatformOps,
     task: mach_port_t,
     context: &PluginContext,
-) -> Result<Vec<VmRegionInfo>, String> {
+) -> Result<(Vec<VmRegionInfo>, VmRegionEnumerationQuality), String> {
     context.checkpoint()?;
-    let (regions, truncated) = platform.enumerate_vm_regions(task, context)?;
-    context.checkpoint()?;
-
-    if truncated {
-        eprintln!("[monitor] VM region list truncated (>2000 regions)");
-    }
-
-    Ok(regions)
+    platform.enumerate_vm_regions(task, context)
 }
 
 // ═══════════════════════════════════════════════════

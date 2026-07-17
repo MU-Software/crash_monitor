@@ -8,7 +8,10 @@ use mach2::port::mach_port_t;
 
 use crate::pipeline::PluginContext;
 
-use super::{PlatformOps, SupervisorHealth, TaskControlFailure, TaskVmSummary, VmRegionInfo};
+use super::{
+    PlatformOps, SupervisorHealth, TaskControlFailure, TaskVmSummary, VmRegionEnumerationQuality,
+    VmRegionInfo,
+};
 
 /// Mock thread data: port, optional name, register state [u32; 68].
 pub struct MockThread {
@@ -26,6 +29,7 @@ pub struct MockPlatform {
     /// Memory map: address → bytes. `vm_read` returns matching range.
     pub memory: BTreeMap<u64, Vec<u8>>,
     pub regions: Vec<VmRegionInfo>,
+    pub vm_region_quality: VmRegionEnumerationQuality,
     pub vm_info: Option<TaskVmSummary>,
     /// Task info responses: flavor → byte buffer.
     pub task_info_responses: BTreeMap<u32, Vec<u8>>,
@@ -82,6 +86,7 @@ impl Default for MockPlatform {
             threads: Vec::new(),
             memory: BTreeMap::new(),
             regions: Vec::new(),
+            vm_region_quality: VmRegionEnumerationQuality::Complete,
             vm_info: None,
             task_info_responses: BTreeMap::new(),
             suspend_fails: false,
@@ -198,9 +203,11 @@ impl PlatformOps for MockPlatform {
         &self,
         _task: mach_port_t,
         context: &PluginContext,
-    ) -> Result<(Vec<VmRegionInfo>, bool), String> {
-        context.checkpoint()?;
-        Ok((self.regions.clone(), false))
+    ) -> Result<(Vec<VmRegionInfo>, VmRegionEnumerationQuality), String> {
+        if context.checkpoint().is_err() {
+            return Ok((Vec::new(), VmRegionEnumerationQuality::CaptureDeadline));
+        }
+        Ok((self.regions.clone(), self.vm_region_quality))
     }
 
     fn get_task_vm_info(&self, _task: mach_port_t) -> Result<TaskVmSummary, String> {
@@ -227,7 +234,7 @@ impl PlatformOps for MockPlatform {
 
 #[cfg(test)]
 mod tests {
-    use super::{MockPlatform, PlatformOps};
+    use super::{MockPlatform, PlatformOps, VmRegionEnumerationQuality};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -289,9 +296,8 @@ mod tests {
         let mock = MockPlatform::default();
         let context = PluginContext::with_timeout(Duration::ZERO);
 
-        match mock.enumerate_vm_regions(0, &context) {
-            Err(error) => assert_eq!(error, "plugin deadline reached"),
-            Ok(_) => panic!("expired context should cancel VM enumeration"),
-        }
+        let (regions, quality) = mock.enumerate_vm_regions(0, &context).unwrap();
+        assert!(regions.is_empty());
+        assert_eq!(quality, VmRegionEnumerationQuality::CaptureDeadline);
     }
 }

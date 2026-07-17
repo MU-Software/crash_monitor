@@ -129,11 +129,11 @@
 
 ### P0-12. VM region 열거에 진행·시도·시간 상한을 둔다
 
-- [ ] 성공 region 수와 별개로 total attempt와 consecutive error cap을 둔다.
-- [ ] 매 반복에서 address가 단조 증가하는지 검사하고 saturating 정지 상태를 종료한다.
-- [ ] 고정 4KiB 대신 실제 host page size를 사용한다.
-- [ ] 전체 capture deadline을 적용하고 partial 결과의 품질을 진단한다.
-- [ ] 연속 오류, address overflow, no-progress, 매우 큰 map 테스트를 추가한다.
+- [x] 성공 region 수와 별개로 total attempt와 consecutive error cap을 둔다.
+- [x] 매 반복에서 address가 단조 증가하는지 검사하고 saturating 정지 상태를 종료한다.
+- [x] 고정 4KiB 대신 실제 host page size를 사용한다.
+- [x] 전체 capture deadline을 적용하고 partial 결과의 품질을 진단한다.
+- [x] 연속 오류, address overflow, no-progress, 매우 큰 map 테스트를 추가한다.
 
 범위: `src/platform/macos/memory.rs`, `src/platform/macos/ffi/memory.rs`, `src/event_loop.rs`.
 

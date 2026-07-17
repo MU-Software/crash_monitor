@@ -90,15 +90,18 @@ pub trait PlatformOps: Send + Sync {
     /// Returns an error string if the platform call fails.
     fn vm_region_query(&self, task: mach_port_t, address: u64) -> Result<VmRegionInfo, String>;
 
-    /// Enumerate all VM regions in the target task's address space.
+    /// Enumerate VM regions within the bounded capture context.
+    ///
+    /// A budget or deadline stop returns the safely collected prefix together
+    /// with a non-complete [`VmRegionEnumerationQuality`].
     ///
     /// # Errors
-    /// Returns an error when the plugin deadline or cancellation token fires.
+    /// Returns an error if enumeration cannot be initialized.
     fn enumerate_vm_regions(
         &self,
         task: mach_port_t,
         context: &PluginContext,
-    ) -> Result<(Vec<VmRegionInfo>, bool), String>;
+    ) -> Result<(Vec<VmRegionInfo>, VmRegionEnumerationQuality), String>;
 
     /// Get high-level VM statistics for a task.
     ///
@@ -185,7 +188,7 @@ impl PlatformOps for MacOsPlatform {
         &self,
         task: mach_port_t,
         context: &PluginContext,
-    ) -> Result<(Vec<VmRegionInfo>, bool), String> {
+    ) -> Result<(Vec<VmRegionInfo>, VmRegionEnumerationQuality), String> {
         macos::enumerate_vm_regions(task, || context.checkpoint())
     }
 

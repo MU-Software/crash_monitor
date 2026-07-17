@@ -5,10 +5,11 @@ use mach2::task::task_info;
 use mach2::task_info::task_info_t;
 use mach2::task_info::{TASK_VM_INFO, task_vm_info};
 use mach2::vm::{mach_vm_deallocate, mach_vm_read, mach_vm_region};
+use mach2::vm_page_size::vm_page_size;
 use mach2::vm_region::{VM_REGION_EXTENDED_INFO, vm_region_extended_info};
 
 use crate::platform::macos::memory::{
-    VmEnumAction, vm_enum_action, vm_enum_budget_exhausted, vm_enum_made_progress,
+    VmEnumAction, VmEnumerationState, VmRegionEnumerationQuality,
 };
 use crate::platform::macos::types::{MachError, TaskVmSummary, VmRegionInfo, mach_result};
 
@@ -85,61 +86,80 @@ pub fn vm_region_query(task: mach_port_t, address: &mut u64) -> Result<VmRegionI
 }
 
 /// Enumerate all VM regions in the target task's address space.
-/// Returns the regions and whether the list was truncated.
+/// Returns the regions and their completeness quality.
 /// Individual region query failures are skipped (logged to stderr).
 ///
 /// # Errors
-/// Returns an error when the plugin deadline or cancellation token fires.
+/// Returns an error if the host VM page size is unavailable or invalid.
 pub fn enumerate_vm_regions(
     task: mach_port_t,
     mut checkpoint: impl FnMut() -> Result<(), String>,
-) -> Result<(Vec<VmRegionInfo>, bool), String> {
+) -> Result<(Vec<VmRegionInfo>, VmRegionEnumerationQuality), String> {
     let mut regions = Vec::new();
-    let mut address: u64 = 0;
-    let mut query_attempts = 0;
-    let mut consecutive_failures = 0;
+    let mut state = VmEnumerationState::new(host_page_size()?);
 
     loop {
-        checkpoint()?;
-        if vm_enum_budget_exhausted(query_attempts, consecutive_failures) {
-            eprintln!(
-                "[monitor] VM region enumeration budget exhausted after {query_attempts} queries"
-            );
-            return Ok((regions, true));
+        if checkpoint().is_err() {
+            return Ok((regions, VmRegionEnumerationQuality::CaptureDeadline));
+        }
+        if let Some(quality) = state.pre_query_stop() {
+            eprintln!("[monitor] VM region enumeration partial: {quality}");
+            return Ok((regions, quality));
         }
 
-        query_attempts += 1;
+        let address = state.address();
         let mut query_addr = address;
         let (query_result, maybe_info) = match vm_region_query(task, &mut query_addr) {
             Ok(info) => (Ok((info.size, query_addr)), Some(info)),
-            Err(e) => (Err((e.kern_return, address)), None),
+            Err(error) => (Err(error.kern_return), None),
         };
-        checkpoint()?;
 
-        match vm_enum_action(regions.len(), query_result) {
-            VmEnumAction::AddRegion { next_address } => {
-                consecutive_failures = 0;
-                if !vm_enum_made_progress(address, next_address) {
-                    eprintln!("[monitor] VM region enumeration made no address progress");
-                    return Ok((regions, true));
-                }
+        match state.process_query(query_result) {
+            VmEnumAction::AddRegion => {
                 if let Some(info) = maybe_info {
                     regions.push(info);
                 }
-                address = next_address;
-            }
-            VmEnumAction::Done => return Ok((regions, false)),
-            VmEnumAction::SkipPage { next_address } => {
-                eprintln!("[monitor] vm_region skip at {address:#x}");
-                consecutive_failures += 1;
-                if !vm_enum_made_progress(address, next_address) {
-                    eprintln!("[monitor] VM region enumeration made no address progress");
-                    return Ok((regions, true));
+                if checkpoint().is_err() {
+                    return Ok((regions, VmRegionEnumerationQuality::CaptureDeadline));
                 }
-                address = next_address;
             }
-            VmEnumAction::Truncated => return Ok((regions, true)),
+            VmEnumAction::AddTerminalRegion(quality) => {
+                if let Some(info) = maybe_info {
+                    regions.push(info);
+                }
+                eprintln!("[monitor] VM region enumeration partial: {quality}");
+                return Ok((regions, quality));
+            }
+            VmEnumAction::Done(quality) => {
+                if !quality.is_complete() {
+                    eprintln!("[monitor] VM region enumeration partial: {quality}");
+                }
+                return Ok((regions, quality));
+            }
+            VmEnumAction::SkipPage => {
+                eprintln!("[monitor] vm_region skip at {address:#x}");
+                if checkpoint().is_err() {
+                    return Ok((regions, VmRegionEnumerationQuality::CaptureDeadline));
+                }
+            }
+            VmEnumAction::Stop(quality) => {
+                eprintln!("[monitor] VM region enumeration partial: {quality}");
+                return Ok((regions, quality));
+            }
         }
+    }
+}
+
+fn host_page_size() -> Result<u64, String> {
+    // SAFETY: libSystem initializes this process-wide Mach VM constant before
+    // application code runs. Reading it does not mutate kernel or process state.
+    let raw_page_size = unsafe { vm_page_size };
+    let page_size = u64::try_from(raw_page_size)
+        .map_err(|_| "host VM page size does not fit in u64".to_string())?;
+    if page_size == 0 {
+        Err("host VM page size is zero".to_string())
+    } else {
+        Ok(page_size)
     }
 }
 
