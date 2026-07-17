@@ -89,7 +89,7 @@ fn report_without_termination_omits_the_field() {
 #[test]
 fn build_report_preserves_exit_termination() {
     let event = CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::ExitFailure,
         termination: Some(TerminationReason::Exited {
             exit_code: 23,
@@ -125,7 +125,7 @@ fn build_report_preserves_exit_termination() {
 fn build_report_preserves_the_exact_mach_code_array() {
     let raw_codes = vec![0xfedc_ba98_7654_3210, 0x0123_4567_89ab_cdef];
     let event = CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),

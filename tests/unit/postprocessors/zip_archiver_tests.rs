@@ -7,7 +7,7 @@ use std::io::Read;
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),

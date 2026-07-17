@@ -194,7 +194,7 @@ impl Notifier for StageContextProbe {
 
 fn make_event() -> CrashEvent {
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Snapshot,
         termination: None,
         exception_type: None,
@@ -805,7 +805,7 @@ impl Collector for DependentOnFailCollector {
 
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),
@@ -1383,7 +1383,7 @@ fn test_anr_event_produces_report() {
     );
 
     let event = CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Anr,
         termination: None,
         exception_type: None,
@@ -1980,7 +1980,7 @@ fn test_termination_pipeline_applies_hard_and_order_only_contract_to_three_live_
     );
     pipeline.validate_dependencies().unwrap();
     let event = CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::ExitFailure,
         termination: Some(TerminationReason::Exited {
             exit_code: 7,
@@ -2044,7 +2044,7 @@ fn test_unavailable_filter_hard_provider_skips_dependent_in_live_and_termination
     ));
 
     let termination_event = CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::ExitFailure,
         termination: Some(TerminationReason::Exited {
             exit_code: 9,

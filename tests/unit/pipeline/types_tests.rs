@@ -2,7 +2,7 @@ use super::*;
 
 fn make_crash_event(report_type: ReportType) -> CrashEvent {
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type,
         termination: None,
         exception_type: None,

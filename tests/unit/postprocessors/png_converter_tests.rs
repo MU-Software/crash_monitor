@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 fn make_event() -> CrashEvent {
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,
@@ -32,7 +32,7 @@ fn empty_report() -> CrashReport {
     CrashReport {
         header: ReportHeader {
             version: 1,
-            report_id: Default::default(),
+            report_id: Option::default(),
             timestamp: "2026-05-24T00:00:00".into(),
             pid: 1234,
             process: "test".into(),

@@ -244,7 +244,7 @@ fn report_event(report_type: crash_monitor::pipeline::ReportType) -> CrashEvent 
         ReportType::Crash | ReportType::Snapshot | ReportType::Anr => None,
     };
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crash_monitor::pipeline::ReportId::default(),
         report_type,
         exception_type: (report_type == ReportType::Crash).then_some(1),
         exception_code: (report_type == ReportType::Crash).then_some(0xDEAD),

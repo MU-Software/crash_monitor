@@ -8,7 +8,7 @@ use crate::pipeline::{ArtifactTransaction, CrashEvent, RawShmSnapshot, ReportCon
 
 fn raw_transaction(root: &std::path::Path) -> std::sync::Arc<ArtifactTransaction> {
     let event = CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,

@@ -14,6 +14,9 @@ use super::{
 };
 
 /// Mock thread data: port, optional name, register state [u32; 68].
+// Cargo's self dev-dependency enables `test-support` for the binary during
+// all-target linting even though production code never constructs mocks.
+#[allow(dead_code)]
 pub struct MockThread {
     pub port: mach_port_t,
     pub name: Option<String>,
@@ -24,6 +27,7 @@ pub struct MockThread {
 ///
 /// Tracks invocations of key methods (suspend, resume, deallocate) so tests
 /// can verify the pipeline called them correctly.
+#[allow(dead_code)]
 pub struct MockPlatform {
     pub threads: Vec<MockThread>,
     /// Memory map: address → bytes. `vm_read` returns matching range.
@@ -49,6 +53,7 @@ pub struct MockPlatform {
     deallocated_ports: Mutex<Vec<mach_port_t>>,
 }
 
+#[allow(dead_code)]
 impl MockPlatform {
     /// Number of times `suspend_task` was called.
     pub fn suspend_count(&self) -> usize {

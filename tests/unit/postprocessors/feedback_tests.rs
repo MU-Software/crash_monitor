@@ -9,7 +9,7 @@ use std::time::Duration;
 
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,
@@ -29,7 +29,7 @@ fn write_test_report(dir: &std::path::Path) -> PathBuf {
     let report = CrashReport {
         header: ReportHeader {
             version: 1,
-            report_id: Default::default(),
+            report_id: Option::default(),
             timestamp: "2026-04-10T00:00:00".to_string(),
             pid: 9999,
             process: "test_app".to_string(),

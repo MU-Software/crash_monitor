@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 fn dummy_event(report_type: ReportType) -> CrashEvent {
     CrashEvent {
-        report_id: Default::default(),
+        report_id: crate::pipeline::ReportId::default(),
         report_type,
         termination: None,
         exception_type: Some(1),

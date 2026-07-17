@@ -893,7 +893,7 @@ mod tests {
     fn captured(pid: u32) -> CapturedEvent {
         CapturedEvent::new(
             CrashEvent {
-                report_id: Default::default(),
+                report_id: crate::pipeline::ReportId::default(),
                 report_type: ReportType::Snapshot,
                 termination: None,
                 exception_type: None,
