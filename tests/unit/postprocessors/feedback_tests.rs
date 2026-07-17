@@ -77,6 +77,13 @@ fn test_not_available_when_missing() {
 }
 
 #[test]
+fn test_plugin_dependency_metadata() {
+    let pp = FeedbackPostProcessor::new(PathBuf::from("/nonexistent/crash_dialog_macos"));
+    assert!(pp.hard_dependencies().is_empty());
+    assert_eq!(pp.order_after(), &["PNGConverter"]);
+}
+
+#[test]
 fn test_submit_patches_report() {
     let dir = tempfile::tempdir().unwrap();
     let script = make_mock_script(

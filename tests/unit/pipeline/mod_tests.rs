@@ -3,7 +3,7 @@ use crate::collectors::thread::RawThreadData;
 use crate::platform::mock::MockPlatform;
 use crate::postprocessors::{MoveToSent, ZIPArchiver};
 use mach2::port::mach_port_t;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ impl Plugin for MockCollector {
     fn priority(&self) -> Priority {
         Priority::Medium
     }
-    fn depends_on(&self) -> &'static [&'static str] {
+    fn hard_dependencies(&self) -> &'static [&'static str] {
         self.dep
     }
 }
@@ -247,16 +247,24 @@ fn test_dependency_ordering_valid() {
     let plugins: Vec<Box<dyn Collector>> =
         vec![Box::new(MockCollector { dep: &[] }), Box::new(DepCollector)];
     // Should not panic
-    validate_plugin_order("Collector", &plugins);
+    validate_plugin_order(PluginCategory::Collector, &plugins).unwrap();
 }
 
 #[test]
-#[should_panic(expected = "depends on 'MockCollector' which is registered after it")]
 fn test_dependency_ordering_invalid() {
     // B depends on A, but B is registered before A — invalid
     let plugins: Vec<Box<dyn Collector>> =
         vec![Box::new(DepCollector), Box::new(MockCollector { dep: &[] })];
-    validate_plugin_order("Collector", &plugins);
+    let error = validate_plugin_order(PluginCategory::Collector, &plugins).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::config::ConfigValidationError::InvalidDependencyOrder {
+            category: PluginCategory::Collector,
+            ref plugin_id,
+            ref dependency,
+            kind: DependencyKind::Hard,
+        } if plugin_id == "DepCollector" && dependency == "MockCollector"
+    ));
 }
 
 // A collector that depends on MockCollector
@@ -272,7 +280,7 @@ impl Plugin for DepCollector {
     fn priority(&self) -> Priority {
         Priority::Low
     }
-    fn depends_on(&self) -> &'static [&'static str] {
+    fn hard_dependencies(&self) -> &'static [&'static str] {
         &["MockCollector"]
     }
 }
@@ -384,7 +392,7 @@ impl Plugin for DependentOnFailCollector {
     fn priority(&self) -> Priority {
         Priority::Low
     }
-    fn depends_on(&self) -> &'static [&'static str] {
+    fn hard_dependencies(&self) -> &'static [&'static str] {
         &["FailingCollector"]
     }
 }
@@ -886,6 +894,124 @@ impl Notifier for CfgNotifier {
     }
 }
 
+struct DependencyBehavior {
+    name: &'static str,
+    hard: &'static [&'static str],
+    order: &'static [&'static str],
+    fail: bool,
+    available: bool,
+}
+
+impl DependencyBehavior {
+    fn run(&self) -> Result<(), String> {
+        if self.fail {
+            Err(format!("{} failed", self.name))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+macro_rules! dependency_plugin_metadata {
+    ($plugin:ty) => {
+        impl Plugin for $plugin {
+            fn name(&self) -> &'static str {
+                self.0.name
+            }
+            fn execution(&self) -> PluginExecution {
+                PluginExecution::Cooperative
+            }
+            fn priority(&self) -> Priority {
+                Priority::Medium
+            }
+            fn hard_dependencies(&self) -> &'static [&'static str] {
+                self.0.hard
+            }
+            fn order_after(&self) -> &'static [&'static str] {
+                self.0.order
+            }
+            fn is_available(&self) -> bool {
+                self.0.available
+            }
+        }
+    };
+}
+
+struct DependencyFilter(DependencyBehavior);
+dependency_plugin_metadata!(DependencyFilter);
+impl Filter for DependencyFilter {
+    fn should_process(
+        &self,
+        _event: &CrashEvent,
+        _context: &PluginContext,
+    ) -> Result<bool, String> {
+        self.0.run().map(|()| true)
+    }
+}
+
+struct DependencyCollector(DependencyBehavior);
+dependency_plugin_metadata!(DependencyCollector);
+impl Collector for DependencyCollector {
+    fn collect(
+        &self,
+        _event: &CrashEvent,
+        _task: mach_port_t,
+        _data: &mut CollectedData,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        self.0.run()
+    }
+}
+
+struct DependencyPreProcessor(DependencyBehavior);
+dependency_plugin_metadata!(DependencyPreProcessor);
+impl PreProcessor for DependencyPreProcessor {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _data: &mut CollectedData,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        self.0.run()
+    }
+}
+
+struct DependencyPostProcessor(DependencyBehavior);
+dependency_plugin_metadata!(DependencyPostProcessor);
+impl PostProcessor for DependencyPostProcessor {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        self.0.run()
+    }
+}
+
+struct DependencyNotifier(DependencyBehavior);
+dependency_plugin_metadata!(DependencyNotifier);
+impl Notifier for DependencyNotifier {
+    fn notify(&self, _report_path: &Path, _context: &PluginContext) -> Result<(), String> {
+        self.0.run()
+    }
+}
+
+fn dependency_behavior(
+    name: &'static str,
+    hard: &'static [&'static str],
+    order: &'static [&'static str],
+    fail: bool,
+) -> DependencyBehavior {
+    DependencyBehavior {
+        name,
+        hard,
+        order,
+        fail,
+        available: true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_full_pipeline(
     filters: Vec<Box<dyn Filter>>,
@@ -914,6 +1040,309 @@ fn json_report_exists(dir: &std::path::Path) -> bool {
         .unwrap()
         .filter_map(Result::ok)
         .any(|f| f.path().extension().is_some_and(|e| e == "json"))
+}
+
+fn assert_dependency_skipped(diagnostics: &Diagnostics, plugin_name: &str) {
+    let status = diagnostics
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == plugin_name)
+        .map(|plugin| &plugin.status);
+    assert!(
+        matches!(status, Some(PluginStatus::Skipped(reason)) if reason.contains("dependency")),
+        "{plugin_name} was not dependency-skipped"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one explicit provider/dependent trio per pipeline stage
+fn test_live_pipeline_applies_hard_and_order_only_failure_contract_to_all_five_stages() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![
+            Box::new(DependencyFilter(dependency_behavior(
+                "FilterProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyFilter(dependency_behavior(
+                "FilterHard",
+                &["FilterProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyFilter(dependency_behavior(
+                "FilterOrder",
+                &[],
+                &["FilterProvider"],
+                false,
+            ))),
+        ],
+        vec![
+            Box::new(DependencyCollector(dependency_behavior(
+                "CollectorProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyCollector(dependency_behavior(
+                "CollectorHard",
+                &["CollectorProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyCollector(dependency_behavior(
+                "CollectorOrder",
+                &[],
+                &["CollectorProvider"],
+                false,
+            ))),
+        ],
+        vec![
+            Box::new(DependencyPreProcessor(dependency_behavior(
+                "PreProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyPreProcessor(dependency_behavior(
+                "PreHard",
+                &["PreProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyPreProcessor(dependency_behavior(
+                "PreOrder",
+                &[],
+                &["PreProvider"],
+                false,
+            ))),
+        ],
+        vec![
+            Box::new(DependencyPostProcessor(dependency_behavior(
+                "PostProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyPostProcessor(dependency_behavior(
+                "PostHard",
+                &["PostProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyPostProcessor(dependency_behavior(
+                "PostOrder",
+                &[],
+                &["PostProvider"],
+                false,
+            ))),
+        ],
+        vec![
+            Box::new(DependencyNotifier(dependency_behavior(
+                "NotifierProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyNotifier(dependency_behavior(
+                "NotifierHard",
+                &["NotifierProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyNotifier(dependency_behavior(
+                "NotifierOrder",
+                &[],
+                &["NotifierProvider"],
+                false,
+            ))),
+        ],
+        tempdir.path(),
+    );
+    pipeline.validate_dependencies().unwrap();
+
+    let diagnostics = pipeline.handle_event(&make_event(), 0);
+    for hard in [
+        "FilterHard",
+        "CollectorHard",
+        "PreHard",
+        "PostHard",
+        "NotifierHard",
+    ] {
+        assert_dependency_skipped(&diagnostics, hard);
+    }
+    for order_only in [
+        "FilterOrder",
+        "CollectorOrder",
+        "PreOrder",
+        "PostOrder",
+        "NotifierOrder",
+    ] {
+        assert!(
+            diagnostics.succeeded(order_only),
+            "order-only dependent {order_only} did not run after provider failure"
+        );
+    }
+}
+
+#[test]
+fn test_termination_pipeline_applies_hard_and_order_only_contract_to_three_live_stages() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![
+            Box::new(DependencyFilter(dependency_behavior(
+                "TermFilterProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyFilter(dependency_behavior(
+                "TermFilterHard",
+                &["TermFilterProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyFilter(dependency_behavior(
+                "TermFilterOrder",
+                &[],
+                &["TermFilterProvider"],
+                false,
+            ))),
+        ],
+        vec![],
+        vec![],
+        vec![
+            Box::new(DependencyPostProcessor(dependency_behavior(
+                "TermPostProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyPostProcessor(dependency_behavior(
+                "TermPostHard",
+                &["TermPostProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyPostProcessor(dependency_behavior(
+                "TermPostOrder",
+                &[],
+                &["TermPostProvider"],
+                false,
+            ))),
+        ],
+        vec![
+            Box::new(DependencyNotifier(dependency_behavior(
+                "TermNotifierProvider",
+                &[],
+                &[],
+                true,
+            ))),
+            Box::new(DependencyNotifier(dependency_behavior(
+                "TermNotifierHard",
+                &["TermNotifierProvider"],
+                &[],
+                false,
+            ))),
+            Box::new(DependencyNotifier(dependency_behavior(
+                "TermNotifierOrder",
+                &[],
+                &["TermNotifierProvider"],
+                false,
+            ))),
+        ],
+        tempdir.path(),
+    );
+    pipeline.validate_dependencies().unwrap();
+    let event = CrashEvent {
+        report_type: ReportType::ExitFailure,
+        termination: Some(TerminationReason::Exited {
+            exit_code: 7,
+            runtime_ms: 10,
+        }),
+        exception_type: None,
+        exception_code: None,
+        exception_subcode: None,
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 1234,
+        process_name: "terminated-test".into(),
+        hang_duration_ms: None,
+    };
+
+    let diagnostics = pipeline.handle_termination_event(&event);
+    for hard in ["TermFilterHard", "TermPostHard", "TermNotifierHard"] {
+        assert_dependency_skipped(&diagnostics, hard);
+    }
+    for order_only in ["TermFilterOrder", "TermPostOrder", "TermNotifierOrder"] {
+        assert!(diagnostics.succeeded(order_only));
+    }
+}
+
+#[test]
+fn test_unavailable_filter_hard_provider_skips_dependent_in_live_and_termination_paths() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![
+            Box::new(DependencyFilter(DependencyBehavior {
+                name: "UnavailableFilterProvider",
+                hard: &[],
+                order: &[],
+                fail: false,
+                available: false,
+            })),
+            Box::new(DependencyFilter(dependency_behavior(
+                "UnavailableFilterDependent",
+                &["UnavailableFilterProvider"],
+                &[],
+                false,
+            ))),
+        ],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        tempdir.path(),
+    );
+    pipeline.validate_dependencies().unwrap();
+
+    let live = pipeline.handle_event(&make_event(), 0);
+    assert_dependency_skipped(&live, "UnavailableFilterDependent");
+    assert!(matches!(
+        live.plugins
+            .iter()
+            .find(|plugin| plugin.name == "UnavailableFilterProvider")
+            .map(|plugin| &plugin.status),
+        Some(PluginStatus::Skipped(reason)) if reason == "not available"
+    ));
+
+    let termination_event = CrashEvent {
+        report_type: ReportType::ExitFailure,
+        termination: Some(TerminationReason::Exited {
+            exit_code: 9,
+            runtime_ms: 20,
+        }),
+        exception_type: None,
+        exception_code: None,
+        exception_subcode: None,
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 2345,
+        process_name: "unavailable-filter-test".into(),
+        hang_duration_ms: None,
+    };
+    let termination = pipeline.handle_termination_event(&termination_event);
+    assert_dependency_skipped(&termination, "UnavailableFilterDependent");
+    assert!(matches!(
+        termination
+            .plugins
+            .iter()
+            .find(|plugin| plugin.name == "UnavailableFilterProvider")
+            .map(|plugin| &plugin.status),
+        Some(PluginStatus::Skipped(reason)) if reason == "not available"
+    ));
 }
 
 // ── Panic isolation (the core stability guarantee) ──
@@ -1507,8 +1936,9 @@ fn test_macos_factory_preserves_validated_global_and_trigger_policy() {
     let disabled =
         serde_json::from_str::<crate::config::CrashReporterConfig>(r#"{ "enabled": false }"#)
             .unwrap()
-            .validate();
-    let disabled_pipeline = default_macos_pipeline_from_config(None, &disabled);
+            .validate()
+            .unwrap();
+    let disabled_pipeline = default_macos_pipeline_from_config(None, &disabled).unwrap();
     assert!(!disabled_pipeline.enabled);
     assert!(disabled_pipeline.collectors.is_empty());
     assert!(disabled_pipeline.post_processors.is_empty());
@@ -1533,8 +1963,9 @@ fn test_macos_factory_preserves_validated_global_and_trigger_policy() {
         }"#,
     )
     .unwrap()
-    .validate();
-    let selective_pipeline = default_macos_pipeline_from_config(None, &selective);
+    .validate()
+    .unwrap();
+    let selective_pipeline = default_macos_pipeline_from_config(None, &selective).unwrap();
     assert!(selective_pipeline.enabled);
     assert!(!selective_pipeline.report_enabled(ReportType::Crash));
     assert!(selective_pipeline.report_enabled(ReportType::ExitFailure));
@@ -1547,11 +1978,10 @@ fn test_macos_factory_preserves_validated_global_and_trigger_policy() {
 #[test]
 fn test_default_macos_pipeline_builds_and_validates() {
     // Exercises the full plugin-registration factory with default (all-enabled)
-    // config. validate_dependencies() panics if any plugin is registered before
-    // a dependency it declares, so this guards against a future plugin being
-    // added out of order.
-    let pipeline = default_macos_pipeline(None);
-    pipeline.validate_dependencies();
+    // config. Structured validation catches registration drift without a
+    // startup panic.
+    let pipeline = default_macos_pipeline(None).unwrap();
+    pipeline.validate_dependencies().unwrap();
 
     // Default config enables every category.
     assert!(!pipeline.collectors.is_empty(), "no collectors registered");
@@ -1565,4 +1995,218 @@ fn test_default_macos_pipeline_builds_and_validates() {
     );
     assert!(!pipeline.filters.is_empty(), "no filters registered");
     assert!(!pipeline.notifiers.is_empty(), "no notifiers registered");
+}
+
+#[test]
+fn test_factory_runtime_metadata_matches_static_config_registry() {
+    let validated = crate::config::CrashReporterConfig::default()
+        .validate()
+        .unwrap();
+    let pipeline = default_macos_pipeline_from_config(None, &validated).unwrap();
+    let categories = [
+        (
+            PluginCategory::Filter,
+            plugin_graph_nodes(&pipeline.filters),
+        ),
+        (
+            PluginCategory::Collector,
+            plugin_graph_nodes(&pipeline.collectors),
+        ),
+        (
+            PluginCategory::PreProcessor,
+            plugin_graph_nodes(&pipeline.pre_processors),
+        ),
+        (
+            PluginCategory::PostProcessor,
+            plugin_graph_nodes(&pipeline.post_processors),
+        ),
+        (
+            PluginCategory::Notifier,
+            plugin_graph_nodes(&pipeline.notifiers),
+        ),
+    ];
+
+    let mut runtime_ids = BTreeSet::new();
+    for (runtime_category, nodes) in categories {
+        for runtime in nodes {
+            runtime_ids.insert(runtime.id.clone());
+            let (configured_category, configured) =
+                crate::config::registered_plugin_spec(&runtime.id).unwrap_or_else(|| {
+                    panic!("factory plugin '{}' is absent from registry", runtime.id)
+                });
+            assert_eq!(
+                runtime_category, configured_category,
+                "{} category drift",
+                runtime.id
+            );
+            assert_eq!(
+                runtime.hard_dependencies, configured.hard_dependencies,
+                "{} hard dependency drift",
+                runtime.id
+            );
+            assert_eq!(
+                runtime.order_dependencies, configured.order_dependencies,
+                "{} order-only dependency drift",
+                runtime.id
+            );
+        }
+    }
+
+    // Exact reverse roster for a default factory without SHM. Breadcrumb,
+    // context, screenshot, attachment, and the derived AttachmentCopier are
+    // intentionally absent; FeedbackDialog is availability-dependent.
+    let unconditional: BTreeSet<String> = [
+        "DiskSpaceFilter",
+        "RateLimiter",
+        "ThreadCollector",
+        "MemoryCollector",
+        "DylibCollector",
+        "EnvironmentCollector",
+        "SessionEnricher",
+        "SymbolResolver",
+        "Fingerprinter",
+        "BuildInfoEnricher",
+        "DuplicateDetector",
+        "Sanitizer",
+        "RawCleanup",
+        "SessionRecorder",
+        "PNGConverter",
+        "ZIPArchiver",
+        "MoveToSent",
+        "LogRotator",
+        "RetentionManager",
+        "ConsoleNotifier",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert!(
+        unconditional.is_subset(&runtime_ids),
+        "factory omitted default plugins: {:?}",
+        unconditional.difference(&runtime_ids).collect::<Vec<_>>()
+    );
+    let conditional_or_unexpected: Vec<&String> = runtime_ids.difference(&unconditional).collect();
+    assert!(
+        conditional_or_unexpected
+            .iter()
+            .all(|plugin_id| plugin_id.as_str() == "FeedbackDialog"),
+        "unexpected default factory plugins: {conditional_or_unexpected:?}"
+    );
+}
+
+#[test]
+fn test_factory_consumes_closed_hard_dependencies_but_keeps_order_only_dependents() {
+    let hard_disabled = serde_json::from_str::<crate::config::CrashReporterConfig>(
+        r#"{
+            "pre_processors": {
+                "fingerprint": { "enabled": false },
+                "duplicate": { "enabled": true }
+            }
+        }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    let pipeline = default_macos_pipeline_from_config(None, &hard_disabled).unwrap();
+    let ids: BTreeSet<&str> = pipeline
+        .pre_processors
+        .iter()
+        .map(|plugin| plugin.name())
+        .collect();
+    assert!(!ids.contains("Fingerprinter"));
+    assert!(!ids.contains("DuplicateDetector"));
+    assert!(matches!(
+        hard_disabled.diagnostics(),
+        [crate::config::ConfigValidationDiagnostic::DependentDisabled {
+            plugin_id,
+            dependency,
+            ..
+        }] if plugin_id == "DuplicateDetector" && dependency == "Fingerprinter"
+    ));
+
+    let order_missing = serde_json::from_str::<crate::config::CrashReporterConfig>(
+        r#"{
+            "pre_processors": {
+                "symbolizer": { "enabled": false },
+                "fingerprint": { "enabled": true }
+            }
+        }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    let pipeline = default_macos_pipeline_from_config(None, &order_missing).unwrap();
+    let ids: BTreeSet<&str> = pipeline
+        .pre_processors
+        .iter()
+        .map(|plugin| plugin.name())
+        .collect();
+    assert!(!ids.contains("SymbolResolver"));
+    assert!(ids.contains("Fingerprinter"));
+    pipeline.validate_dependencies().unwrap();
+}
+
+#[test]
+fn test_runtime_registry_rejects_cross_category_order_only_dependency() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![Box::new(DependencyFilter(dependency_behavior(
+            "CrossDependent",
+            &[],
+            &["CrossProvider"],
+            false,
+        )))],
+        vec![Box::new(DependencyCollector(dependency_behavior(
+            "CrossProvider",
+            &[],
+            &[],
+            false,
+        )))],
+        vec![],
+        vec![],
+        vec![],
+        tempdir.path(),
+    );
+
+    assert!(matches!(
+        pipeline.validate_dependencies(),
+        Err(crate::config::ConfigValidationError::MissingDependency {
+            category: PluginCategory::Filter,
+            kind: DependencyKind::OrderOnly,
+            ref plugin_id,
+            ref dependency,
+        }) if plugin_id == "CrossDependent" && dependency == "CrossProvider"
+    ));
+}
+
+#[test]
+fn test_runtime_registry_rejects_duplicate_ids_across_categories() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![Box::new(DependencyFilter(dependency_behavior(
+            "GlobalDuplicate",
+            &[],
+            &[],
+            false,
+        )))],
+        vec![Box::new(DependencyCollector(dependency_behavior(
+            "GlobalDuplicate",
+            &[],
+            &[],
+            false,
+        )))],
+        vec![],
+        vec![],
+        vec![],
+        tempdir.path(),
+    );
+
+    assert!(matches!(
+        pipeline.validate_dependencies(),
+        Err(crate::config::ConfigValidationError::DuplicatePluginId {
+            ref plugin_id,
+            first_category: PluginCategory::Filter,
+            second_category: PluginCategory::Collector,
+        }) if plugin_id == "GlobalDuplicate"
+    ));
 }

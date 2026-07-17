@@ -64,6 +64,10 @@ impl Plugin for RetentionManager {
     fn priority(&self) -> Priority {
         Priority::Low
     }
+    fn order_after(&self) -> &'static [&'static str] {
+        // ZIPArchiver remains a direct constraint when MoveToSent is disabled.
+        &["ZIPArchiver", "MoveToSent"]
+    }
 }
 
 struct ReportEntry {

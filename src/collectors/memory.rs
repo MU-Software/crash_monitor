@@ -58,9 +58,6 @@ impl Plugin for MemoryCollector {
     fn priority(&self) -> Priority {
         Priority::High
     }
-    fn depends_on(&self) -> &'static [&'static str] {
-        &["ThreadCollector"]
-    }
 }
 
 impl Collector for MemoryCollector {

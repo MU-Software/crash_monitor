@@ -8,6 +8,52 @@ use std::time::{Duration, Instant};
 use super::report::SessionReport;
 use crate::collectors::RawData;
 
+// ═══════════════════════════════════════════════
+//  Plugin dependency metadata
+// ═══════════════════════════════════════════════
+
+/// Pipeline stage in which a plugin is registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PluginCategory {
+    Filter,
+    Collector,
+    PreProcessor,
+    PostProcessor,
+    Notifier,
+}
+
+impl std::fmt::Display for PluginCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Filter => "filter",
+            Self::Collector => "collector",
+            Self::PreProcessor => "preprocessor",
+            Self::PostProcessor => "postprocessor",
+            Self::Notifier => "notifier",
+        })
+    }
+}
+
+/// Whether a dependency supplies required data or only constrains ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKind {
+    /// The dependent cannot run correctly unless this plugin is enabled and
+    /// completes successfully.
+    Hard,
+    /// If both plugins are enabled this plugin must run first, but its absence
+    /// does not disable or skip the dependent.
+    OrderOnly,
+}
+
+impl std::fmt::Display for DependencyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Hard => "hard",
+            Self::OrderOnly => "order-only",
+        })
+    }
+}
+
 // ═══════════════════════════════════════════════════
 //  ReportType
 // ═══════════════════════════════════════════════════

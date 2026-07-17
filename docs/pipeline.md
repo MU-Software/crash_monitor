@@ -111,11 +111,11 @@ and timeout) is cached, constant-time state; metadata access performs no I/O.
   earlier collectors is retained. Only the outer capture deadline quarantines
   the worker's mutable payload as a unit and falls back to event metadata.
 - A plugin deadline is recorded as `TimedOut`, separately from an ordinary
-  returned error or a caught panic. Collector and pre-processor hard
-  dependencies do not treat a timed-out prerequisite as successful.
-  Post-processor dependencies are currently ordering-only, so later artifact
-  cleanup can still run after a timeout; P0-05 makes that distinction explicit
-  in configuration validation.
+  returned error or a caught panic. In every stage, a hard dependency must
+  complete successfully; an unavailable, failed, panicked, or timed-out
+  prerequisite causes the dependent plugin to be skipped. An order-only
+  dependency constrains registration order when both plugins are present, but
+  its absence or runtime failure does not skip the later plugin.
 - A queue-full snapshot/ANR is logged and dropped. It does not block capture,
   resume, reply, or child-state observation.
 - Fatal finalization waits for the supervisor's termination handoff before
@@ -199,8 +199,9 @@ outcome**, worse than a degraded report. The design rules:
    are owned, killable subprocesses.
 9. **Input size caps** — bounded report / dSYM / decoded-stack sizes guard
    against pathological input.
-10. **No cross-category plugin dependencies** — a plugin's `depends_on` may name
-   only same-category plugins, keeping ordering acyclic and local.
+10. **Unique, category-local plugin dependencies** — plugin IDs are globally
+    unique, and both `hard_dependencies` and `order_after` may name only
+    same-category plugins, keeping diagnostics unambiguous and ordering local.
 
 ## Configuration
 
@@ -225,5 +226,19 @@ status enriches that incident and does not fire a second exit/signal/OOM report,
 including when the crash trigger itself is disabled.
 
 The configuration is loaded and normalized once per monitor run so startup and
-the pipeline share one immutable policy snapshot. A missing or malformed file
-currently falls back to the built-in defaults silently.
+the pipeline share one immutable policy snapshot. Hard-dependency closure is
+computed during this step. An explicitly disabled hard prerequisite is never
+silently re-enabled; instead, every dependent is transitively disabled and the
+decision is emitted as a startup diagnostic. Order-only dependencies neither
+auto-enable nor disable plugins. Every declared dependency ID must exist in the
+complete static registry; an order-only provider may be absent from the enabled
+runtime subset, and its runtime failure does not skip the plugin ordered after
+it.
+
+Plugin IDs must be globally unique, while dependency edges stay within their
+category. Both the configuration registry and the assembled runtime pipeline
+are validated before the child process is spawned. Duplicate IDs, missing hard
+dependencies, dependency cycles, and invalid registration order return a
+structured `Result<_, ConfigValidationError>` to startup rather than panicking.
+A missing or malformed configuration file currently falls back to the built-in
+defaults silently.

@@ -70,6 +70,9 @@ impl Plugin for RateLimiter {
     fn priority(&self) -> Priority {
         Priority::Critical
     }
+    fn order_after(&self) -> &'static [&'static str] {
+        &["DiskSpaceFilter"]
+    }
 }
 
 impl Filter for RateLimiter {

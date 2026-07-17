@@ -165,6 +165,8 @@ fn test_plugin_metadata() {
     let mover = MoveToSent::new();
     assert_eq!(mover.name(), "MoveToSent");
     assert!(mover.is_available());
+    assert!(mover.hard_dependencies().is_empty());
+    assert_eq!(mover.order_after(), &["ZIPArchiver"]);
 }
 
 #[test]

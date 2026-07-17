@@ -1,4 +1,4 @@
-use crate::pipeline::{CrashEvent, PluginContext, PostProcessor, ReportResult, ReportType};
+use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
 use crate::postprocessors::RetentionManager;
 use std::fs;
 
@@ -25,6 +25,13 @@ fn dummy_result() -> ReportResult {
         json_path: None,
         session: None,
     }
+}
+
+#[test]
+fn test_plugin_dependency_metadata() {
+    let manager = RetentionManager::new(64, 256, 15);
+    assert!(manager.hard_dependencies().is_empty());
+    assert_eq!(manager.order_after(), &["ZIPArchiver", "MoveToSent"]);
 }
 
 #[test]

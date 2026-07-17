@@ -86,5 +86,6 @@ fn test_plugin_metadata() {
     let enricher = BuildInfoEnricher;
     assert_eq!(enricher.name(), "BuildInfoEnricher");
     assert!(enricher.is_available());
-    assert!(enricher.depends_on().is_empty());
+    assert!(enricher.hard_dependencies().is_empty());
+    assert!(enricher.order_after().is_empty());
 }

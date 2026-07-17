@@ -140,7 +140,10 @@ fn test_originals_deleted_after_zip() {
 
 #[test]
 fn test_depends_on_feedback() {
-    assert_eq!(ZIPArchiver.depends_on(), &["FeedbackDialog"]);
+    assert_eq!(
+        ZIPArchiver.order_after(),
+        &["RawCleanup", "PNGConverter", "FeedbackDialog"]
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use crate::pipeline::{CrashEvent, PluginContext, PostProcessor, ReportResult, ReportType};
+use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
 use crate::postprocessors::LogRotator;
 use std::fmt::Write as _;
 
@@ -23,6 +23,13 @@ fn dummy_result() -> ReportResult {
         json_path: None,
         session: None,
     }
+}
+
+#[test]
+fn test_plugin_dependency_metadata() {
+    let rotator = LogRotator::new(1);
+    assert!(rotator.hard_dependencies().is_empty());
+    assert_eq!(rotator.order_after(), &["SessionRecorder"]);
 }
 
 #[test]

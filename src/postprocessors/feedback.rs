@@ -59,6 +59,10 @@ impl Plugin for FeedbackPostProcessor {
         Priority::Low
     }
 
+    fn order_after(&self) -> &'static [&'static str] {
+        &["PNGConverter"]
+    }
+
     fn is_available(&self) -> bool {
         self.available
     }

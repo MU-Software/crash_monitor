@@ -39,7 +39,7 @@ impl Plugin for DuplicateDetector {
         Priority::High
     }
 
-    fn depends_on(&self) -> &'static [&'static str] {
+    fn hard_dependencies(&self) -> &'static [&'static str] {
         &["Fingerprinter"]
     }
 }

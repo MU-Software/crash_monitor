@@ -29,8 +29,20 @@ pub trait Plugin: Send + Sync {
     fn execution(&self) -> PluginExecution;
     #[allow(dead_code)] // Phase 4+: used for plugin ordering
     fn priority(&self) -> Priority;
-    /// Dependencies within the SAME category. Cross-category dependencies are forbidden.
-    fn depends_on(&self) -> &'static [&'static str] {
+    /// Required data dependencies within the same category.
+    ///
+    /// A failed hard dependency skips this plugin at runtime. Configuration
+    /// validation disables a dependent whose hard dependency was explicitly
+    /// disabled rather than silently re-enabling the dependency.
+    fn hard_dependencies(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Ordering constraints within the same category.
+    ///
+    /// Missing order-only dependencies are valid. When both plugins are
+    /// registered, the dependency must appear first; its runtime failure does
+    /// not skip this plugin.
+    fn order_after(&self) -> &'static [&'static str] {
         &[]
     }
     /// Runtime platform availability check.

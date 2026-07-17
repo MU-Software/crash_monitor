@@ -47,7 +47,7 @@ impl Plugin for Fingerprinter {
         Priority::Low
     }
 
-    fn depends_on(&self) -> &'static [&'static str] {
+    fn order_after(&self) -> &'static [&'static str] {
         &["SymbolResolver"]
     }
 

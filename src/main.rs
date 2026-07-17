@@ -256,7 +256,16 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
 
     // Load and normalize enablement once. Every startup branch and the
     // pipeline factory must observe this same immutable policy snapshot.
-    let validated_config = config::load_validated_config();
+    let validated_config = match config::load_validated_config() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("[monitor] Invalid plugin configuration: {error}");
+            return event_loop::EXIT_MONITOR_INTERNAL;
+        }
+    };
+    for diagnostic in validated_config.diagnostics() {
+        eprintln!("[monitor] Configuration: {diagnostic}");
+    }
 
     eprintln!("[monitor] Starting: {app_path}");
 
@@ -290,6 +299,19 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         }
     } else {
         None
+    };
+
+    // Build and validate the complete runtime registry before posix_spawn. A
+    // later factory failure could otherwise leave an unmonitored child alive.
+    let pl = match pipeline::default_macos_pipeline_from_config(
+        shared_memory.clone(),
+        &validated_config,
+    ) {
+        Ok(pipeline) => Arc::new(pipeline),
+        Err(error) => {
+            eprintln!("[monitor] Invalid plugin pipeline: {error}");
+            return event_loop::EXIT_MONITOR_INTERNAL;
+        }
     };
 
     // Build argv and envp for posix_spawn
@@ -347,10 +369,6 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let child_task = match acquire_task_port_or_termination(child_pid, child_started_at) {
         Ok(TaskAcquisition::Acquired(task)) => platform::OwnedMachPort::new(task),
         Ok(TaskAcquisition::ChildTerminated(reason)) => {
-            let pl = Arc::new(pipeline::default_macos_pipeline_from_config(
-                shared_memory.clone(),
-                &validated_config,
-            ));
             #[allow(clippy::cast_sign_loss)]
             let child_pid_u32 = child_pid_raw as u32;
             return event_loop::handle_child_termination(&pl, child_pid_u32, process_name, reason)
@@ -368,10 +386,6 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             match wait_for_child_termination(child_pid, child_started_at) {
                 Ok(reason) => {
                     eprintln!("[monitor] Child eventually terminated: {reason:?}");
-                    let pl = Arc::new(pipeline::default_macos_pipeline_from_config(
-                        shared_memory.clone(),
-                        &validated_config,
-                    ));
                     #[allow(clippy::cast_sign_loss)]
                     let child_pid_u32 = child_pid_raw as u32;
                     let _ = event_loop::handle_child_termination(
@@ -391,12 +405,6 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let exc_rx = platform::start_listener(exc_port);
 
     eprintln!("[monitor] Monitoring active. Press F8 in app for manual snapshot.");
-
-    // Create the plugin pipeline
-    let pl = Arc::new(pipeline::default_macos_pipeline_from_config(
-        shared_memory.clone(),
-        &validated_config,
-    ));
 
     // ANR watchdog config (used inline by event_loop, no dedicated thread).
     // Environment overrides allow E2E tests to use shorter timeouts.

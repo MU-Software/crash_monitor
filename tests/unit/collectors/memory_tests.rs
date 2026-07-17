@@ -16,6 +16,13 @@ fn make_region(address: u64, size: u64, user_tag: u32, pages_resident: u32) -> V
 }
 
 #[test]
+fn test_plugin_dependency_metadata() {
+    let collector = MemoryCollector::new(std::sync::Arc::new(MockPlatform::default()));
+    assert!(collector.hard_dependencies().is_empty());
+    assert!(collector.order_after().is_empty());
+}
+
+#[test]
 fn test_collect_memory_map() {
     let mut plat = MockPlatform::default();
     plat.regions = vec![

@@ -24,8 +24,9 @@ pub use traits::{
     Collector, Filter, Notifier, Plugin, PluginExecution, PostProcessor, PreProcessor,
 };
 pub use types::{
-    CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, Diagnostics,
-    PluginStatus, Priority, RawShmSnapshot, ReportResult, ReportType, TerminationReason,
+    CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, DependencyKind,
+    Diagnostics, PluginCategory, PluginStatus, Priority, RawShmSnapshot, ReportResult, ReportType,
+    TerminationReason,
 };
 
 /// Immutable per-trigger report policy installed in a [`Pipeline`].
@@ -274,7 +275,7 @@ impl Pipeline {
                     .record_immediate(c.name(), PluginStatus::Skipped("not available".into()));
                 continue;
             }
-            if !deps_satisfied(c.depends_on(), &diagnostics) {
+            if !deps_satisfied(c.hard_dependencies(), &diagnostics) {
                 diagnostics
                     .record_immediate(c.name(), PluginStatus::Skipped("dependency not met".into()));
                 continue;
@@ -347,6 +348,18 @@ impl Pipeline {
         // Filters run after resume so filesystem and lock contention cannot
         // extend the Mach critical section.
         for filter in &self.filters {
+            if !filter.is_available() {
+                diagnostics
+                    .record_immediate(filter.name(), PluginStatus::Skipped("not available".into()));
+                continue;
+            }
+            if !deps_satisfied(filter.hard_dependencies(), diagnostics) {
+                diagnostics.record_immediate(
+                    filter.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
             let start = Instant::now();
             let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
             let outcome = run_stage(filter.name(), filter.execution(), timeout, |context| {
@@ -367,7 +380,7 @@ impl Pipeline {
                     .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
                 continue;
             }
-            if !deps_satisfied(pp.depends_on(), diagnostics) {
+            if !deps_satisfied(pp.hard_dependencies(), diagnostics) {
                 diagnostics.record_immediate(
                     pp.name(),
                     PluginStatus::Skipped("dependency not met".into()),
@@ -435,6 +448,13 @@ impl Pipeline {
                     .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
                 continue;
             }
+            if !deps_satisfied(pp.hard_dependencies(), diagnostics) {
+                diagnostics.record_immediate(
+                    pp.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
             let start = Instant::now();
             let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
             let outcome = run_stage(pp.name(), pp.execution(), timeout, |context| {
@@ -450,6 +470,13 @@ impl Pipeline {
                 if !n.is_available() {
                     diagnostics
                         .record_immediate(n.name(), PluginStatus::Skipped("not available".into()));
+                    continue;
+                }
+                if !deps_satisfied(n.hard_dependencies(), diagnostics) {
+                    diagnostics.record_immediate(
+                        n.name(),
+                        PluginStatus::Skipped("hard dependency not met".into()),
+                    );
                     continue;
                 }
                 let start = Instant::now();
@@ -506,6 +533,18 @@ impl Pipeline {
         };
 
         for filter in &self.filters {
+            if !filter.is_available() {
+                diagnostics
+                    .record_immediate(filter.name(), PluginStatus::Skipped("not available".into()));
+                continue;
+            }
+            if !deps_satisfied(filter.hard_dependencies(), &diagnostics) {
+                diagnostics.record_immediate(
+                    filter.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
             let start = Instant::now();
             let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
             let outcome = run_stage(filter.name(), filter.execution(), timeout, |context| {
@@ -557,6 +596,13 @@ impl Pipeline {
                 );
                 continue;
             }
+            if !deps_satisfied(post_processor.hard_dependencies(), &diagnostics) {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
             let start = Instant::now();
             let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
             let outcome = run_stage(
@@ -578,6 +624,13 @@ impl Pipeline {
                     );
                     continue;
                 }
+                if !deps_satisfied(notifier.hard_dependencies(), &diagnostics) {
+                    diagnostics.record_immediate(
+                        notifier.name(),
+                        PluginStatus::Skipped("hard dependency not met".into()),
+                    );
+                    continue;
+                }
                 let start = Instant::now();
                 let timeout = plugin_timeout(notifier.timeout_secs(), NOTIFIER_TIMEOUT);
                 let outcome =
@@ -594,11 +647,32 @@ impl Pipeline {
         diagnostics
     }
 
-    /// Validate that plugin registration order respects `depends_on`.
-    pub fn validate_dependencies(&self) {
-        validate_plugin_order("Collector", &self.collectors);
-        validate_plugin_order("PreProcessor", &self.pre_processors);
-        validate_plugin_order_soft("PostProcessor", &self.post_processors);
+    /// Validate global plugin identity and every stage's dependency graph.
+    ///
+    /// # Errors
+    /// Returns a structured error for duplicate IDs, missing hard
+    /// dependencies, cycles, or invalid registration order.
+    pub fn validate_dependencies(&self) -> Result<(), crate::config::ConfigValidationError> {
+        let categories = vec![
+            (PluginCategory::Filter, plugin_graph_nodes(&self.filters)),
+            (
+                PluginCategory::Collector,
+                plugin_graph_nodes(&self.collectors),
+            ),
+            (
+                PluginCategory::PreProcessor,
+                plugin_graph_nodes(&self.pre_processors),
+            ),
+            (
+                PluginCategory::PostProcessor,
+                plugin_graph_nodes(&self.post_processors),
+            ),
+            (
+                PluginCategory::Notifier,
+                plugin_graph_nodes(&self.notifiers),
+            ),
+        ];
+        crate::config::validate_runtime_plugin_registry(&categories)
     }
 }
 
@@ -615,40 +689,39 @@ fn deps_satisfied(deps: &[&str], diagnostics: &Diagnostics) -> bool {
     deps.iter().all(|dep| diagnostics.succeeded(dep))
 }
 
-/// Validate that plugins within a category are registered in dependency order.
+/// Validate one enabled runtime category without panicking. Missing order-only
+/// dependencies are permitted; hard dependencies must exist and precede the
+/// dependent.
 ///
-/// # Panics
-/// Panics if a plugin depends on another that is not registered or is registered after it.
-pub fn validate_plugin_order<T: Plugin + ?Sized>(category: &str, plugins: &[Box<T>]) {
-    validate_order_impl(category, plugins, true);
+/// # Errors
+/// Returns a structured configuration error for duplicate plugin IDs, missing
+/// hard dependencies, cycles, or invalid registration order.
+pub fn validate_plugin_order<T: Plugin + ?Sized>(
+    category: PluginCategory,
+    plugins: &[Box<T>],
+) -> Result<(), crate::config::ConfigValidationError> {
+    crate::config::validate_runtime_plugin_graph(category, &plugin_graph_nodes(plugins))
 }
 
-/// Like `validate_plugin_order`, but missing dependencies are warnings, not panics.
-/// Used for `PostProcessor`s where plugins may be conditionally registered
-/// (e.g., `FeedbackPostProcessor` requires the dialog binary to exist).
-pub fn validate_plugin_order_soft<T: Plugin + ?Sized>(category: &str, plugins: &[Box<T>]) {
-    validate_order_impl(category, plugins, false);
-}
-
-fn validate_order_impl<T: Plugin + ?Sized>(category: &str, plugins: &[Box<T>], strict: bool) {
-    let names: Vec<&str> = plugins.iter().map(|p| p.name()).collect();
-    for (i, p) in plugins.iter().enumerate() {
-        for dep in p.depends_on() {
-            match names.iter().position(|&n| n == *dep) {
-                None if strict => panic!(
-                    "{category} '{}' depends on '{dep}' which is not registered",
-                    p.name()
-                ),
-                Some(j) if j >= i => panic!(
-                    "{category} '{}' depends on '{dep}' which is registered after it",
-                    p.name()
-                ),
-                // None (soft mode): dep not registered, acceptable for optional plugins.
-                // Some(j < i): dep registered before us, valid order.
-                _ => {}
-            }
-        }
-    }
+fn plugin_graph_nodes<T: Plugin + ?Sized>(
+    plugins: &[Box<T>],
+) -> Vec<crate::config::PluginGraphNode> {
+    plugins
+        .iter()
+        .map(|plugin| crate::config::PluginGraphNode {
+            id: plugin.name().to_string(),
+            hard_dependencies: plugin
+                .hard_dependencies()
+                .iter()
+                .map(|dependency| (*dependency).to_string())
+                .collect(),
+            order_dependencies: plugin
+                .order_after()
+                .iter()
+                .map(|dependency| (*dependency).to_string())
+                .collect(),
+        })
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════
@@ -656,10 +729,16 @@ fn validate_order_impl<T: Plugin + ?Sized>(category: &str, plugins: &[Box<T>], s
 // ═══════════════════════════════════════════════════
 
 #[cfg(target_os = "macos")]
-#[must_use]
 #[allow(clippy::too_many_lines)] // pipeline factory — splitting would scatter registration logic
-pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemory>>) -> Pipeline {
-    let config = crate::config::load_validated_config();
+/// Load configuration and build the validated default macOS pipeline.
+///
+/// # Errors
+/// Returns a structured configuration error when plugin enablement or the
+/// assembled runtime dependency graph is invalid.
+pub fn default_macos_pipeline(
+    shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
+) -> Result<Pipeline, crate::config::ConfigValidationError> {
+    let config = crate::config::load_validated_config()?;
     default_macos_pipeline_from_config(shm, &config)
 }
 
@@ -667,13 +746,16 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
 ///
 /// Keeping loading outside this constructor lets startup, event dispatch, and
 /// plugin registration share exactly the same immutable enablement snapshot.
+///
+/// # Errors
+/// Returns a structured configuration error when the assembled runtime plugin
+/// IDs or dependency graph are invalid.
 #[cfg(target_os = "macos")]
-#[must_use]
 #[allow(clippy::too_many_lines)] // pipeline factory — splitting would scatter registration logic
 pub fn default_macos_pipeline_from_config(
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
     validated: &crate::config::ValidatedConfig,
-) -> Pipeline {
+) -> Result<Pipeline, crate::config::ConfigValidationError> {
     use crate::collectors::{
         DylibCollector, EnvironmentCollector, MemoryCollector, ThreadCollector,
     };
@@ -696,7 +778,7 @@ pub fn default_macos_pipeline_from_config(
     // ── Early out: global kill switch ──
     if !validated.enabled {
         let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform);
-        return Pipeline {
+        return Ok(Pipeline {
             enabled: false,
             triggers,
             filters: vec![],
@@ -707,23 +789,22 @@ pub fn default_macos_pipeline_from_config(
             post_processors: vec![],
             notifiers: vec![],
             output_dir: None,
-        };
+        });
     }
 
     let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform);
 
-    // After the early-out above, validated.enabled is guaranteed true.
-    // Use 2-arg check: category_enabled && plugin_enabled.
-    let on = |cat: bool, plugin: bool| cat && plugin;
+    // Dependency closure and category switches were resolved at config load.
+    let on = |plugin_id: &str| validated.plugin_enabled(plugin_id);
 
     // ── Filters ──
     let mut filters: Vec<Box<dyn Filter>> = vec![];
-    if on(cfg.filters.enabled, cfg.filters.disk_space.enabled) {
+    if on("DiskSpaceFilter") {
         filters.push(Box::new(DiskSpaceFilter::new(
             cfg.filters.disk_space.min_free_mb,
         )));
     }
-    if on(cfg.filters.enabled, cfg.filters.rate_limiter.enabled) {
+    if on("RateLimiter") {
         filters.push(Box::new(RateLimiter::new(
             cfg.filters.rate_limiter.max_events,
             Duration::from_secs(cfg.filters.rate_limiter.window_secs),
@@ -734,121 +815,91 @@ pub fn default_macos_pipeline_from_config(
     let mut collectors: Vec<Box<dyn Collector>> = vec![];
     let mut attachment_copy_enabled = false;
 
-    if on(cfg.collectors.enabled, cfg.collectors.thread.enabled) {
+    if on("ThreadCollector") {
         collectors.push(Box::new(ThreadCollector::new(platform.clone())));
     }
 
     if let Some(ref shm) = shm {
         use crate::collectors::{BreadcrumbCollector, ContextCollector};
-        if on(cfg.collectors.enabled, cfg.collectors.breadcrumb.enabled) {
+        if on("BreadcrumbCollector") {
             collectors.push(Box::new(BreadcrumbCollector::new(shm.clone())));
         }
-        if on(cfg.collectors.enabled, cfg.collectors.context.enabled) {
+        if on("ContextCollector") {
             collectors.push(Box::new(ContextCollector::new(shm.clone())));
         }
     }
 
-    if on(cfg.collectors.enabled, cfg.collectors.memory.enabled) {
+    if on("MemoryCollector") {
         collectors.push(Box::new(MemoryCollector::new(platform.clone())));
     }
-    if on(cfg.collectors.enabled, cfg.collectors.dylib.enabled) {
+    if on("DylibCollector") {
         collectors.push(Box::new(DylibCollector::new(platform.clone())));
     }
 
     if let Some(ref shm) = shm {
         use crate::collectors::{AttachmentCollector, ScreenshotCollector};
-        if on(cfg.collectors.enabled, cfg.collectors.screenshot.enabled) {
+        if on("ScreenshotCollector") {
             collectors.push(Box::new(ScreenshotCollector::new(shm.clone())));
         }
-        if on(cfg.collectors.enabled, cfg.collectors.attachment.enabled) {
+        if on("AttachmentCollector") {
             collectors.push(Box::new(AttachmentCollector::new(shm.clone())));
             attachment_copy_enabled = true;
         }
     }
 
-    if on(cfg.collectors.enabled, cfg.collectors.environment.enabled) {
+    if on("EnvironmentCollector") {
         collectors.push(Box::new(EnvironmentCollector::new()));
     }
 
     // ── Pre-processors (order matters: dependencies must come first) ──
     let mut pre_processors: Vec<Box<dyn PreProcessor>> = vec![];
 
-    if attachment_copy_enabled {
+    if attachment_copy_enabled && cfg.pre_processors.enabled {
         pre_processors.push(Box::new(crate::collectors::AttachmentCopier::new()));
     }
 
-    if on(
-        cfg.pre_processors.enabled,
-        cfg.pre_processors.session.enabled,
-    ) {
+    if on("SessionEnricher") {
         pre_processors.push(Box::new(SessionEnricher));
     }
-    if on(
-        cfg.pre_processors.enabled,
-        cfg.pre_processors.symbolizer.enabled,
-    ) {
+    if on("SymbolResolver") {
         pre_processors.push(Box::new(SymbolResolver::new()));
     }
-    if on(
-        cfg.pre_processors.enabled,
-        cfg.pre_processors.fingerprint.enabled,
-    ) {
+    if on("Fingerprinter") {
         pre_processors.push(Box::new(Fingerprinter::new(
             cfg.pre_processors.fingerprint.top_frames,
         )));
     }
-    if on(
-        cfg.pre_processors.enabled,
-        cfg.pre_processors.build_info.enabled,
-    ) {
+    if on("BuildInfoEnricher") {
         pre_processors.push(Box::new(BuildInfoEnricher));
     }
-    if on(
-        cfg.pre_processors.enabled,
-        cfg.pre_processors.duplicate.enabled,
-    ) {
+    if on("DuplicateDetector") {
         pre_processors.push(Box::new(DuplicateDetector::new(Duration::from_secs(
             cfg.pre_processors.duplicate.window_secs,
         ))));
     }
-    if on(
-        cfg.pre_processors.enabled,
-        cfg.pre_processors.sanitizer.enabled,
-    ) {
+    if on("Sanitizer") {
         pre_processors.push(Box::new(Sanitizer::new()));
     }
 
     // ── Post-processors (order matters: RawCleanup → Session → Feedback → ZIP → LogRotator → Retention) ──
     let mut post_processors: Vec<Box<dyn PostProcessor>> = vec![];
 
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.raw_cleanup.enabled,
-    ) {
+    if on("RawCleanup") {
         post_processors.push(Box::new(RawCleanup));
     }
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.session_recorder.enabled,
-    ) {
+    if on("SessionRecorder") {
         post_processors.push(Box::new(SessionRecorder));
     }
     // PNG conversion must run BEFORE FeedbackPostProcessor (which can block for
     // 5 minutes waiting on a user dialog) and BEFORE ZIPArchiver (so the zip
     // contains converted PNGs, not raw RGBA dumps).
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.png_converter.enabled,
-    ) {
+    if on("PNGConverter") {
         post_processors.push(Box::new(PNGConverter));
     }
 
     // Feedback dialog: CRASH_MONITOR_DIALOG_BIN overrides the default path — used by
     // E2E tests to substitute the mock dialog (no UI, fixed stdout output).
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.feedback_dialog.enabled,
-    ) {
+    if on("FeedbackDialog") {
         let dialog_bin = std::env::var_os("CRASH_MONITOR_DIALOG_BIN")
             .map(std::path::PathBuf::from)
             .or_else(|| {
@@ -863,31 +914,19 @@ pub fn default_macos_pipeline_from_config(
         }
     }
 
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.zip_archiver.enabled,
-    ) {
+    if on("ZIPArchiver") {
         post_processors.push(Box::new(ZIPArchiver));
     }
     // Relocate finished reports pending/ → sent/ before retention scans sent/.
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.move_to_sent.enabled,
-    ) {
+    if on("MoveToSent") {
         post_processors.push(Box::new(MoveToSent::new()));
     }
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.log_rotator.enabled,
-    ) {
+    if on("LogRotator") {
         post_processors.push(Box::new(LogRotator::new(
             cfg.post_processors.log_rotator.max_size_mb,
         )));
     }
-    if on(
-        cfg.post_processors.enabled,
-        cfg.post_processors.retention.enabled,
-    ) {
+    if on("RetentionManager") {
         post_processors.push(Box::new(RetentionManager::new(
             cfg.post_processors.retention.max_reports,
             cfg.post_processors.retention.max_size_mb,
@@ -898,13 +937,10 @@ pub fn default_macos_pipeline_from_config(
     // ── Notifiers ──
     let mut notifiers: Vec<Box<dyn Notifier>> = vec![];
 
-    if on(cfg.notifiers.enabled, cfg.notifiers.console.enabled) {
+    if on("ConsoleNotifier") {
         notifiers.push(Box::new(ConsoleNotifier));
     }
-    if on(
-        cfg.notifiers.enabled,
-        cfg.notifiers.system_notification.enabled,
-    ) {
+    if on("SystemNotification") {
         notifiers.push(Box::new(SystemNotification::new(true)));
     }
 
@@ -920,8 +956,8 @@ pub fn default_macos_pipeline_from_config(
         notifiers,
         output_dir: None,
     };
-    pipeline.validate_dependencies();
-    pipeline
+    pipeline.validate_dependencies()?;
+    Ok(pipeline)
 }
 
 #[cfg(test)]

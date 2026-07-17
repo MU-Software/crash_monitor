@@ -125,7 +125,8 @@ fn test_no_fingerprint_passes() {
 #[test]
 fn test_depends_on_fingerprinter() {
     let detector = DuplicateDetector::new(Duration::from_secs(60));
-    assert_eq!(detector.depends_on(), &["Fingerprinter"]);
+    assert_eq!(detector.hard_dependencies(), &["Fingerprinter"]);
+    assert!(detector.order_after().is_empty());
 }
 
 #[test]

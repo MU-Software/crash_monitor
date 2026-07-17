@@ -63,6 +63,9 @@ impl Plugin for LogRotator {
     fn priority(&self) -> Priority {
         Priority::Low
     }
+    fn order_after(&self) -> &'static [&'static str] {
+        &["SessionRecorder"]
+    }
 }
 
 impl PostProcessor for LogRotator {

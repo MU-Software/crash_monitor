@@ -89,7 +89,8 @@ fn test_no_username_is_noop() {
 #[test]
 fn test_depends_on_fingerprinter() {
     let sanitizer = Sanitizer::new();
-    assert_eq!(sanitizer.depends_on(), &["Fingerprinter"]);
+    assert!(sanitizer.hard_dependencies().is_empty());
+    assert_eq!(sanitizer.order_after(), &["Fingerprinter"]);
 }
 
 #[test]

@@ -166,10 +166,11 @@ impl Plugin for ZIPArchiver {
     fn priority(&self) -> Priority {
         Priority::Low
     }
-    fn depends_on(&self) -> &'static [&'static str] {
-        // Must run after FeedbackPostProcessor patches user_feedback into the JSON.
-        // Soft-validated: FeedbackPostProcessor may not be registered (no dialog binary).
-        &["FeedbackDialog"]
+    fn order_after(&self) -> &'static [&'static str] {
+        // RawCleanup decides whether the fail-safe raw file is retained;
+        // PNGConverter and FeedbackDialog mutate report artifacts before they
+        // are archived. All are optional ordering constraints.
+        &["RawCleanup", "PNGConverter", "FeedbackDialog"]
     }
 }
 

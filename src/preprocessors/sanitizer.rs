@@ -40,7 +40,7 @@ impl Plugin for Sanitizer {
     fn priority(&self) -> Priority {
         Priority::Low
     }
-    fn depends_on(&self) -> &'static [&'static str] {
+    fn order_after(&self) -> &'static [&'static str] {
         &["Fingerprinter"]
     }
 }

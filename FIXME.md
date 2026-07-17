@@ -55,11 +55,11 @@
 
 ### P0-05. 모든 plugin 설정 조합을 panic 없이 검증한다
 
-- [ ] config load 시 plugin dependency closure를 계산한다.
-- [ ] dependency를 자동 활성화할지 dependent를 자동 비활성화할지 정책을 정하고 진단한다.
-- [ ] collector/preprocessor/filter/postprocessor/notifier의 hard dependency와 order-only dependency를 구분한다.
-- [ ] startup `panic!` 대신 구조화된 `ConfigValidationError`를 반환한다.
-- [ ] toggle 조합, duplicate plugin ID, cycle, missing dependency를 property test로 검증한다.
+- [x] config load 시 plugin dependency closure를 계산한다.
+- [x] dependency를 자동 활성화할지 dependent를 자동 비활성화할지 정책을 정하고 진단한다.
+- [x] collector/preprocessor/filter/postprocessor/notifier의 hard dependency와 order-only dependency를 구분한다.
+- [x] startup `panic!` 대신 구조화된 `ConfigValidationError`를 반환한다.
+- [x] toggle 조합, duplicate plugin ID, cycle, missing dependency를 property test로 검증한다.
 
 범위: `src/config.rs`, `src/pipeline/mod.rs`, `src/pipeline/types.rs`.
 

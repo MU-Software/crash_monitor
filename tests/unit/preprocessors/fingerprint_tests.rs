@@ -249,7 +249,8 @@ fn test_plugin_metadata() {
     let fp = Fingerprinter::new(8);
     assert_eq!(fp.name(), "Fingerprinter");
     assert_eq!(fp.priority(), Priority::Low);
-    assert_eq!(fp.depends_on(), &["SymbolResolver"]);
+    assert!(fp.hard_dependencies().is_empty());
+    assert_eq!(fp.order_after(), &["SymbolResolver"]);
     assert!(fp.is_available());
 }
 

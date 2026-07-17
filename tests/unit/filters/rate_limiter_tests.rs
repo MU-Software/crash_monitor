@@ -158,4 +158,6 @@ fn test_plugin_metadata() {
     let limiter = RateLimiter::new(3, Duration::from_secs(60));
     assert_eq!(limiter.name(), "RateLimiter");
     assert!(limiter.is_available());
+    assert!(limiter.hard_dependencies().is_empty());
+    assert_eq!(limiter.order_after(), &["DiskSpaceFilter"]);
 }
