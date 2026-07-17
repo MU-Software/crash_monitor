@@ -123,6 +123,8 @@ pub struct CrashEvent {
     pub exception_type: Option<u32>,
     pub exception_code: Option<u64>,
     pub exception_subcode: Option<u64>,
+    /// Exact raw Mach exception code array. Empty for non-Mach triggers.
+    pub exception_codes: Vec<u64>,
     pub crashed_thread: Option<mach_port_t>,
     pub bail_on_suspend_failure: bool,
     pub pid: u32,

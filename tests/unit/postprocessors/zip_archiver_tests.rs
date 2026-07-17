@@ -12,6 +12,7 @@ fn dummy_event() -> CrashEvent {
         exception_type: Some(1),
         exception_code: Some(0),
         exception_subcode: Some(0),
+        exception_codes: Vec::new(),
         crashed_thread: None,
         bail_on_suspend_failure: false,
         pid: 1234,

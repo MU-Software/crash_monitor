@@ -192,6 +192,14 @@ fn test_e2e_crash_sigsegv() {
     let json = read_report_json(&reports[0]);
     assert_eq!(json["header"]["type"], "crash");
     assert!(json["exception"].is_object(), "expected exception field");
+    let raw_codes = json["exception"]["raw_codes"]
+        .as_array()
+        .expect("real Mach request must preserve its code array");
+    assert!(
+        !raw_codes.is_empty(),
+        "Mach exception code array must not be empty"
+    );
+    assert!(raw_codes.iter().all(serde_json::Value::is_string));
     assert_eq!(json["termination"]["kind"], "signaled");
     assert_eq!(json["termination"]["signal"], SIGSEGV_NUMBER);
     assert!(json["termination"]["core_dumped"].is_boolean());

@@ -117,13 +117,13 @@
 
 ### P0-11. Mach exception message를 실제 MIG wire layout으로 파싱한다
 
-- [ ] 정렬 1 byte buffer를 FFI struct reference로 cast하지 않는다.
-- [ ] 커널 MIG의 4-byte packing을 따르는 byte-offset parser, generated binding 또는 C shim을 사용한다.
-- [ ] 실제 received `msgh_size`, expected `msgh_id`, descriptor count/type/disposition, code count를 엄격히 검증한다.
-- [ ] raw code/subcode를 정확한 offset에서 읽고 원본 배열도 report에 보존한다.
-- [ ] parse 실패 또는 header mismatch에서도 가능한 request에는 `KERN_FAILURE` reply를 보내 faulting thread가 영구 대기하지 않게 한다.
-- [ ] listener fatal failure와 channel disconnect를 supervisor에 전달한다.
-- [ ] 실제 kernel fixture와 malformed/truncated message corpus로 alignment, pack(4), reply behavior를 테스트한다.
+- [x] 정렬 1 byte buffer를 FFI struct reference로 cast하지 않는다.
+- [x] 커널 MIG의 4-byte packing을 따르는 byte-offset parser, generated binding 또는 C shim을 사용한다.
+- [x] 실제 received `msgh_size`, expected `msgh_id`, descriptor count/type/disposition, code count를 엄격히 검증한다.
+- [x] raw code/subcode를 정확한 offset에서 읽고 원본 배열도 report에 보존한다.
+- [x] parse 실패 또는 header mismatch에서도 가능한 request에는 `KERN_FAILURE` reply를 보내 faulting thread가 영구 대기하지 않게 한다.
+- [x] listener fatal failure와 channel disconnect를 supervisor에 전달한다.
+- [x] 실제 kernel fixture와 malformed/truncated message corpus로 alignment, pack(4), reply behavior를 테스트한다.
 
 범위: `src/platform/macos/exceptions.rs`, `src/platform/macos/ffi/exceptions.rs`.
 

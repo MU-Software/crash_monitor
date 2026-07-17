@@ -170,6 +170,7 @@ fn test_feedback_post_processor_with_real_binary() {
         exception_type: None,
         exception_code: None,
         exception_subcode: None,
+        exception_codes: Vec::new(),
         crashed_thread: None,
         bail_on_suspend_failure: false,
         pid: 9999,

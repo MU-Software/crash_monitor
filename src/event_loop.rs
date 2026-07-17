@@ -4,7 +4,6 @@
 //! and handle exit conditions. ANR detection is integrated directly via the
 //! pure `WatchdogState` state machine (no dedicated thread).
 
-use mach2::message::mach_msg_header_t;
 use mach2::port::mach_port_t;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +14,7 @@ use crate::pipeline::worker::{
     CaptureWorker, CrashFinalization, finalize_terminated_child,
 };
 use crate::pipeline::{CaptureOutcome, CrashEvent, Pipeline, ReportType, TerminationReason};
+use crate::platform::macos::ReceivedMachMessage;
 use crate::shm::SharedMemory;
 use crate::watchdog::{WatchdogState, update_watchdog_state};
 
@@ -31,9 +31,10 @@ pub enum MonitorEvent {
         exception_type: u32,
         code: u64,
         subcode: u64,
-        thread_port: mach_port_t,
-        /// Copy of the Mach reply header for deferred reply (None in tests).
-        reply_header: Option<mach_msg_header_t>,
+        /// Exact MIG exception code array, including its original count.
+        raw_codes: Vec<u64>,
+        /// Owns the original receive buffer and every Mach right it carries.
+        request: ReceivedMachMessage,
     },
     /// SIGUSR1 manual snapshot.
     Snapshot,
@@ -144,6 +145,9 @@ impl MonitorOutcome {
 pub struct EventLoopResult {
     pub outcome: MonitorOutcome,
     pub crash_finalization: Option<CrashFinalization>,
+    /// The supervisor must destroy the exception port and boundedly reap the
+    /// child even when the deferred reply itself failed.
+    pub crash_cleanup_required: bool,
 }
 
 impl EventLoopResult {
@@ -201,6 +205,7 @@ fn finalize_child_termination_report(
         exception_type: None,
         exception_code: None,
         exception_subcode: None,
+        exception_codes: Vec::new(),
         crashed_thread: None,
         // The child has already terminated, so the pipeline uses its
         // task-independent termination finalization path.
@@ -275,7 +280,7 @@ pub fn event_loop(
     task: mach_port_t,
     pid: u32,
     process_name: &str,
-    reply_fn: &dyn Fn(&mach_msg_header_t),
+    reply_fn: &dyn Fn(&mut ReceivedMachMessage) -> Result<(), String>,
     shm: Option<&Arc<SharedMemory>>,
     anr_config: Option<&AnrConfig>,
 ) -> EventLoopResult {
@@ -302,15 +307,17 @@ pub fn event_loop(
                 exception_type,
                 code,
                 subcode,
-                thread_port,
-                reply_header,
+                raw_codes,
+                mut request,
             }) => {
+                let thread_port = request.thread_port();
                 let captured = if pipeline.report_enabled(ReportType::Crash) {
                     let event = CrashEvent {
                         report_type: ReportType::Crash,
                         exception_type: Some(exception_type),
                         exception_code: Some(code),
                         exception_subcode: Some(subcode),
+                        exception_codes: raw_codes,
                         crashed_thread: Some(thread_port),
                         bail_on_suspend_failure: false,
                         pid,
@@ -329,22 +336,12 @@ pub fn event_loop(
                     None
                 };
 
-                if let Some(ref header) = reply_header {
-                    reply_fn(header);
-                }
-                if let Some(message) = task_control_monitor_failure(pipeline) {
-                    // The Mach reply is never withheld because recovery failed.
-                    // The outer process supervisor consumes MonitorFailure;
-                    // if task_terminate failed it escalates once with SIGKILL.
-                    let crash_finalization = captured
-                        .map(|captured| CrashFinalization::start(pipeline.clone(), captured));
-                    capture_worker.detach();
-                    background_worker.detach();
-                    return EventLoopResult {
-                        outcome: MonitorOutcome::MonitorFailure(message),
-                        crash_finalization,
-                    };
-                }
+                let reply_result = reply_fn(&mut request);
+                // On success the callback has disarmed the consumed reply
+                // right; on failure it remains armed. Either way Drop now
+                // releases both descriptor rights exactly once.
+                drop(request);
+                let task_control_failure = task_control_monitor_failure(pipeline);
                 // No drain or join is allowed between reply and returning to
                 // the supervisor, which must destroy the exception port and
                 // begin reaping immediately.
@@ -352,12 +349,23 @@ pub fn event_loop(
                 background_worker.detach();
                 let crash_finalization =
                     captured.map(|captured| CrashFinalization::start(pipeline.clone(), captured));
-                return EventLoopResult {
-                    outcome: MonitorOutcome::DetectedCrash {
+                let outcome = match (task_control_failure, reply_result) {
+                    (None, Ok(())) => MonitorOutcome::DetectedCrash {
                         termination: None,
                         report_path: None,
                     },
+                    (None, Err(error)) => MonitorOutcome::MonitorFailure(format!(
+                        "failed to send deferred Mach exception reply: {error}"
+                    )),
+                    (Some(message), Ok(())) => MonitorOutcome::MonitorFailure(message),
+                    (Some(message), Err(error)) => MonitorOutcome::MonitorFailure(format!(
+                        "{message}; failed to send deferred Mach exception reply: {error}"
+                    )),
+                };
+                return EventLoopResult {
+                    outcome,
                     crash_finalization,
+                    crash_cleanup_required: true,
                 };
             }
 
@@ -370,6 +378,7 @@ pub fn event_loop(
                     exception_type: None,
                     exception_code: None,
                     exception_subcode: None,
+                    exception_codes: Vec::new(),
                     crashed_thread: None,
                     bail_on_suspend_failure: true,
                     pid,
@@ -386,6 +395,7 @@ pub fn event_loop(
                     return EventLoopResult {
                         outcome: MonitorOutcome::MonitorFailure(message),
                         crash_finalization: None,
+                        crash_cleanup_required: false,
                     };
                 }
                 if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {
@@ -400,6 +410,7 @@ pub fn event_loop(
                 return EventLoopResult {
                     outcome,
                     crash_finalization: None,
+                    crash_cleanup_required: false,
                 };
             }
 
@@ -410,6 +421,7 @@ pub fn event_loop(
                 return EventLoopResult {
                     outcome: MonitorOutcome::MonitorFailure(message),
                     crash_finalization: None,
+                    crash_cleanup_required: false,
                 };
             }
 
@@ -443,6 +455,7 @@ pub fn event_loop(
                                     exception_type: None,
                                     exception_code: None,
                                     exception_subcode: None,
+                                    exception_codes: Vec::new(),
                                     crashed_thread: None,
                                     bail_on_suspend_failure: true,
                                     pid,
@@ -462,6 +475,7 @@ pub fn event_loop(
                                     return EventLoopResult {
                                         outcome: MonitorOutcome::MonitorFailure(message),
                                         crash_finalization: None,
+                                        crash_cleanup_required: false,
                                     };
                                 }
                                 if let crate::pipeline::CaptureOutcome::Captured(captured) = capture

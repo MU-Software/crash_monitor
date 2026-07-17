@@ -97,7 +97,7 @@ fn drain_signal_pipe(read_fd: &OwnedFd) -> bool {
 // ═══════════════════════════════════════════════════
 
 pub struct MacEventSource {
-    exc_rx: std::sync::mpsc::Receiver<platform::ExceptionInfo>,
+    exc_rx: std::sync::mpsc::Receiver<platform::ExceptionListenerEvent>,
     signal_read_fd: OwnedFd,
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
@@ -108,7 +108,7 @@ impl MacEventSource {
     /// receiver, the SIGUSR1 pipe read end, and the child PID for `waitpid`.
     #[must_use]
     pub fn new(
-        exc_rx: std::sync::mpsc::Receiver<platform::ExceptionInfo>,
+        exc_rx: std::sync::mpsc::Receiver<platform::ExceptionListenerEvent>,
         signal_read_fd: OwnedFd,
         child_pid: nix::unistd::Pid,
         child_started_at: Instant,
@@ -119,6 +119,29 @@ impl MacEventSource {
             child_pid,
             child_started_at,
         }
+    }
+}
+
+enum ExceptionListenerPoll {
+    Exception(platform::ExceptionInfo),
+    Failure(String),
+    Empty,
+}
+
+fn poll_exception_listener(
+    receiver: &std::sync::mpsc::Receiver<platform::ExceptionListenerEvent>,
+) -> ExceptionListenerPoll {
+    match receiver.try_recv() {
+        Ok(platform::ExceptionListenerEvent::Exception(info)) => {
+            ExceptionListenerPoll::Exception(info)
+        }
+        Ok(platform::ExceptionListenerEvent::Fatal { message }) => {
+            ExceptionListenerPoll::Failure(message)
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => ExceptionListenerPoll::Empty,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => ExceptionListenerPoll::Failure(
+            "Mach exception listener disconnected without a terminal event".to_string(),
+        ),
     }
 }
 
@@ -147,8 +170,8 @@ pub fn termination_from_wait_status(
 impl EventSource for MacEventSource {
     fn poll(&mut self) -> Option<MonitorEvent> {
         // Check for Mach exception (crash)
-        let listener_disconnected = match self.exc_rx.try_recv() {
-            Ok(exc_info) => {
+        let listener_failure = match poll_exception_listener(&self.exc_rx) {
+            ExceptionListenerPoll::Exception(exc_info) => {
                 eprintln!(
                     "[monitor] Crash detected: {} (code={:#x}, subcode={:#x})",
                     platform::exception_type_name(exc_info.exception_type),
@@ -160,12 +183,12 @@ impl EventSource for MacEventSource {
                     exception_type: exc_info.exception_type,
                     code: exc_info.code,
                     subcode: exc_info.subcode,
-                    thread_port: exc_info.thread_port,
-                    reply_header: Some(exc_info.reply_header),
+                    raw_codes: exc_info.raw_codes,
+                    request: exc_info.request,
                 });
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
+            ExceptionListenerPoll::Failure(message) => Some(message),
+            ExceptionListenerPoll::Empty => None,
         };
 
         // ANR detection is now handled inline by event_loop (no dedicated thread)
@@ -197,10 +220,8 @@ impl EventSource for MacEventSource {
             }
         }
 
-        if listener_disconnected {
-            return Some(MonitorEvent::MonitorFailure {
-                message: "Mach exception listener disconnected".to_string(),
-            });
+        if let Some(message) = listener_failure {
+            return Some(MonitorEvent::MonitorFailure { message });
         }
 
         // Check for SIGUSR1 (manual snapshot) only while the child is alive.

@@ -21,7 +21,10 @@ pub mod types;
 
 // Re-export testable types and pure functions
 #[allow(unused_imports)]
-pub use exceptions::{message_header, parse_exception_message};
+pub use exceptions::{
+    ExceptionMessageError, MACH_EXCEPTION_RAISE_STATE_IDENTITY_ID, ParsedExceptionMessage,
+    message_header, parse_exception_message,
+};
 pub use memory::VmRegionEnumerationQuality;
 #[allow(unused_imports)]
 pub(crate) use memory::{MAX_VM_REGIONS, VmEnumAction, VmEnumerationState};

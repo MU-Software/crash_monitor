@@ -84,6 +84,7 @@ fn build_report_preserves_exit_termination() {
         exception_type: None,
         exception_code: None,
         exception_subcode: None,
+        exception_codes: Vec::new(),
         crashed_thread: None,
         bail_on_suspend_failure: false,
         pid: 1234,
@@ -103,6 +104,32 @@ fn build_report_preserves_exit_termination() {
             "runtime_ms": 4_567
         })
     );
+}
+
+#[test]
+fn build_report_preserves_the_exact_mach_code_array() {
+    let raw_codes = vec![0xfedc_ba98_7654_3210, 0x0123_4567_89ab_cdef];
+    let event = CrashEvent {
+        report_type: ReportType::Crash,
+        termination: None,
+        exception_type: Some(1),
+        exception_code: raw_codes.first().copied(),
+        exception_subcode: raw_codes.get(1).copied(),
+        exception_codes: raw_codes.clone(),
+        crashed_thread: Some(42),
+        bail_on_suspend_failure: false,
+        pid: 1234,
+        process_name: "test_app".into(),
+        hang_duration_ms: None,
+    };
+
+    let report = build_report(&event, &CollectedData::default(), &Diagnostics::new());
+    let exception = report.exception.expect("Mach crash exception");
+    assert_eq!(
+        exception.raw_codes,
+        vec!["0xfedcba9876543210", "0x123456789abcdef"]
+    );
+    assert_eq!(event.exception_codes, raw_codes);
 }
 
 #[test]

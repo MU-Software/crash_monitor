@@ -4,9 +4,9 @@ use mach2::exception_types::{
     EXC_MASK_ARITHMETIC, EXC_MASK_BAD_ACCESS, EXC_MASK_BAD_INSTRUCTION, EXC_MASK_CRASH,
 };
 use mach2::kern_return::KERN_SUCCESS;
-use mach2::message::mach_msg_header_t;
-use mach2::port::mach_port_t;
 use std::time::Instant;
+
+use crate::platform::macos::ffi::exceptions::ReceivedMachMessage;
 
 // ═══════════════════════════════════════════════════
 //  Constants
@@ -56,22 +56,29 @@ impl std::error::Error for MachError {}
 //  Exception info (from mach_exception.rs)
 // ═══════════════════════════════════════════════════
 
-/// Exception info extracted from a Mach exception message.
-/// Includes the raw reply header so the main thread can send the reply
-/// after crash data collection is complete.
+/// Exception info extracted from a Mach exception message. The original
+/// receive buffer owns all descriptor and reply rights until the event loop
+/// has completed capture and its bounded reply attempt.
 pub struct ExceptionInfo {
     /// Monotonic timestamp captured immediately after `mach_msg` received the
     /// request. Capture deadlines must use this instead of a later poll time.
     pub received_at: Instant,
-    pub thread_port: mach_port_t,
-    #[allow(dead_code)] // available for Phase 4+ (shared memory via task port)
-    pub task_port: mach_port_t,
     pub exception_type: u32,
     pub code: u64,
     pub subcode: u64,
-    /// Copy of the request header needed to construct the reply.
-    /// Stored as a value copy so the listener's buffer can be reused.
-    pub reply_header: mach_msg_header_t,
+    /// Exact MIG `mach_exception_data_t` array, including its original count.
+    pub raw_codes: Vec<u64>,
+    pub request: ReceivedMachMessage,
+}
+
+/// Messages emitted by the Mach exception listener thread.
+///
+/// A fatal receive/reply failure is explicit instead of being collapsed into
+/// an undifferentiated channel disconnect. The supervisor also treats an
+/// unexpected sender disconnect as fatal.
+pub enum ExceptionListenerEvent {
+    Exception(ExceptionInfo),
+    Fatal { message: String },
 }
 
 // ═══════════════════════════════════════════════════

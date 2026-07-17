@@ -20,6 +20,7 @@ use crash_monitor::pipeline::{
     PluginExecution, PluginStatus, PostProcessor, Priority, ReportResult, TerminationReason,
     TriggerPolicy,
 };
+use crash_monitor::platform::ReceivedMachMessage;
 use crash_monitor::platform::mock::MockPlatform;
 use crash_monitor::platform::{PlatformOps, RESUME_ATTEMPT_LIMIT};
 use crash_monitor::postprocessors::ZIPArchiver;
@@ -158,6 +159,11 @@ fn report_event(report_type: crash_monitor::pipeline::ReportType) -> CrashEvent 
         exception_type: (report_type == ReportType::Crash).then_some(1),
         exception_code: (report_type == ReportType::Crash).then_some(0xDEAD),
         exception_subcode: (report_type == ReportType::Crash).then_some(0xBEEF),
+        exception_codes: if report_type == ReportType::Crash {
+            vec![0xDEAD, 0xBEEF]
+        } else {
+            Vec::new()
+        },
         crashed_thread: (report_type == ReportType::Crash).then_some(42),
         bail_on_suspend_failure: matches!(report_type, ReportType::Snapshot | ReportType::Anr),
         pid: 9999,
@@ -182,7 +188,14 @@ fn policy_with_disabled(report_type: crash_monitor::pipeline::ReportType) -> Tri
     policy
 }
 
-fn noop_reply(_header: &mach2::message::mach_msg_header_t) {}
+fn test_request() -> ReceivedMachMessage {
+    ReceivedMachMessage::test_fixture(42).0
+}
+
+#[allow(clippy::unnecessary_wraps)] // signature matches the injected reply callback
+fn noop_reply(_request: &mut ReceivedMachMessage) -> Result<(), String> {
+    Ok(())
+}
 
 struct BlockingGate {
     entered_tx: SyncSender<()>,
@@ -460,8 +473,8 @@ fn assert_blocking_finalizer_does_not_delay_reply(
         exception_type: 1,
         code: 0xDEAD,
         subcode: 0xBEEF,
-        thread_port: 42,
-        reply_header: Some(mach2::message::mach_msg_header_t::default()),
+        raw_codes: vec![0xDEAD, 0xBEEF],
+        request: test_request(),
     }]);
     let (reply_tx, reply_rx) = mpsc::sync_channel(1);
     let platform_at_reply = platform.clone();
@@ -479,6 +492,7 @@ fn assert_blocking_finalizer_does_not_delay_reply(
                 "resume must happen before the Mach reply callback"
             );
             let _ = reply_tx.send(());
+            Ok(())
         },
         None,
         None,
@@ -633,8 +647,8 @@ fn test_disabled_crash_trigger_replies_without_worker_capture_or_artifacts() {
         exception_type: 1,
         code: 0xDEAD,
         subcode: 0xBEEF,
-        thread_port: 42,
-        reply_header: Some(mach2::message::mach_msg_header_t::default()),
+        raw_codes: vec![0xDEAD, 0xBEEF],
+        request: test_request(),
     }]);
     let replies = AtomicUsize::new(0);
 
@@ -646,6 +660,7 @@ fn test_disabled_crash_trigger_replies_without_worker_capture_or_artifacts() {
         "test_app",
         &|_| {
             replies.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         },
         None,
         None,
@@ -662,6 +677,58 @@ fn test_disabled_crash_trigger_replies_without_worker_capture_or_artifacts() {
     assert_eq!(collector_calls.load(Ordering::SeqCst), 0);
     assert_eq!(postprocessor_calls.load(Ordering::SeqCst), 0);
     assert_no_artifacts(tempdir.path());
+}
+
+#[test]
+fn test_reply_failure_is_monitor_failure_with_finalization_ticket_and_cleanup() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline(tempdir.path());
+    let (request, destroys) = ReceivedMachMessage::test_fixture(42);
+    let mut source = TestEventSource::new(vec![MonitorEvent::Crash {
+        received_at: std::time::Instant::now(),
+        exception_type: 1,
+        code: 0xDEAD,
+        subcode: 0xBEEF,
+        raw_codes: vec![0xDEAD, 0xBEEF],
+        request,
+    }]);
+
+    let mut result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &|_| Err("timed out".to_string()),
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        &result.outcome,
+        MonitorOutcome::MonitorFailure(message)
+            if message.contains("failed to send deferred Mach exception reply")
+    ));
+    assert_eq!(result.exit_code(), EXIT_MONITOR_INTERNAL);
+    assert!(result.crash_cleanup_required);
+    assert_eq!(destroys.load(Ordering::SeqCst), 1);
+
+    let termination = TerminationReason::Signaled {
+        signal: 11,
+        core_dumped: true,
+        runtime_ms: 25,
+    };
+    let diagnostics = result
+        .crash_finalization
+        .take()
+        .expect("captured crash must retain its finalization ticket")
+        .complete(pipeline, Some(termination), Duration::from_secs(2))
+        .expect("fatal finalization result");
+    assert!(diagnostics.report_path.is_some());
+    result.outcome = result
+        .outcome
+        .with_crash_result(Some(termination), diagnostics.report_path);
+    assert!(matches!(result.outcome, MonitorOutcome::MonitorFailure(_)));
 }
 
 #[test]
@@ -701,8 +768,8 @@ fn test_crash_event_produces_report_and_exits() {
             exception_type: 1,
             code: 0xDEAD,
             subcode: 0xBEEF,
-            thread_port: 42,
-            reply_header: None,
+            raw_codes: vec![0xDEAD, 0xBEEF],
+            request: test_request(),
         },
         exited(0, 10),
     ]);
@@ -821,8 +888,8 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
         exception_type: 1,
         code: 0xDEAD,
         subcode: 0xBEEF,
-        thread_port: 42,
-        reply_header: Some(mach2::message::mach_msg_header_t::default()),
+        raw_codes: vec![0xDEAD, 0xBEEF],
+        request: test_request(),
     }]);
     let (reply_tx, reply_rx) = mpsc::sync_channel(1);
     let started = std::time::Instant::now();
@@ -835,6 +902,7 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
         "test_app",
         &|_| {
             let _ = reply_tx.send(());
+            Ok(())
         },
         None,
         None,
@@ -891,8 +959,8 @@ fn test_fatal_zip_is_created_with_termination_before_archiving() {
         exception_type: 1,
         code: 0xDEAD,
         subcode: 0xBEEF,
-        thread_port: 42,
-        reply_header: None,
+        raw_codes: vec![0xDEAD, 0xBEEF],
+        request: test_request(),
     }]);
     let mut result = event_loop(
         &mut source,
@@ -1059,8 +1127,8 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
         exception_type: 1,
         code: 0xDEAD,
         subcode: 0xBEEF,
-        thread_port: 42,
-        reply_header: Some(mach2::message::mach_msg_header_t::default()),
+        raw_codes: vec![0xDEAD, 0xBEEF],
+        request: test_request(),
     }]);
     let reply_count = AtomicUsize::new(0);
 
@@ -1074,6 +1142,7 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
             assert_eq!(platform.resume_count(), RESUME_ATTEMPT_LIMIT);
             assert_eq!(platform.terminate_count(), 1);
             reply_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         },
         None,
         None,
@@ -1081,6 +1150,7 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
 
     assert_eq!(reply_count.load(Ordering::SeqCst), 1);
     assert!(matches!(&result.outcome, MonitorOutcome::MonitorFailure(_)));
+    assert!(result.crash_cleanup_required);
     let diagnostics = result
         .crash_finalization
         .take()

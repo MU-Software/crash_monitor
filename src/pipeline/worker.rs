@@ -721,6 +721,7 @@ mod tests {
                 exception_type: None,
                 exception_code: None,
                 exception_subcode: None,
+                exception_codes: Vec::new(),
                 crashed_thread: None,
                 bail_on_suspend_failure: false,
                 pid,

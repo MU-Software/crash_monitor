@@ -33,7 +33,7 @@ ran, but the top-level shape is:
 {
   "header":        { "version", "timestamp", "pid", "process", "type", "collector" },
   "termination":   { "kind": "exited", "exit_code", "runtime_ms" },
-  "exception":     { "type", "code", "subcode", "signal", "fault_address" },
+  "exception":     { "type", "code", "subcode", "raw_codes": ["0x…", …], "signal", "fault_address" },
   "crash_context": { "annotations": { "<key>": "<value>", … } },   // app state, generic KV
   "threads": [
     {
@@ -71,6 +71,11 @@ first captures an immutable snapshot, then resumes and replies. After reaping
 the child, the supervisor hands the actual wait status to the fatal finalizer;
 the original JSON and ZIP are therefore written with `termination` already
 present rather than patched afterward.
+
+For Mach crashes, `exception.raw_codes` preserves the complete MIG
+`mach_exception_data_t` array as hexadecimal bit patterns and therefore also
+preserves its original element count. `code` and `subcode` remain the
+human-readable first- and second-element projections used by existing tools.
 
 ## Monitor process exit status
 

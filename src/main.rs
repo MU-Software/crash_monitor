@@ -510,13 +510,14 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let event_loop::EventLoopResult {
         mut outcome,
         mut crash_finalization,
+        crash_cleanup_required,
     } = event_loop::event_loop(
         &mut source,
         &pl,
         child_task.raw(),
         child_pid_u32,
         process_name,
-        &|header| platform::send_deferred_reply(header),
+        &|request| platform::send_deferred_reply(request).map_err(|error| error.to_string()),
         shared_memory.as_ref(),
         anr_config.as_ref(),
     );
@@ -527,10 +528,11 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         .iter()
         .any(platform::TaskControlFailure::prevents_continued_monitoring);
     let task_control_escalation = task_control_health.requires_escalation();
-    let detected_crash = matches!(outcome, event_loop::MonitorOutcome::DetectedCrash { .. });
-    let must_reap_child = detected_crash || task_control_containment;
+    let must_reap_child = crash_cleanup_required || task_control_containment;
 
-    // After a crash, destroy the exception port so that if the child re-faults
+    // After receiving a crash (including a failed bounded reply), or entering
+    // task-control containment, destroy the exception port so that if the
+    // child re-faults
     // (e.g. kernel re-executes faulting instruction after KERN_FAILURE reply),
     // there is no Mach exception handler and the kernel falls back to delivering
     // a Unix signal (SIG_DFL → terminate). Without this, the child gets stuck

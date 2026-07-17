@@ -76,3 +76,30 @@ fn nonterminal_wait_status_is_not_fabricated_into_a_termination() {
         None
     );
 }
+
+#[test]
+fn fatal_listener_error_is_preserved_for_the_supervisor() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(platform::ExceptionListenerEvent::Fatal {
+        message: "mach_msg receive failed: test error".to_string(),
+    })
+    .unwrap();
+
+    assert!(matches!(
+        poll_exception_listener(&rx),
+        ExceptionListenerPoll::Failure(message)
+            if message == "mach_msg receive failed: test error"
+    ));
+}
+
+#[test]
+fn unexpected_listener_disconnect_is_a_supervisor_failure() {
+    let (tx, rx) = std::sync::mpsc::channel::<platform::ExceptionListenerEvent>();
+    drop(tx);
+
+    assert!(matches!(
+        poll_exception_listener(&rx),
+        ExceptionListenerPoll::Failure(message)
+            if message.contains("disconnected without a terminal event")
+    ));
+}

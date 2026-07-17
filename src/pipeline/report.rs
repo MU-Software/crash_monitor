@@ -114,6 +114,9 @@ pub struct ExceptionReport {
     pub exc_type: String,
     pub code: String,
     pub subcode: String,
+    /// Raw MIG exception code array, preserving its original element count.
+    #[serde(default)]
+    pub raw_codes: Vec<String>,
     pub signal: String,
     pub fault_address: String,
 }
@@ -467,6 +470,11 @@ pub fn build_report(
             exc_type: platform::exception_type_name(event.exception_type.unwrap_or(0)).into(),
             code: platform::kern_return_name(event.exception_code.unwrap_or(0)).into(),
             subcode: format!("{:#x}", event.exception_subcode.unwrap_or(0)),
+            raw_codes: event
+                .exception_codes
+                .iter()
+                .map(|code| format!("{code:#x}"))
+                .collect(),
             signal: platform::exception_to_signal(event.exception_type.unwrap_or(0)).into(),
             fault_address: format!("{:#x}", event.exception_subcode.unwrap_or(0)),
         })
