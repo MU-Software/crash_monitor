@@ -1,0 +1,8 @@
+# Rust build artifacts (Cargo workspace shares one target/)
+/target/
+
+# Coverage reports (make crash-monitor-*-coverage)
+/coverage-report*/
+
+# Compiled E2E test fixture binary
+/tests/e2e/fixtures/crash_app
