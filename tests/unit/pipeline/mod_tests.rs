@@ -5,7 +5,7 @@ use crate::postprocessors::{MoveToSent, ZIPArchiver};
 use mach2::port::mach_port_t;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ═══════════════════════════════════════════════════
@@ -89,6 +89,25 @@ fn make_event() -> CrashEvent {
         pid: 1234,
         process_name: "test".into(),
         hang_duration_ms: None,
+    }
+}
+
+fn unique_shm_pid() -> u32 {
+    static NEXT_PID: AtomicU32 = AtomicU32::new(1_700_000);
+    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn write_shm_app_version(shm: &crate::shm::SharedMemory, value: &str) {
+    const FIELD_LEN: usize = 16;
+    assert!(value.len() < FIELD_LEN);
+    let offset =
+        crate::shm::CONTEXT_OFFSET + std::mem::offset_of!(crate::shm::SutCrashContext, app_version);
+    // SAFETY: the test owns this mapping and writes a bounded schema field
+    // while no snapshot operation is running.
+    unsafe {
+        let field = shm.base_ptr().add(offset);
+        std::ptr::write_bytes(field, 0, FIELD_LEN);
+        std::ptr::copy_nonoverlapping(value.as_ptr(), field, value.len());
     }
 }
 
@@ -210,7 +229,7 @@ fn test_expired_capture_deadline_is_diagnosed_as_timeout() {
         make_pipeline_with_collector(Box::new(MockCollector { dep: &[] }), tempdir.path());
     let cancelled = Arc::new(AtomicBool::new(true));
 
-    let payload = pipeline.collect_snapshot(&make_event(), 0, &cancelled);
+    let payload = pipeline.collect_snapshot(&make_event(), 0, &cancelled, None);
     let status = payload
         .diagnostics
         .plugins
@@ -219,6 +238,94 @@ fn test_expired_capture_deadline_is_diagnosed_as_timeout() {
         .map(|entry| &entry.status);
 
     assert!(matches!(status, Some(PluginStatus::TimedOut)));
+}
+
+#[test]
+fn test_stage1_shm_dump_uses_pre_resume_owned_bytes() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"));
+    write_shm_app_version(&shm, "before-resume");
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm.clone()),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+
+    let CaptureOutcome::Captured(captured) = pipeline.capture_event(&make_event(), 7) else {
+        panic!("capture should succeed");
+    };
+    assert_eq!(platform.resume_count(), 1);
+
+    // Simulate the child changing the live mapping immediately after resume.
+    write_shm_app_version(&shm, "after-resume");
+    let _ = pipeline.finalize_captured(captured);
+
+    let raw_context = std::fs::read_dir(tempdir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with("_raw_context.bin")
+        })
+        .expect("Stage 1 context dump");
+    let bytes = std::fs::read(raw_context.path()).unwrap();
+    assert!(
+        bytes
+            .windows("before-resume".len())
+            .any(|window| window == b"before-resume")
+    );
+    assert!(
+        !bytes
+            .windows("after-resume".len())
+            .any(|window| window == b"after-resume")
+    );
+}
+
+#[test]
+fn test_best_effort_suspend_failure_never_snapshots_live_shm() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"));
+    let mut platform = MockPlatform::default();
+    platform.suspend_fails = true;
+    let platform = Arc::new(platform);
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm),
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+
+    let CaptureOutcome::Captured(captured) = pipeline.capture_event(&make_event(), 7) else {
+        panic!("fatal best-effort capture should continue");
+    };
+
+    assert_eq!(platform.resume_count(), 0);
+    assert!(captured.raw_shm.is_none());
+    assert!(
+        !captured
+            .diagnostics
+            .plugins
+            .iter()
+            .any(|entry| entry.name == "ShmSnapshot")
+    );
 }
 
 #[test]

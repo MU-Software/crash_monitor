@@ -27,6 +27,7 @@ struct CaptureJob {
     event: super::CrashEvent,
     task: mach_port_t,
     cancelled: Arc<AtomicBool>,
+    shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
     result_tx: SyncSender<CapturePayload>,
 }
 
@@ -49,13 +50,21 @@ impl CaptureWorker {
         let spawn = thread::Builder::new()
             .name("crash-capture".into())
             .spawn(move || {
-                while let Ok(job) = receiver.recv() {
+                while let Ok(CaptureJob {
+                    event,
+                    task,
+                    cancelled,
+                    shm_snapshot,
+                    result_tx,
+                }) = receiver.recv()
+                {
                     let payload = worker_pipeline.collect_snapshot_for_worker(
-                        &job.event,
-                        job.task,
-                        &job.cancelled,
+                        &event,
+                        task,
+                        &cancelled,
+                        shm_snapshot.as_ref(),
                     );
-                    let _ = job.result_tx.send(payload);
+                    let _ = result_tx.send(payload);
                 }
                 let _ = done_tx.send(());
             });
@@ -80,6 +89,7 @@ impl CaptureWorker {
 
     /// Capture an event before an absolute deadline and always resume a task
     /// that this call successfully suspended.
+    #[allow(clippy::too_many_lines)] // keep suspend/snapshot/enqueue/resume ordering linear
     pub(crate) fn capture(
         &mut self,
         event: super::CrashEvent,
@@ -130,6 +140,36 @@ impl CaptureWorker {
             return with_task_control_diagnostics(
                 timed_out_capture(event, "absolute capture deadline elapsed during suspend"),
                 suspend_error,
+                None,
+                &failure_sink,
+            );
+        }
+
+        // The guard-owning event-loop thread snapshots the payload before the
+        // capture job can run. A timed-out worker may continue parsing owned
+        // bytes, but it can never reach back into the resumed task's mapping.
+        let mut snapshot_error = None;
+        let shm_snapshot = if suspend_guard.is_some() {
+            match self.pipeline.snapshot_shm_while_suspended(Some(deadline)) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    snapshot_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if Instant::now() >= deadline {
+            finish_suspend(&mut suspend_guard);
+            return with_task_control_diagnostics(
+                timed_out_capture(
+                    event,
+                    "absolute capture deadline elapsed during shm snapshot",
+                ),
+                suspend_error,
+                snapshot_error,
                 &failure_sink,
             );
         }
@@ -141,6 +181,7 @@ impl CaptureWorker {
             event,
             task,
             cancelled: cancelled.clone(),
+            shm_snapshot,
             result_tx,
         };
 
@@ -149,6 +190,7 @@ impl CaptureWorker {
             return with_task_control_diagnostics(
                 failed_capture(job.event, "capture worker is unavailable"),
                 suspend_error,
+                snapshot_error,
                 &failure_sink,
             );
         };
@@ -162,6 +204,7 @@ impl CaptureWorker {
             return with_task_control_diagnostics(
                 failed_capture(event, "capture worker queue unavailable"),
                 suspend_error,
+                snapshot_error,
                 &failure_sink,
             );
         }
@@ -189,7 +232,7 @@ impl CaptureWorker {
                 failed_capture(event_for_result, "capture worker disconnected")
             }
         };
-        with_task_control_diagnostics(outcome, suspend_error, &failure_sink)
+        with_task_control_diagnostics(outcome, suspend_error, snapshot_error, &failure_sink)
     }
 
     fn retire(&mut self, reason: &str) {
@@ -217,6 +260,7 @@ fn finish_suspend(guard: &mut Option<TaskSuspendGuard>) {
 fn with_task_control_diagnostics(
     mut outcome: CaptureOutcome,
     suspend_error: Option<String>,
+    snapshot_error: Option<String>,
     failure_sink: &TaskControlFailureSink,
 ) -> CaptureOutcome {
     let diagnostics = match &mut outcome {
@@ -225,6 +269,9 @@ fn with_task_control_diagnostics(
     };
     if let Some(error) = suspend_error {
         diagnostics.record_immediate("CaptureSuspend", PluginStatus::Error(error));
+    }
+    if let Some(error) = snapshot_error {
+        diagnostics.record_immediate("ShmSnapshot", PluginStatus::Error(error));
     }
     failure_sink.drain_into(diagnostics);
     outcome
@@ -497,12 +544,12 @@ fn finish_thread(done_rx: &Receiver<()>, handle: Option<JoinHandle<()>>, timeout
 mod tests {
     use super::*;
     use crate::pipeline::{
-        CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
-        ReportResult, ReportType, TriggerPolicy,
+        CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution,
+        PostProcessor, Priority, ReportResult, ReportType, TriggerPolicy,
     };
     use crate::platform::mock::MockPlatform;
     use std::sync::Condvar;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     struct BlockingPostProcessor {
         entered_tx: SyncSender<()>,
@@ -547,6 +594,76 @@ mod tests {
             }
             let _ = self.completed_tx.send(());
             Ok(())
+        }
+    }
+
+    struct PostResumeSnapshotCollector {
+        entered_tx: SyncSender<()>,
+        observed_tx: SyncSender<String>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Plugin for PostResumeSnapshotCollector {
+        fn name(&self) -> &'static str {
+            "PostResumeSnapshotCollector"
+        }
+
+        fn execution(&self) -> PluginExecution {
+            PluginExecution::Cooperative
+        }
+
+        fn priority(&self) -> Priority {
+            Priority::Critical
+        }
+    }
+
+    impl Collector for PostResumeSnapshotCollector {
+        fn collect(
+            &self,
+            _event: &CrashEvent,
+            _task: mach_port_t,
+            _data: &mut CollectedData,
+            context: &PluginContext,
+        ) -> Result<(), String> {
+            let _ = self.entered_tx.send(());
+            let (lock, condvar) = &*self.release;
+            let guard = match lock.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let wait = condvar
+                .wait_timeout_while(guard, Duration::from_secs(5), |released| !*released)
+                .map_err(|_| "release mutex poisoned".to_string())?;
+            if wait.1.timed_out() {
+                return Err("release timed out".into());
+            }
+
+            let value = context
+                .shm_snapshot()
+                .and_then(crate::shm::OwnedShmSnapshot::read_context)
+                .map(|snapshot| snapshot.app_version)
+                .ok_or_else(|| "owned shared-memory context unavailable".to_string())?;
+            let _ = self.observed_tx.send(value);
+            Ok(())
+        }
+    }
+
+    fn unique_shm_pid() -> u32 {
+        static NEXT_PID: AtomicU32 = AtomicU32::new(1_800_000);
+        NEXT_PID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn write_shm_app_version(shm: &crate::shm::SharedMemory, value: &str) {
+        const FIELD_LEN: usize = 16;
+        assert!(value.len() < FIELD_LEN);
+        let offset = crate::shm::CONTEXT_OFFSET
+            + std::mem::offset_of!(crate::shm::SutCrashContext, app_version);
+        // SAFETY: this test writes one bounded schema field. The initial write
+        // precedes capture; the second happens only after resume.
+        unsafe {
+            let field = shm.base_ptr().add(offset);
+            std::ptr::write_bytes(field, 0, FIELD_LEN);
+            std::ptr::copy_nonoverlapping(value.as_ptr(), field, value.len());
         }
     }
 
@@ -677,6 +794,79 @@ mod tests {
         assert_eq!(platform.suspend_count(), 0);
         assert_eq!(platform.resume_count(), 0);
         assert!(std::fs::read_dir(tempdir.path()).unwrap().next().is_none());
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn timed_out_worker_reads_owned_shm_after_resume() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let shm = Arc::new(
+            crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"),
+        );
+        write_shm_app_version(&shm, "before-resume");
+
+        let platform = Arc::new(MockPlatform::default());
+        let (entered_tx, entered_rx) = sync_channel(1);
+        let (observed_tx, observed_rx) = sync_channel(1);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let pipeline = Arc::new(Pipeline {
+            enabled: true,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            filters: vec![],
+            collectors: vec![Box::new(PostResumeSnapshotCollector {
+                entered_tx,
+                observed_tx,
+                release: release.clone(),
+            })],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: Some(shm.clone()),
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+
+        let mutator_shm = shm.clone();
+        let mutator_platform = platform.clone();
+        let mutator_release = release.clone();
+        let mutator = std::thread::spawn(move || {
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("collector entered before capture deadline");
+            let started = Instant::now();
+            while mutator_platform.resume_count() == 0 {
+                assert!(
+                    started.elapsed() < Duration::from_secs(3),
+                    "capture did not resume within the test deadline"
+                );
+                std::thread::yield_now();
+            }
+            write_shm_app_version(&mutator_shm, "after-resume");
+            let (lock, condvar) = &*mutator_release;
+            let mut released = match lock.lock() {
+                Ok(released) => released,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *released = true;
+            condvar.notify_all();
+        });
+
+        let mut worker = CaptureWorker::start(pipeline);
+        let outcome = worker.capture(
+            captured(44).event,
+            7,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(matches!(outcome, CaptureOutcome::Captured(_)));
+        assert_eq!(platform.resume_count(), 1);
+        assert_eq!(
+            observed_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("collector observed owned snapshot after resume"),
+            "before-resume"
+        );
+
+        mutator.join().expect("mutator thread");
         worker.shutdown(Duration::from_secs(1));
     }
 

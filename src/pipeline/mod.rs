@@ -105,7 +105,8 @@ pub struct Pipeline {
     pub post_processors: Vec<Box<dyn PostProcessor>>,
     #[allow(dead_code)] // Phase 4+
     pub notifiers: Vec<Box<dyn Notifier>>,
-    /// Shared memory handle for Stage 1 raw dump (None if shm unavailable).
+    /// Live shared-memory mapping used only to create an owned snapshot while
+    /// this monitor owns the task suspension (None if shm is unavailable).
     pub shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
     /// Platform abstraction for suspend/resume and port deallocation.
     pub platform: Arc<dyn PlatformOps>,
@@ -142,10 +143,12 @@ fn run_cancellable_stage<T>(
     execution: PluginExecution,
     timeout_secs: u32,
     cancellation: CancellationToken,
+    shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
     f: impl FnOnce(&PluginContext) -> Result<T, String>,
 ) -> PluginRunResult<T> {
     let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
-    let context = PluginContext::from_timeout_and_cancellation(timeout, cancellation);
+    let context = PluginContext::from_timeout_and_cancellation(timeout, cancellation)
+        .with_shm_snapshot(shm_snapshot);
     enforce_execution_boundary(
         name,
         execution,
@@ -205,6 +208,22 @@ impl Pipeline {
         self.enabled && self.triggers.allows(report_type)
     }
 
+    /// Copy the live mapping into an immutable payload while the caller owns
+    /// task suspension. Callers must skip this method when suspension failed.
+    pub(super) fn snapshot_shm_while_suspended(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Arc<crate::shm::OwnedShmSnapshot>>, String> {
+        self.shm
+            .as_ref()
+            .map(|shm| {
+                shm.snapshot_owned_until(deadline)
+                    .map(Arc::new)
+                    .map_err(|error| format!("shared-memory snapshot failed: {error}"))
+            })
+            .transpose()
+    }
+
     /// Process a crash/snapshot event synchronously.
     ///
     /// Production Mach events use [`worker`] so finalization cannot delay
@@ -251,8 +270,20 @@ impl Pipeline {
             }
         };
 
+        let shm_snapshot = if suspend_guard.is_some() {
+            match self.snapshot_shm_while_suspended(None) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    diagnostics.record_immediate("ShmSnapshot", PluginStatus::Error(error));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let cancelled = Arc::new(AtomicBool::new(false));
-        let mut payload = self.collect_snapshot(event, task, &cancelled);
+        let mut payload = self.collect_snapshot(event, task, &cancelled, shm_snapshot.as_ref());
 
         if let Some(guard) = suspend_guard {
             guard.finish();
@@ -279,6 +310,7 @@ impl Pipeline {
         event: &CrashEvent,
         task: mach_port_t,
         cancelled: &Arc<AtomicBool>,
+        shm_snapshot: Option<&Arc<crate::shm::OwnedShmSnapshot>>,
     ) -> CapturePayload {
         if !self.report_enabled(event.report_type) {
             return CapturePayload {
@@ -309,10 +341,14 @@ impl Pipeline {
             let start = Instant::now();
             let timeout = plugin_timeout(c.timeout_secs(), COLLECTOR_TIMEOUT);
             let cancellation = CancellationToken::from_atomic(cancelled.clone());
-            let outcome =
-                run_cancellable_stage(c.name(), c.execution(), timeout, cancellation, |context| {
-                    c.collect(event, task, &mut data, context)
-                });
+            let outcome = run_cancellable_stage(
+                c.name(),
+                c.execution(),
+                timeout,
+                cancellation,
+                shm_snapshot.cloned(),
+                |context| c.collect(event, task, &mut data, context),
+            );
             let status = plugin_status(&outcome);
             diagnostics.record(c.name(), status, start.elapsed());
         }
@@ -320,9 +356,9 @@ impl Pipeline {
         let raw_shm = if cancelled.load(Ordering::Acquire) {
             None
         } else {
-            self.shm.as_ref().map(|shm| RawShmSnapshot {
-                breadcrumbs: shm.raw_breadcrumb_bytes().to_vec(),
-                context: shm.raw_context_bytes().to_vec(),
+            shm_snapshot.map(|snapshot| RawShmSnapshot {
+                breadcrumbs: snapshot.raw_breadcrumb_bytes_owned(),
+                context: snapshot.raw_context_bytes_owned(),
             })
         };
 
@@ -342,8 +378,9 @@ impl Pipeline {
         event: &CrashEvent,
         task: mach_port_t,
         cancelled: &Arc<AtomicBool>,
+        shm_snapshot: Option<&Arc<crate::shm::OwnedShmSnapshot>>,
     ) -> CapturePayload {
-        self.collect_snapshot(event, task, cancelled)
+        self.collect_snapshot(event, task, cancelled, shm_snapshot)
     }
 
     pub(super) fn finalize_captured_for_worker(&self, captured: CapturedEvent) -> Diagnostics {
@@ -853,13 +890,13 @@ pub fn default_macos_pipeline_from_config(
         collectors.push(Box::new(ThreadCollector::new(platform.clone())));
     }
 
-    if let Some(ref shm) = shm {
+    if shm.is_some() {
         use crate::collectors::{BreadcrumbCollector, ContextCollector};
         if on("BreadcrumbCollector") {
-            collectors.push(Box::new(BreadcrumbCollector::new(shm.clone())));
+            collectors.push(Box::new(BreadcrumbCollector::new()));
         }
         if on("ContextCollector") {
-            collectors.push(Box::new(ContextCollector::new(shm.clone())));
+            collectors.push(Box::new(ContextCollector::new()));
         }
     }
 
@@ -870,13 +907,13 @@ pub fn default_macos_pipeline_from_config(
         collectors.push(Box::new(DylibCollector::new(platform.clone())));
     }
 
-    if let Some(ref shm) = shm {
+    if shm.is_some() {
         use crate::collectors::{AttachmentCollector, ScreenshotCollector};
         if on("ScreenshotCollector") {
-            collectors.push(Box::new(ScreenshotCollector::new(shm.clone())));
+            collectors.push(Box::new(ScreenshotCollector::new()));
         }
         if on("AttachmentCollector") {
-            collectors.push(Box::new(AttachmentCollector::new(shm.clone())));
+            collectors.push(Box::new(AttachmentCollector::new()));
             attachment_copy_enabled = true;
         }
     }

@@ -204,35 +204,3 @@ pub struct RawScreenshot {
     pub height: u32,
     pub rgba: Vec<u8>,
 }
-
-// ═══════════════════════════════════════════════════
-//  Helpers
-// ═══════════════════════════════════════════════════
-
-/// Convert a fixed-size C char array to a Rust String (NUL-terminated).
-///
-/// bindgen renders C `char[]` as `c_char` (i8); reinterpret as bytes since the
-/// buffer holds NUL-terminated (mostly ASCII) text.
-pub(crate) fn c_array_to_string(bytes: &[c_char]) -> String {
-    // SAFETY: c_char and u8 have identical size/alignment; we only read.
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<u8>(), bytes.len()) };
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
-}
-
-/// Read app annotations from the fixed C array, clamped to a valid count.
-pub(crate) fn read_annotations(
-    annotations: &[SutCrashAnnotation; MAX_ANNOTATIONS],
-    count: i32,
-) -> Vec<(String, String)> {
-    let count = usize::try_from(count).unwrap_or(0).min(MAX_ANNOTATIONS);
-    annotations[..count]
-        .iter()
-        .map(|a| (c_array_to_string(&a.key), c_array_to_string(&a.value)))
-        .collect()
-}
-
-#[cfg(test)]
-#[path = "../../tests/unit/shm/types_tests.rs"]
-mod tests;

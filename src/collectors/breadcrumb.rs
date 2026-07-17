@@ -1,29 +1,25 @@
 //! Collector: Breadcrumbs from shared memory.
 //!
-//! Reads per-thread ring buffers from the shared memory region,
+//! Reads per-thread ring buffers from the event's owned shared-memory snapshot,
 //! extracts valid entries, and merge-sorts them by timestamp.
-//! Self-contained — all shm reading logic is in `SharedMemory`.
-
-use std::sync::Arc;
+//! Self-contained — all payload parsing uses the event's `OwnedShmSnapshot`.
 
 use mach2::port::mach_port_t;
 
 use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
 };
-use crate::shm::SharedMemory;
-
 // ═══════════════════════════════════════════════════
 //  Plugin + Collector implementation
 // ═══════════════════════════════════════════════════
 
-pub struct BreadcrumbCollector {
-    shm: Arc<SharedMemory>,
-}
+#[derive(Default)]
+pub struct BreadcrumbCollector;
 
 impl BreadcrumbCollector {
-    pub fn new(shm: Arc<SharedMemory>) -> Self {
-        Self { shm }
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
     }
 }
 
@@ -48,7 +44,10 @@ impl Collector for BreadcrumbCollector {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        let crumbs = self.shm.read_breadcrumbs();
+        let snapshot = context
+            .shm_snapshot()
+            .ok_or_else(|| "owned shared-memory snapshot unavailable".to_string())?;
+        let crumbs = snapshot.read_breadcrumbs();
         context.checkpoint()?;
         if crumbs.is_empty() {
             eprintln!("[monitor] BreadcrumbCollector: no breadcrumbs found (shm may be empty)");

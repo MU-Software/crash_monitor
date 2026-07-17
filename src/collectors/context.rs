@@ -1,29 +1,25 @@
 //! Collector: Crash context + settings snapshot from shared memory.
 //!
 //! Reads engine state (active tool, voxel count, undo depth, build info, etc.)
-//! and settings snapshot from the shared memory region.
-//! Self-contained — all shm reading logic is in `SharedMemory`.
-
-use std::sync::Arc;
+//! and settings from the event's owned shared-memory snapshot.
+//! Self-contained — all payload parsing uses the event's `OwnedShmSnapshot`.
 
 use mach2::port::mach_port_t;
 
 use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
 };
-use crate::shm::SharedMemory;
-
 // ═══════════════════════════════════════════════════
 //  Plugin + Collector implementation
 // ═══════════════════════════════════════════════════
 
-pub struct ContextCollector {
-    shm: Arc<SharedMemory>,
-}
+#[derive(Default)]
+pub struct ContextCollector;
 
 impl ContextCollector {
-    pub fn new(shm: Arc<SharedMemory>) -> Self {
-        Self { shm }
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
     }
 }
 
@@ -48,9 +44,12 @@ impl Collector for ContextCollector {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        data.raw.crash_context = self.shm.read_context();
+        let snapshot = context
+            .shm_snapshot()
+            .ok_or_else(|| "owned shared-memory snapshot unavailable".to_string())?;
+        data.raw.crash_context = snapshot.read_context();
         context.checkpoint()?;
-        data.raw.settings_snapshot = self.shm.read_settings();
+        data.raw.settings_snapshot = snapshot.read_settings();
         context.checkpoint()?;
 
         if data.raw.crash_context.is_some() {

@@ -75,10 +75,10 @@
 
 ### P0-07. live SHM에서 빌린 참조를 제거하고 suspend 중 owned snapshot을 만든다
 
-- [ ] 다른 process가 변경할 수 있는 mapping 위에 일반 Rust reference나 safe borrowed slice를 만들지 않는다.
-- [ ] raw pointer에서 bounded owned bytes/typed snapshot으로 복사한다.
-- [ ] 모든 section과 Stage 1 SHM dump를 child resume 전에 snapshot한다.
-- [ ] resume 후에는 해당 이벤트의 payload section을 다시 읽지 않는다. watchdog heartbeat처럼 계속 관측해야 하는 live state는 별도 atomic API로만 읽는다.
+- [x] 다른 process가 변경할 수 있는 mapping 위에 일반 Rust reference나 safe borrowed slice를 만들지 않는다.
+- [x] raw pointer에서 bounded owned bytes/typed snapshot으로 복사한다.
+- [x] 모든 section과 Stage 1 SHM dump를 child resume 전에 snapshot한다.
+- [x] resume 후에는 해당 이벤트의 payload section을 다시 읽지 않는다. watchdog heartbeat처럼 계속 관측해야 하는 live state는 별도 atomic API로만 읽는다.
 - [ ] generation counter 또는 seqlock으로 torn snapshot을 탐지한다.
 
 범위: `src/shm/reader.rs`, `src/pipeline/mod.rs`, `src/pipeline/safety.rs`.

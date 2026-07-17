@@ -1,8 +1,9 @@
 use super::*;
 
-use std::mem::{MaybeUninit, size_of};
-use std::os::raw::c_char;
+use std::mem::size_of;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 /// Generate a unique fake PID per test to avoid shm name collisions.
 fn unique_pid() -> u32 {
@@ -27,13 +28,17 @@ unsafe fn write_cstr(base: *mut u8, offset: usize, s: &str) {
     }
 }
 
+fn snapshot(shm: &SharedMemory) -> OwnedShmSnapshot {
+    shm.snapshot_owned_until(None).expect("shm snapshot")
+}
+
 #[test]
-fn test_shm_create_validate_drop() {
+fn test_shm_create_snapshot_drop() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert!(shm.validate(), "freshly created shm should validate");
+    let snapshot = snapshot(&shm);
     assert!(shm.name().starts_with("/crash_monitor_"));
-    assert_eq!(shm.read_heartbeat(), 0);
-    assert!(shm.read_breadcrumbs().is_empty());
+    assert_eq!(shm.read_live_heartbeat(), 0);
+    assert!(snapshot.read_breadcrumbs().is_empty());
     // Drop cleans up
 }
 
@@ -50,36 +55,40 @@ fn test_section_offsets_are_consistent() {
 #[test]
 fn test_validate_corrupted_magic() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert!(shm.validate());
     // Corrupt magic
     unsafe {
         write_val::<u32>(shm.base_ptr(), 0, 0xDEAD_DEAD);
     }
-    assert!(!shm.validate());
+    assert_eq!(
+        shm.snapshot_owned_until(None).unwrap_err(),
+        ShmSnapshotError::InvalidMagic { found: 0xDEAD_DEAD }
+    );
 }
 
 #[test]
 fn test_validate_corrupted_canary() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert!(shm.validate());
     // Corrupt canary
     unsafe {
         write_val::<u32>(shm.base_ptr(), FOOTER_OFFSET, 0x0000_0000);
     }
-    assert!(!shm.validate());
+    assert_eq!(
+        shm.snapshot_owned_until(None).unwrap_err(),
+        ShmSnapshotError::InvalidCanary { found: 0 }
+    );
 }
 
 #[test]
 fn test_read_breadcrumbs_empty_rings() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    let crumbs = shm.read_breadcrumbs();
+    let crumbs = snapshot(&shm).read_breadcrumbs();
     assert!(crumbs.is_empty());
 }
 
 #[test]
 fn test_read_context_fresh_shm() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    let ctx = shm.read_context();
+    let ctx = snapshot(&shm).read_context();
     assert!(ctx.is_some());
     let ctx = ctx.unwrap();
     assert_eq!(ctx.heartbeat_counter, 0);
@@ -88,9 +97,34 @@ fn test_read_context_fresh_shm() {
 }
 
 #[test]
-fn test_read_heartbeat_write_read() {
+fn test_snapshot_rejects_elapsed_deadline() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert_eq!(shm.read_heartbeat(), 0);
+    assert_eq!(
+        shm.snapshot_owned_until(Some(Instant::now())).unwrap_err(),
+        ShmSnapshotError::DeadlineExceeded
+    );
+}
+
+#[test]
+fn test_snapshot_rejects_short_mapping_without_pointer_arithmetic() {
+    let mut shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let actual_size = shm.size;
+    shm.size = FOOTER_OFFSET;
+    assert_eq!(
+        shm.snapshot_owned_until(None).unwrap_err(),
+        ShmSnapshotError::MappingTooSmall {
+            mapped: FOOTER_OFFSET,
+            required: SHM_TOTAL_SIZE,
+        }
+    );
+    // Restore the true mmap length before Drop calls munmap.
+    shm.size = actual_size;
+}
+
+#[test]
+fn test_read_live_heartbeat_write_read() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    assert_eq!(shm.read_live_heartbeat(), 0);
     // Write a known heartbeat value at the correct offset
     unsafe {
         write_val::<u64>(
@@ -99,119 +133,134 @@ fn test_read_heartbeat_write_read() {
             42,
         );
     }
-    assert_eq!(shm.read_heartbeat(), 42);
+    assert_eq!(shm.read_live_heartbeat(), 42);
 }
 
-// ── convert_c_context / convert_c_settings unit tests ──
-
-/// Helper: create a zeroed `SutCrashContext`.
-fn zeroed_context() -> SutCrashContext {
-    // SAFETY: SutCrashContext is repr(C) with no padding invariants beyond zero-fill.
-    unsafe { MaybeUninit::zeroed().assume_init() }
-}
-
-/// Helper: create a zeroed `SutCrashSettingsSnapshot`.
-fn zeroed_settings() -> SutCrashSettingsSnapshot {
-    // SAFETY: SutCrashSettingsSnapshot is repr(C), Copy, all-zero is valid.
-    unsafe { MaybeUninit::zeroed().assume_init() }
-}
-
-/// Helper: write a NUL-terminated string into a fixed-size `c_char` array
-/// (bindgen renders C `char[]` as `c_char`).
-fn write_c_string(dst: &mut [c_char], s: &str) {
-    // SAFETY: c_char and u8 share size/alignment; we only write bytes.
-    let dst: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
-    let bytes = s.as_bytes();
-    let len = bytes.len().min(dst.len() - 1);
-    dst[..len].copy_from_slice(&bytes[..len]);
-    dst[len] = 0;
-}
+// ── owned byte parser tests ──
 
 #[test]
-fn test_convert_c_context_basic_fields() {
-    let mut c = zeroed_context();
-    c.heartbeat_counter = 999;
-    c.session_start_ns = 123_456_789;
-    c.build_number = 7;
-    c.git_dirty = true;
-    // App/domain state arrives as generic key-value annotations.
-    c.annotation_count = 2;
-    write_c_string(&mut c.annotations[0].key, "active_tool");
-    write_c_string(&mut c.annotations[0].value, "brush");
-    write_c_string(&mut c.annotations[1].key, "voxel_count");
-    write_c_string(&mut c.annotations[1].value, "1024");
+fn test_read_context_decodes_primitive_bytes_without_typed_materialization() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let annotations = CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotations);
+    unsafe {
+        let base = shm.base_ptr();
+        write_val::<u64>(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, heartbeat_counter),
+            999,
+        );
+        write_val::<u64>(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, session_start_ns),
+            123_456_789,
+        );
+        write_val::<u32>(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, build_number),
+            7,
+        );
+        // A non-canonical C bool byte must be decoded as a byte, never as Rust bool.
+        write_val::<u8>(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, git_dirty),
+            2,
+        );
+        write_val::<i32>(
+            base,
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotation_count),
+            2,
+        );
+        write_cstr(
+            base,
+            annotations + std::mem::offset_of!(SutCrashAnnotation, key),
+            "active_tool",
+        );
+        write_cstr(
+            base,
+            annotations + std::mem::offset_of!(SutCrashAnnotation, value),
+            "brush",
+        );
+        let second = annotations + size_of::<SutCrashAnnotation>();
+        write_cstr(
+            base,
+            second + std::mem::offset_of!(SutCrashAnnotation, key),
+            "voxel_count",
+        );
+        write_cstr(
+            base,
+            second + std::mem::offset_of!(SutCrashAnnotation, value),
+            "1024",
+        );
+    }
 
-    let r = convert_c_context(&c);
-
-    assert_eq!(r.heartbeat_counter, 999);
-    assert_eq!(r.session_start_ns, 123_456_789);
-    assert_eq!(r.build_number, 7);
-    assert!(r.git_dirty);
-    assert_eq!(r.annotations.len(), 2);
+    let context = snapshot(&shm).read_context().expect("context");
+    assert_eq!(context.heartbeat_counter, 999);
+    assert_eq!(context.session_start_ns, 123_456_789);
+    assert_eq!(context.build_number, 7);
+    assert!(context.git_dirty);
     assert_eq!(
-        r.annotations[0],
-        ("active_tool".to_string(), "brush".to_string())
+        context.annotations,
+        vec![
+            ("active_tool".to_string(), "brush".to_string()),
+            ("voxel_count".to_string(), "1024".to_string()),
+        ]
     );
-    assert_eq!(
-        r.annotations[1],
-        ("voxel_count".to_string(), "1024".to_string())
-    );
-    // Zeroed string fields should be empty
-    assert!(r.session_id.is_empty());
-    assert!(r.app_version.is_empty());
-    assert!(r.git_hash.is_empty());
 }
 
 #[test]
-fn test_convert_c_context_annotation_count_clamped() {
-    let mut c = zeroed_context();
-    // A corrupt/over-large count must be clamped, never read out of bounds.
-    c.annotation_count = 9999;
-    let r = convert_c_context(&c);
-    assert_eq!(r.annotations.len(), crate::shm::types::MAX_ANNOTATIONS);
+fn test_read_context_annotation_count_is_clamped() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    unsafe {
+        write_val::<i32>(
+            shm.base_ptr(),
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, annotation_count),
+            9999,
+        );
+    }
+    let context = snapshot(&shm).read_context().expect("context");
+    assert_eq!(context.annotations.len(), MAX_ANNOTATIONS);
 }
 
 #[test]
-fn test_convert_c_settings_basic() {
-    let mut s = zeroed_settings();
-    s.world_bound_min = [-150, 0, -150];
-    s.world_bound_max = [150, 300, 150];
-    s.palette_count = 64;
-    s.history_max = 100;
-    write_c_string(&mut s.extra, "ssao=on");
+fn test_read_context_string_fields_from_owned_bytes() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    unsafe {
+        let base = shm.base_ptr();
+        for (offset, value) in [
+            (
+                std::mem::offset_of!(SutCrashContext, session_id),
+                "sess-abc",
+            ),
+            (std::mem::offset_of!(SutCrashContext, app_version), "1.2.3"),
+            (std::mem::offset_of!(SutCrashContext, git_hash), "deadbeef"),
+            (std::mem::offset_of!(SutCrashContext, build_type), "release"),
+            (
+                std::mem::offset_of!(SutCrashContext, build_preset),
+                "default",
+            ),
+            (
+                std::mem::offset_of!(SutCrashContext, build_timestamp),
+                "2026-07-17",
+            ),
+            (std::mem::offset_of!(SutCrashContext, compiler), "clang-17"),
+            (
+                std::mem::offset_of!(SutCrashContext, os_version),
+                "macOS 15.3",
+            ),
+        ] {
+            write_cstr(base, CONTEXT_OFFSET + offset, value);
+        }
+    }
 
-    let r = convert_c_settings(&s);
-
-    assert_eq!(r.world_bound_min, [-150, 0, -150]);
-    assert_eq!(r.world_bound_max, [150, 300, 150]);
-    assert_eq!(r.palette_count, 64);
-    assert_eq!(r.history_max, 100);
-    assert_eq!(r.extra, "ssao=on");
-}
-
-#[test]
-fn test_convert_c_context_string_fields() {
-    let mut c = zeroed_context();
-    write_c_string(&mut c.session_id, "sess-abc");
-    write_c_string(&mut c.app_version, "1.2.3");
-    write_c_string(&mut c.git_hash, "deadbeef");
-    write_c_string(&mut c.build_type, "release");
-    write_c_string(&mut c.build_preset, "default");
-    write_c_string(&mut c.build_timestamp, "2026-07-17");
-    write_c_string(&mut c.compiler, "clang-17");
-    write_c_string(&mut c.os_version, "macOS 15.3");
-
-    let r = convert_c_context(&c);
-
-    assert_eq!(r.session_id, "sess-abc");
-    assert_eq!(r.app_version, "1.2.3");
-    assert_eq!(r.git_hash, "deadbeef");
-    assert_eq!(r.build_type, "release");
-    assert_eq!(r.build_preset, "default");
-    assert_eq!(r.build_timestamp, "2026-07-17");
-    assert_eq!(r.compiler, "clang-17");
-    assert_eq!(r.os_version, "macOS 15.3");
+    let context = snapshot(&shm).read_context().expect("context");
+    assert_eq!(context.session_id, "sess-abc");
+    assert_eq!(context.app_version, "1.2.3");
+    assert_eq!(context.git_hash, "deadbeef");
+    assert_eq!(context.build_type, "release");
+    assert_eq!(context.build_preset, "default");
+    assert_eq!(context.build_timestamp, "2026-07-17");
+    assert_eq!(context.compiler, "clang-17");
+    assert_eq!(context.os_version, "macOS 15.3");
 }
 
 // ── read_settings / read_attachments / read_screenshots / read_breadcrumbs with data ──
@@ -243,7 +292,9 @@ fn test_read_settings_populated() {
         );
     }
 
-    let s = shm.read_settings().expect("settings should read");
+    let s = snapshot(&shm)
+        .read_settings()
+        .expect("settings should read");
     assert_eq!(s.world_bound_min, [-1, -2, -3]);
     assert_eq!(s.world_bound_max, [1, 2, 3]);
     assert_eq!(s.palette_count, 16);
@@ -273,7 +324,7 @@ fn test_read_attachments_populated() {
         );
     }
 
-    let att = shm.read_attachments();
+    let att = snapshot(&shm).read_attachments();
     assert_eq!(att.len(), 1);
     assert_eq!(att[0].label, "log");
     assert_eq!(att[0].path, "/tmp/app.log");
@@ -290,7 +341,7 @@ fn test_read_attachments_skips_empty_path() {
             1,
         );
     }
-    assert!(shm.read_attachments().is_empty());
+    assert!(snapshot(&shm).read_attachments().is_empty());
 }
 
 #[test]
@@ -298,18 +349,59 @@ fn test_read_screenshots_one_valid_slot() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     unsafe {
         let base = shm.base_ptr();
-        // valid[0] = 1 (u32 at SECTION4_OFFSET + 0)
-        write_val::<u32>(base, SECTION4_OFFSET, 1);
-        // timestamp[0] (u64 at SECTION4_OFFSET + 96*4)
-        write_val::<u64>(base, SECTION4_OFFSET + 96 * 4, 777_000);
+        write_val::<u32>(
+            base,
+            SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, valid),
+            1,
+        );
+        write_val::<u64>(
+            base,
+            SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, timestamp),
+            777_000,
+        );
+        *base.add(SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, data)) = 0xA5;
     }
 
-    let shots = shm.read_screenshots();
+    let owned = snapshot(&shm);
+    // Mutating mmap after capture cannot affect the immutable event snapshot.
+    unsafe {
+        *shm.base_ptr()
+            .add(SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, data)) = 0x5A;
+    }
+    let shots = owned.read_screenshots();
     assert_eq!(shots.len(), 1);
     assert_eq!(shots[0].timestamp_ns, 777_000);
     assert_eq!(shots[0].width, SCREENSHOT_WIDTH);
     assert_eq!(shots[0].height, SCREENSHOT_HEIGHT);
     assert_eq!(shots[0].rgba.len(), SCREENSHOT_BYTES_PER_SLOT);
+    assert_eq!(shots[0].rgba[0], 0xA5);
+}
+
+#[test]
+fn test_read_screenshots_last_slot_stays_within_owned_snapshot() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let index = SCREENSHOT_SLOTS as usize - 1;
+    let valid_offset = SECTION4_OFFSET
+        + std::mem::offset_of!(SutScreenshotSection, valid)
+        + index * size_of::<u32>();
+    let timestamp_offset = SECTION4_OFFSET
+        + std::mem::offset_of!(SutScreenshotSection, timestamp)
+        + index * size_of::<u64>();
+    let data_offset = SECTION4_OFFSET
+        + std::mem::offset_of!(SutScreenshotSection, data)
+        + index * SCREENSHOT_BYTES_PER_SLOT;
+    assert_eq!(data_offset + SCREENSHOT_BYTES_PER_SLOT, FOOTER_OFFSET);
+    unsafe {
+        write_val::<u32>(shm.base_ptr(), valid_offset, 1);
+        write_val::<u64>(shm.base_ptr(), timestamp_offset, 999_000);
+        *shm.base_ptr()
+            .add(data_offset + SCREENSHOT_BYTES_PER_SLOT - 1) = 0xEF;
+    }
+
+    let shots = snapshot(&shm).read_screenshots();
+    assert_eq!(shots.len(), 1);
+    assert_eq!(shots[0].timestamp_ns, 999_000);
+    assert_eq!(shots[0].rgba[SCREENSHOT_BYTES_PER_SLOT - 1], 0xEF);
 }
 
 #[test]
@@ -366,7 +458,15 @@ fn test_read_breadcrumbs_with_entry() {
         );
     }
 
-    let crumbs = shm.read_breadcrumbs();
+    let owned = snapshot(&shm);
+    unsafe {
+        write_val::<u64>(
+            shm.base_ptr(),
+            buf0 + std::mem::offset_of!(SutBreadcrumb, timestamp_ns),
+            98_765,
+        );
+    }
+    let crumbs = owned.read_breadcrumbs();
     assert_eq!(crumbs.len(), 1);
     let c = &crumbs[0];
     assert_eq!(c.timestamp_ns, 12_345);
@@ -381,9 +481,65 @@ fn test_read_breadcrumbs_with_entry() {
 #[test]
 fn test_raw_section_byte_lengths() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert_eq!(shm.raw_breadcrumb_bytes().len(), SECTION2_SIZE);
+    let owned = snapshot(&shm);
+    assert_eq!(owned.raw_breadcrumb_bytes_owned().len(), SECTION2_SIZE);
     assert_eq!(
-        shm.raw_context_bytes().len(),
+        owned.raw_context_bytes_owned().len(),
         size_of::<SutCrashContext>() + size_of::<SutCrashSettingsSnapshot>()
+    );
+}
+
+#[test]
+fn test_raw_section_bytes_are_detached_from_live_mapping() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    unsafe {
+        *shm.base_ptr().add(SECTION2_OFFSET) = 0x11;
+        *shm.base_ptr().add(CONTEXT_OFFSET) = 0x22;
+    }
+    let owned = snapshot(&shm);
+    unsafe {
+        *shm.base_ptr().add(SECTION2_OFFSET) = 0xAA;
+        *shm.base_ptr().add(CONTEXT_OFFSET) = 0xBB;
+    }
+
+    assert_eq!(owned.raw_breadcrumb_bytes_owned()[0], 0x11);
+    assert_eq!(owned.raw_context_bytes_owned()[0], 0x22);
+}
+
+#[test]
+fn test_owned_snapshot_survives_mapping_drop_and_arc_clone() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    unsafe {
+        write_val::<u64>(
+            shm.base_ptr(),
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, heartbeat_counter),
+            77,
+        );
+    }
+    let first = Arc::new(snapshot(&shm));
+    let cloned = first.clone();
+    unsafe {
+        write_val::<u64>(
+            shm.base_ptr(),
+            CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, heartbeat_counter),
+            88,
+        );
+    }
+
+    drop(shm);
+
+    assert_eq!(
+        first
+            .read_context()
+            .expect("first context")
+            .heartbeat_counter,
+        77
+    );
+    assert_eq!(
+        cloned
+            .read_context()
+            .expect("cloned context")
+            .heartbeat_counter,
+        77
     );
 }

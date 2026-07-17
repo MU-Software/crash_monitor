@@ -283,7 +283,7 @@ pub fn event_loop(
     let mut anr_state = match (pipeline.report_enabled(ReportType::Anr), &shm, &anr_config) {
         (true, Some(s), Some(cfg)) => Some((
             WatchdogState {
-                prev_heartbeat: s.read_heartbeat(),
+                prev_heartbeat: s.read_live_heartbeat(),
                 hang_accumulated_ms: 0,
                 cooldown_remaining_ms: 0,
             },
@@ -427,7 +427,7 @@ pub fn event_loop(
                         if *warmup_remaining > 0 {
                             *warmup_remaining = warmup_remaining.saturating_sub(elapsed);
                         } else {
-                            let heartbeat = s.read_heartbeat();
+                            let heartbeat = s.read_live_heartbeat();
                             if let Some(hang_duration_ms) = update_watchdog_state(
                                 state,
                                 heartbeat,

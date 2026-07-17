@@ -1,25 +1,21 @@
 //! Collector: Screenshots from shared memory.
 //!
-//! Reads RGBA pixel data from the screenshot ring buffer in shared memory.
+//! Reads RGBA pixel data from the event's owned shared-memory snapshot.
 //! Encoding to PNG is handled later by the `PNGConverter` post-processor.
-//! Self-contained — shm reading is in `SharedMemory`.
-
-use std::sync::Arc;
+//! Self-contained — payload parsing uses the event's `OwnedShmSnapshot`.
 
 use mach2::port::mach_port_t;
 
 use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
 };
-use crate::shm::SharedMemory;
-
-pub struct ScreenshotCollector {
-    shm: Arc<SharedMemory>,
-}
+#[derive(Default)]
+pub struct ScreenshotCollector;
 
 impl ScreenshotCollector {
-    pub fn new(shm: Arc<SharedMemory>) -> Self {
-        Self { shm }
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
     }
 }
 
@@ -44,7 +40,10 @@ impl Collector for ScreenshotCollector {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        let screenshots = self.shm.read_screenshots();
+        let snapshot = context
+            .shm_snapshot()
+            .ok_or_else(|| "owned shared-memory snapshot unavailable".to_string())?;
+        let screenshots = snapshot.read_screenshots();
         context.checkpoint()?;
         if screenshots.is_empty() {
             eprintln!("[monitor] ScreenshotCollector: no valid screenshots in shm");

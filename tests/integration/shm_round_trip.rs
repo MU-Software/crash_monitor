@@ -72,7 +72,10 @@ fn test_breadcrumbs_write_read() {
         write_val::<u32>(ring0, buf_size + 4, 1); // count
     }
 
-    let crumbs = shm.read_breadcrumbs();
+    let crumbs = shm
+        .snapshot_owned_until(None)
+        .expect("snapshot")
+        .read_breadcrumbs();
     assert_eq!(crumbs.len(), 1);
     assert_eq!(crumbs[0].timestamp_ns, 123_456_789);
     assert_eq!(crumbs[0].thread_id, 42);
@@ -119,7 +122,10 @@ fn test_breadcrumbs_multi_ring_merge_sort() {
         write_val::<u32>(ring1, buf_size + 4, 1); // count
     }
 
-    let crumbs = shm.read_breadcrumbs();
+    let crumbs = shm
+        .snapshot_owned_until(None)
+        .expect("snapshot")
+        .read_breadcrumbs();
     assert_eq!(crumbs.len(), 2);
     // Sorted by timestamp: 100 first, 200 second
     assert_eq!(crumbs[0].timestamp_ns, 100);
@@ -147,7 +153,11 @@ fn test_context_write_read() {
         write_c_str(ann0.add(32), "brush", 64);
     }
 
-    let ctx = shm.read_context().expect("read_context should succeed");
+    let ctx = shm
+        .snapshot_owned_until(None)
+        .expect("snapshot")
+        .read_context()
+        .expect("read_context should succeed");
     assert_eq!(ctx.annotations.len(), 1);
     assert_eq!(
         ctx.annotations[0],
@@ -158,7 +168,7 @@ fn test_context_write_read() {
 #[test]
 fn test_heartbeat_round_trip() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert_eq!(shm.read_heartbeat(), 0);
+    assert_eq!(shm.read_live_heartbeat(), 0);
 
     unsafe {
         write_val::<u64>(
@@ -168,7 +178,7 @@ fn test_heartbeat_round_trip() {
         );
     }
 
-    assert_eq!(shm.read_heartbeat(), 999);
+    assert_eq!(shm.read_live_heartbeat(), 999);
 }
 
 #[test]
@@ -190,7 +200,11 @@ fn test_settings_round_trip() {
         write_val::<i32>(settings, 20, 150);
     }
 
-    let s = shm.read_settings().expect("read_settings should succeed");
+    let s = shm
+        .snapshot_owned_until(None)
+        .expect("snapshot")
+        .read_settings()
+        .expect("read_settings should succeed");
     assert_eq!(s.world_bound_min, [-150, 0, -150]);
     assert_eq!(s.world_bound_max, [150, 300, 150]);
 }

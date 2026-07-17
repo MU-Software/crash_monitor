@@ -21,37 +21,29 @@ unsafe fn write_val<T: Copy>(base: *mut u8, offset: usize, val: T) {
 #[test]
 fn test_corrupted_magic_returns_empty() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert!(shm.validate());
 
     // Corrupt magic
     unsafe {
         write_val::<u32>(shm.base_ptr(), 0, 0xBAD_BEEF);
     }
-    assert!(!shm.validate());
-
-    assert!(shm.read_breadcrumbs().is_empty());
-    assert!(shm.read_context().is_none());
-    assert!(shm.read_settings().is_none());
-    assert!(shm.read_attachments().is_empty());
-    assert!(shm.read_screenshots().is_empty());
+    assert_eq!(
+        shm.snapshot_owned_until(None).unwrap_err(),
+        ShmSnapshotError::InvalidMagic { found: 0xBAD_BEEF }
+    );
 }
 
 #[test]
 fn test_corrupted_canary_returns_empty() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    assert!(shm.validate());
 
     // Corrupt canary at FOOTER_OFFSET
     unsafe {
         write_val::<u32>(shm.base_ptr(), FOOTER_OFFSET, 0x0000_0000);
     }
-    assert!(!shm.validate());
-
-    assert!(shm.read_breadcrumbs().is_empty());
-    assert!(shm.read_context().is_none());
-    assert!(shm.read_settings().is_none());
-    assert!(shm.read_attachments().is_empty());
-    assert!(shm.read_screenshots().is_empty());
+    assert_eq!(
+        shm.snapshot_owned_until(None).unwrap_err(),
+        ShmSnapshotError::InvalidCanary { found: 0 }
+    );
 }
 
 #[test]
@@ -67,7 +59,10 @@ fn test_ring_count_clamped() {
 
     // Should not crash -- ring_count is clamped to CRUMB_MAX_THREADS internally.
     // No valid entries were written, so the result should be empty.
-    let crumbs = shm.read_breadcrumbs();
+    let crumbs = shm
+        .snapshot_owned_until(None)
+        .expect("snapshot")
+        .read_breadcrumbs();
     assert!(
         crumbs.is_empty(),
         "no valid entries were written, got {}",

@@ -1,14 +1,13 @@
 //! Collector: Attachment files registered by the C app via `sut_crash_attach_file()`.
 //!
-//! The collector only snapshots registered paths from shared memory while the
-//! target is suspended. `AttachmentCopier` performs filesystem I/O later on
-//! the finalization worker.
+//! The collector reads registered paths from the event's owned shared-memory
+//! snapshot. The live mapping was copied while the target was suspended;
+//! `AttachmentCopier` performs filesystem I/O later on the finalization worker.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use mach2::port::mach_port_t;
 
@@ -16,8 +15,6 @@ use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor,
     Priority,
 };
-use crate::shm::SharedMemory;
-
 // ═══════════════════════════════════════════════════
 //  Raw data type
 // ═══════════════════════════════════════════════════
@@ -47,13 +44,13 @@ const MAX_WRITE_ATTEMPTS_PER_CHUNK: usize = 1024;
 /// Apply the same finite retry policy to interrupted reads.
 const MAX_READ_ATTEMPTS_PER_CHUNK: usize = 1024;
 
-pub struct AttachmentCollector {
-    shm: Arc<SharedMemory>,
-}
+#[derive(Default)]
+pub struct AttachmentCollector;
 
 impl AttachmentCollector {
-    pub fn new(shm: Arc<SharedMemory>) -> Self {
-        Self { shm }
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
     }
 }
 
@@ -78,7 +75,10 @@ impl Collector for AttachmentCollector {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        data.raw.attachment_registrations = self.shm.read_attachments();
+        let snapshot = context
+            .shm_snapshot()
+            .ok_or_else(|| "owned shared-memory snapshot unavailable".to_string())?;
+        data.raw.attachment_registrations = snapshot.read_attachments();
         context.checkpoint()?;
         Ok(())
     }

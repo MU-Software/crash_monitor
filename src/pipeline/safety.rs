@@ -67,6 +67,11 @@ impl CancellationToken {
 pub struct PluginContext {
     deadline: Option<Instant>,
     cancellation: CancellationToken,
+    /// Immutable shared-memory payload captured before the target resumed.
+    ///
+    /// Keeping this on the per-invocation context prevents collectors from
+    /// retaining or reaching back into the live mapping after capture.
+    shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
     subprocess_boundary: Arc<AtomicU8>,
     subprocess_cleanup_failure: Arc<OnceLock<String>>,
 }
@@ -81,6 +86,7 @@ impl PluginContext {
         Self {
             deadline: None,
             cancellation: CancellationToken::new(),
+            shm_snapshot: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
         }
@@ -94,6 +100,7 @@ impl PluginContext {
             // unrepresentable deadline as already expired instead.
             deadline: Some(now.checked_add(timeout).unwrap_or(now)),
             cancellation: CancellationToken::new(),
+            shm_snapshot: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
         }
@@ -112,9 +119,29 @@ impl PluginContext {
         Self {
             deadline: timeout.map(|timeout| now.checked_add(timeout).unwrap_or(now)),
             cancellation,
+            shm_snapshot: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Attach the immutable shared-memory payload for this plugin invocation.
+    #[must_use]
+    pub(crate) fn with_shm_snapshot(
+        mut self,
+        snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
+    ) -> Self {
+        self.shm_snapshot = snapshot;
+        self
+    }
+
+    /// Return the shared-memory payload captured before task resume.
+    ///
+    /// `None` means shared memory was unavailable, invalid, or could not be
+    /// snapshotted under an owned task suspension.
+    #[must_use]
+    pub fn shm_snapshot(&self) -> Option<&crate::shm::OwnedShmSnapshot> {
+        self.shm_snapshot.as_deref()
     }
 
     /// Return a context that shares cancellation state and cannot outlive the
@@ -129,6 +156,7 @@ impl PluginContext {
                     .map_or(local_deadline, |deadline| deadline.min(local_deadline)),
             ),
             cancellation: self.cancellation.clone(),
+            shm_snapshot: self.shm_snapshot.clone(),
             subprocess_boundary: self.subprocess_boundary.clone(),
             subprocess_cleanup_failure: self.subprocess_cleanup_failure.clone(),
         }

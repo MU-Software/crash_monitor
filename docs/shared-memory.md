@@ -29,6 +29,22 @@ their offsets are derived from the struct sizes (never hand-coded):
 
 The region is a few tens of MB, dominated by the screenshot ring.
 
+## Capture ownership boundary
+
+The live mapping is not exposed as ordinary Rust references or borrowed byte
+slices. After the monitor successfully suspends the child, it copies the entire
+schema-sized mapping through bounded raw-pointer chunks into an immutable owned
+snapshot. Breadcrumb, context, settings, attachment, screenshot, and Stage 1
+raw-dump readers consume only that snapshot. The task may therefore resume even
+if a capture worker is still parsing payload bytes.
+
+If suspension fails under the fatal-crash best-effort policy, the monitor skips
+all non-atomic SHM payload reads. The watchdog heartbeat is the sole live-state
+exception and is loaded through a dedicated acquire-atomic API. Publication and
+torn-snapshot detection are specified in the next schema revision; until that
+producer contract is active, suspension is what makes the full payload copy
+stable.
+
 ### Header (monitor-owned, 64 bytes)
 
 Written by the monitor when it creates the region; the producer only skips past
