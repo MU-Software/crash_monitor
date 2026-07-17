@@ -1,6 +1,6 @@
 use super::*;
 use crate::pipeline::report::{self, CrashReport, ReportHeader};
-use crate::pipeline::{CrashEvent, ReportResult, ReportType};
+use crate::pipeline::{CrashEvent, PluginContext, ReportResult, ReportType};
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
@@ -94,7 +94,7 @@ fn test_submit_patches_report() {
         session: None,
     };
 
-    let res = pp.process(&event, &mut result);
+    let res = pp.process(&event, &mut result, &PluginContext::without_deadline());
     assert!(res.is_ok());
 
     // Verify the report was patched.
@@ -118,7 +118,7 @@ fn test_skip_does_not_modify_report() {
         session: None,
     };
 
-    let res = pp.process(&event, &mut result);
+    let res = pp.process(&event, &mut result, &PluginContext::without_deadline());
     assert!(res.is_ok());
 
     // Report should be unchanged.
@@ -127,7 +127,7 @@ fn test_skip_does_not_modify_report() {
 }
 
 #[test]
-fn test_dialog_crash_does_not_break_pipeline() {
+fn test_dialog_crash_is_reported_without_modifying_report() {
     let dir = tempfile::tempdir().unwrap();
     let script = make_mock_script(dir.path(), "mock_crash.sh", "kill -SEGV $$");
     let report_path = write_test_report(dir.path());
@@ -141,8 +141,11 @@ fn test_dialog_crash_does_not_break_pipeline() {
         session: None,
     };
 
-    let res = pp.process(&event, &mut result);
-    assert!(res.is_ok()); // Must not propagate dialog crash.
+    let res = pp.process(&event, &mut result, &PluginContext::without_deadline());
+    assert!(
+        matches!(res, Err(error) if error.contains("FeedbackDialog exited")),
+        "a crashed dialog must be visible in plugin diagnostics"
+    );
 
     // Report should be unchanged.
     let after = fs::read_to_string(&report_path).unwrap();
@@ -175,10 +178,18 @@ fn test_dialog_timeout_kills_child() {
     };
 
     let start = std::time::Instant::now();
-    let res = pp.process(&event, &mut result);
+    let context = PluginContext::without_deadline();
+    let res = pp.process(&event, &mut result, &context);
     let elapsed = start.elapsed();
 
-    assert!(res.is_ok());
+    assert!(
+        matches!(res, Err(error) if error.contains("timed out")),
+        "timeout must not be hidden as success"
+    );
+    assert!(
+        context.is_timed_out(),
+        "nested subprocess timeout must propagate to pipeline diagnostics"
+    );
     // Should have timed out (3s + poll/kill margin), not slept the full 999s.
     assert!(elapsed.as_secs() < 10, "Took too long: {elapsed:?}");
 
@@ -224,6 +235,6 @@ fn test_no_report_path_skips_dialog() {
         session: None,
     };
 
-    let res = pp.process(&event, &mut result);
+    let res = pp.process(&event, &mut result, &PluginContext::without_deadline());
     assert!(res.is_ok());
 }

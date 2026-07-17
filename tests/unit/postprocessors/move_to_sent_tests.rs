@@ -1,5 +1,7 @@
-use crate::pipeline::{CrashEvent, Plugin, PostProcessor, ReportResult, ReportType};
+use super::{MAX_MOVE_FILE_BYTES, STREAM_BUFFER_BYTES, move_file_with};
+use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
 use crate::postprocessors::MoveToSent;
+use std::io::Write as _;
 use std::path::PathBuf;
 
 fn make_event() -> CrashEvent {
@@ -49,7 +51,13 @@ fn test_moves_all_basename_prefixed_files() {
     let paths = write_report_family(&pending, "crash_20260524_1234");
     let mover = MoveToSent::with_dir(sent.clone());
     let mut result = make_result(paths[0].clone(), Some(paths[1].clone()));
-    mover.process(&make_event(), &mut result).unwrap();
+    mover
+        .process(
+            &make_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
 
     // Original files gone from pending
     for p in &paths {
@@ -89,7 +97,13 @@ fn test_does_not_move_other_basenames() {
 
     let mover = MoveToSent::with_dir(sent.clone());
     let mut result = make_result(pending.join("crash_a_1.json"), None);
-    mover.process(&make_event(), &mut result).unwrap();
+    mover
+        .process(
+            &make_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
 
     for p in &other {
         assert!(
@@ -114,7 +128,13 @@ fn test_avoids_partial_prefix_collision() {
 
     let mover = MoveToSent::with_dir(sent.clone());
     let mut result = make_result(pending.join("crash_a_1234.json"), None);
-    mover.process(&make_event(), &mut result).unwrap();
+    mover
+        .process(
+            &make_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
 
     assert!(sent.join("crash_a_1234.json").exists());
     assert!(
@@ -131,7 +151,13 @@ fn test_no_json_path_is_noop() {
         json_path: None,
         session: None,
     };
-    mover.process(&make_event(), &mut result).unwrap();
+    mover
+        .process(
+            &make_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -139,4 +165,248 @@ fn test_plugin_metadata() {
     let mover = MoveToSent::new();
     assert_eq!(mover.name(), "MoveToSent");
     assert!(mover.is_available());
+}
+
+#[test]
+fn test_cancellation_after_json_move_commits_new_result_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pending = tmp.path().join("pending");
+    let sent = tmp.path().join("sent");
+    let paths = write_report_family(&pending, "crash_cancel_json");
+    let json_path = paths[0].clone();
+    let mut result = make_result(json_path.clone(), Some(paths[1].clone()));
+    let context = PluginContext::without_deadline();
+    let cancellation = context.cancellation_token();
+
+    let error = MoveToSent::with_dir(sent.clone())
+        .process_with_after_move(&mut result, &context, |source, _| {
+            if source == json_path {
+                cancellation.cancel();
+            }
+        })
+        .unwrap_err();
+
+    assert_eq!(error, "plugin deadline reached");
+    assert_eq!(
+        result.json_path.as_deref(),
+        Some(sent.join("crash_cancel_json.json").as_path())
+    );
+    assert!(!json_path.exists());
+    assert!(sent.join("crash_cancel_json.json").exists());
+}
+
+#[test]
+fn test_cancellation_after_raw_move_commits_new_result_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pending = tmp.path().join("pending");
+    let sent = tmp.path().join("sent");
+    let paths = write_report_family(&pending, "crash_cancel_raw");
+    let raw_path = paths[1].clone();
+    let mut result = make_result(paths[0].clone(), Some(raw_path.clone()));
+    let context = PluginContext::without_deadline();
+    let cancellation = context.cancellation_token();
+
+    let error = MoveToSent::with_dir(sent.clone())
+        .process_with_after_move(&mut result, &context, |source, _| {
+            if source == raw_path {
+                cancellation.cancel();
+            }
+        })
+        .unwrap_err();
+
+    assert_eq!(error, "plugin deadline reached");
+    assert_eq!(
+        result.raw_path.as_deref(),
+        Some(sent.join("crash_cancel_raw_raw.bin").as_path())
+    );
+    assert!(!raw_path.exists());
+    assert!(sent.join("crash_cancel_raw_raw.bin").exists());
+}
+
+#[test]
+fn test_failed_json_move_does_not_patch_result_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pending = tmp.path().join("pending");
+    let sent = tmp.path().join("sent");
+    let paths = write_report_family(&pending, "crash_move_failure");
+    let json_path = paths[0].clone();
+    std::fs::create_dir_all(sent.join("crash_move_failure.json")).unwrap();
+    let mut result = make_result(json_path.clone(), Some(paths[1].clone()));
+
+    MoveToSent::with_dir(sent)
+        .process(
+            &make_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert_eq!(result.json_path.as_deref(), Some(json_path.as_path()));
+    assert!(
+        json_path.exists(),
+        "failed move must retain its source file"
+    );
+}
+
+#[test]
+fn test_non_exdev_rename_error_does_not_fallback_to_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    std::fs::write(&source, "payload").unwrap();
+
+    let error = move_file_with(
+        &source,
+        &destination,
+        &PluginContext::without_deadline(),
+        |_, _| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        || {},
+        || {},
+    )
+    .unwrap_err();
+
+    assert!(error.contains("rename"));
+    assert!(source.exists());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn test_exdev_fallback_streams_to_tmp_then_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    let payload = vec![0x5a; STREAM_BUFFER_BYTES * 2 + 17];
+    std::fs::write(&source, &payload).unwrap();
+    let mut chunks = 0_usize;
+
+    move_file_with(
+        &source,
+        &destination,
+        &PluginContext::without_deadline(),
+        |_, _| Err(std::io::Error::from_raw_os_error(nix::libc::EXDEV)),
+        || chunks += 1,
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(chunks, 3, "copy must proceed in fixed-size chunks");
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), payload);
+    assert_no_move_temporary_files(dir.path());
+}
+
+#[test]
+fn test_exdev_fallback_rejects_source_growth_after_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    let payload = b"original payload";
+    std::fs::write(&source, payload).unwrap();
+    let source_for_hook = source.clone();
+
+    let error = move_file_with(
+        &source,
+        &destination,
+        &PluginContext::without_deadline(),
+        |_, _| Err(std::io::Error::from_raw_os_error(nix::libc::EXDEV)),
+        || {},
+        || {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(source_for_hook)
+                .unwrap()
+                .write_all(b" grew")
+                .unwrap();
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("source changed during copy"));
+    assert_eq!(std::fs::read(&source).unwrap(), b"original payload grew");
+    assert!(!destination.exists());
+    assert_no_move_temporary_files(dir.path());
+}
+
+#[test]
+fn test_exdev_fallback_cancellation_removes_tmp_and_preserves_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    let payload = vec![0x3c; STREAM_BUFFER_BYTES * 2];
+    std::fs::write(&source, &payload).unwrap();
+    let context = PluginContext::without_deadline();
+    let cancellation = context.cancellation_token();
+
+    let error = move_file_with(
+        &source,
+        &destination,
+        &context,
+        |_, _| Err(std::io::Error::from_raw_os_error(nix::libc::EXDEV)),
+        || cancellation.cancel(),
+        || {},
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "plugin deadline reached");
+    assert_eq!(std::fs::read(&source).unwrap(), payload);
+    assert!(!destination.exists());
+    assert_no_move_temporary_files(dir.path());
+}
+
+#[test]
+fn test_move_rejects_oversized_file_before_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    std::fs::File::create(&source)
+        .unwrap()
+        .set_len(MAX_MOVE_FILE_BYTES + 1)
+        .unwrap();
+
+    let error = move_file_with(
+        &source,
+        &destination,
+        &PluginContext::without_deadline(),
+        |_, _| panic!("rename must not run for an oversized source"),
+        || {},
+        || {},
+    )
+    .unwrap_err();
+
+    assert!(error.contains("exceeds move limit"));
+    assert!(source.exists());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn test_move_rejects_symlink_before_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.json");
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    std::fs::write(&target, "payload").unwrap();
+    std::os::unix::fs::symlink(&target, &source).unwrap();
+
+    let error = move_file_with(
+        &source,
+        &destination,
+        &PluginContext::without_deadline(),
+        |_, _| panic!("rename must not run for a symlink"),
+        || {},
+        || {},
+    )
+    .unwrap_err();
+
+    assert!(error.contains("not a regular file"));
+    assert!(source.exists());
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "payload");
+}
+
+fn assert_no_move_temporary_files(dir: &std::path::Path) {
+    let has_temporary_file = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().contains(".move-"));
+    assert!(!has_temporary_file, "move temporary file leaked");
 }

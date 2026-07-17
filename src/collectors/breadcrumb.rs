@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use mach2::port::mach_port_t;
 
-use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, Priority};
+use crate::pipeline::{
+    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+};
 use crate::shm::SharedMemory;
 
 // ═══════════════════════════════════════════════════
@@ -29,6 +31,9 @@ impl Plugin for BreadcrumbCollector {
     fn name(&self) -> &'static str {
         "BreadcrumbCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
@@ -40,8 +45,11 @@ impl Collector for BreadcrumbCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String> {
+        context.checkpoint()?;
         let crumbs = self.shm.read_breadcrumbs();
+        context.checkpoint()?;
         if crumbs.is_empty() {
             eprintln!("[monitor] BreadcrumbCollector: no breadcrumbs found (shm may be empty)");
         } else {

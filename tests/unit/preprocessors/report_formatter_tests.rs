@@ -231,6 +231,11 @@ fn test_build_diagnostics_json_records_all_statuses() {
         PluginStatus::Error("boom".into()),
         Duration::from_millis(2),
     );
+    diag.record(
+        "TimeoutPlugin",
+        PluginStatus::TimedOut,
+        Duration::from_millis(9),
+    );
     diag.record_immediate("SkipPlugin", PluginStatus::Skipped("n/a".into()));
 
     let json = build_diagnostics_json(&diag).expect("non-empty → Some");
@@ -238,6 +243,8 @@ fn test_build_diagnostics_json_records_all_statuses() {
     assert_eq!(plugins["OkPlugin"]["status"], "ok");
     assert_eq!(plugins["ErrPlugin"]["status"], "error");
     assert_eq!(plugins["ErrPlugin"]["error"], "boom");
+    assert_eq!(plugins["TimeoutPlugin"]["status"], "timed_out");
+    assert_eq!(plugins["TimeoutPlugin"]["duration_ms"], 9);
     assert_eq!(plugins["SkipPlugin"]["status"], "skipped");
     assert_eq!(plugins["SkipPlugin"]["reason"], "n/a");
 }
@@ -255,7 +262,7 @@ fn test_format_threads_with_registers_backtrace_and_stack() {
         registers: Some(regs),
         backtrace: vec![0x1000],
         stack_capture: Some(RawStackCapture {
-            sp: 0x16d4f_e000,
+            sp: 0x0001_6d4f_e000,
             bytes: vec![1, 2, 3, 4],
         }),
     }];

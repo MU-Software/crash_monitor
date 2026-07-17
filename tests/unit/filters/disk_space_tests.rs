@@ -1,5 +1,5 @@
 use crate::filters::DiskSpaceFilter;
-use crate::pipeline::{CrashEvent, Filter, Plugin, ReportType};
+use crate::pipeline::{CrashEvent, Filter, Plugin, PluginContext, ReportType};
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
@@ -21,7 +21,11 @@ fn test_passes_when_enough_space() {
     // 100 MB should be available on any dev machine
     let filter = DiskSpaceFilter::new(100);
     let event = dummy_event();
-    assert!(filter.should_process(&event).unwrap());
+    assert!(
+        filter
+            .should_process(&event, &PluginContext::without_deadline())
+            .unwrap()
+    );
 }
 
 #[test]
@@ -29,7 +33,11 @@ fn test_blocks_when_threshold_absurd() {
     // No system has u64::MAX / (1024*1024) MB free
     let filter = DiskSpaceFilter::new(u64::MAX / (1024 * 1024));
     let event = dummy_event();
-    assert!(!filter.should_process(&event).unwrap());
+    assert!(
+        !filter
+            .should_process(&event, &PluginContext::without_deadline())
+            .unwrap()
+    );
 }
 
 #[test]

@@ -52,3 +52,32 @@ fn test_vm_enum_skip_on_error() {
         _ => panic!("expected SkipPage"),
     }
 }
+
+#[test]
+fn test_vm_enum_query_budget_bounds_failed_queries() {
+    assert!(!vm_enum_budget_exhausted(0, 0));
+    assert!(!vm_enum_budget_exhausted(
+        MAX_VM_REGION_QUERY_ATTEMPTS - 1,
+        0
+    ));
+    assert!(vm_enum_budget_exhausted(MAX_VM_REGION_QUERY_ATTEMPTS, 0));
+}
+
+#[test]
+fn test_vm_enum_consecutive_failure_budget_is_independent() {
+    assert!(!vm_enum_budget_exhausted(
+        0,
+        MAX_CONSECUTIVE_VM_REGION_FAILURES - 1
+    ));
+    assert!(vm_enum_budget_exhausted(
+        0,
+        MAX_CONSECUTIVE_VM_REGION_FAILURES
+    ));
+}
+
+#[test]
+fn test_vm_enum_requires_forward_address_progress() {
+    assert!(vm_enum_made_progress(0x1000, 0x2000));
+    assert!(!vm_enum_made_progress(0x1000, 0x1000));
+    assert!(!vm_enum_made_progress(u64::MAX, u64::MAX));
+}

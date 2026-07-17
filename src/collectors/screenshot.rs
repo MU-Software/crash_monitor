@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use mach2::port::mach_port_t;
 
-use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, Priority};
+use crate::pipeline::{
+    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+};
 use crate::shm::SharedMemory;
 
 pub struct ScreenshotCollector {
@@ -25,6 +27,9 @@ impl Plugin for ScreenshotCollector {
     fn name(&self) -> &'static str {
         "ScreenshotCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Medium
     }
@@ -36,8 +41,11 @@ impl Collector for ScreenshotCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String> {
+        context.checkpoint()?;
         let screenshots = self.shm.read_screenshots();
+        context.checkpoint()?;
         if screenshots.is_empty() {
             eprintln!("[monitor] ScreenshotCollector: no valid screenshots in shm");
         } else {

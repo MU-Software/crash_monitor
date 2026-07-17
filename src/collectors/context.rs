@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use mach2::port::mach_port_t;
 
-use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, Priority};
+use crate::pipeline::{
+    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+};
 use crate::shm::SharedMemory;
 
 // ═══════════════════════════════════════════════════
@@ -29,6 +31,9 @@ impl Plugin for ContextCollector {
     fn name(&self) -> &'static str {
         "ContextCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
@@ -40,9 +45,13 @@ impl Collector for ContextCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String> {
+        context.checkpoint()?;
         data.raw.crash_context = self.shm.read_context();
+        context.checkpoint()?;
         data.raw.settings_snapshot = self.shm.read_settings();
+        context.checkpoint()?;
 
         if data.raw.crash_context.is_some() {
             eprintln!("[monitor] ContextCollector: crash context loaded from shm");

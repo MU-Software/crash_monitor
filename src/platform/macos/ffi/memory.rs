@@ -7,7 +7,9 @@ use mach2::task_info::{TASK_VM_INFO, task_vm_info};
 use mach2::vm::{mach_vm_deallocate, mach_vm_read, mach_vm_region};
 use mach2::vm_region::{VM_REGION_EXTENDED_INFO, vm_region_extended_info};
 
-use crate::platform::macos::memory::{VmEnumAction, vm_enum_action};
+use crate::platform::macos::memory::{
+    VmEnumAction, vm_enum_action, vm_enum_budget_exhausted, vm_enum_made_progress,
+};
 use crate::platform::macos::types::{MachError, TaskVmSummary, VmRegionInfo, mach_result};
 
 use super::types::self_task;
@@ -85,31 +87,58 @@ pub fn vm_region_query(task: mach_port_t, address: &mut u64) -> Result<VmRegionI
 /// Enumerate all VM regions in the target task's address space.
 /// Returns the regions and whether the list was truncated.
 /// Individual region query failures are skipped (logged to stderr).
-#[must_use]
-pub fn enumerate_vm_regions(task: mach_port_t) -> (Vec<VmRegionInfo>, bool) {
+///
+/// # Errors
+/// Returns an error when the plugin deadline or cancellation token fires.
+pub fn enumerate_vm_regions(
+    task: mach_port_t,
+    mut checkpoint: impl FnMut() -> Result<(), String>,
+) -> Result<(Vec<VmRegionInfo>, bool), String> {
     let mut regions = Vec::new();
     let mut address: u64 = 0;
+    let mut query_attempts = 0;
+    let mut consecutive_failures = 0;
 
     loop {
+        checkpoint()?;
+        if vm_enum_budget_exhausted(query_attempts, consecutive_failures) {
+            eprintln!(
+                "[monitor] VM region enumeration budget exhausted after {query_attempts} queries"
+            );
+            return Ok((regions, true));
+        }
+
+        query_attempts += 1;
         let mut query_addr = address;
         let (query_result, maybe_info) = match vm_region_query(task, &mut query_addr) {
             Ok(info) => (Ok((info.size, query_addr)), Some(info)),
             Err(e) => (Err((e.kern_return, address)), None),
         };
+        checkpoint()?;
 
         match vm_enum_action(regions.len(), query_result) {
             VmEnumAction::AddRegion { next_address } => {
+                consecutive_failures = 0;
+                if !vm_enum_made_progress(address, next_address) {
+                    eprintln!("[monitor] VM region enumeration made no address progress");
+                    return Ok((regions, true));
+                }
                 if let Some(info) = maybe_info {
                     regions.push(info);
                 }
                 address = next_address;
             }
-            VmEnumAction::Done => return (regions, false),
+            VmEnumAction::Done => return Ok((regions, false)),
             VmEnumAction::SkipPage { next_address } => {
                 eprintln!("[monitor] vm_region skip at {address:#x}");
+                consecutive_failures += 1;
+                if !vm_enum_made_progress(address, next_address) {
+                    eprintln!("[monitor] VM region enumeration made no address progress");
+                    return Ok((regions, true));
+                }
                 address = next_address;
             }
-            VmEnumAction::Truncated => return (regions, true),
+            VmEnumAction::Truncated => return Ok((regions, true)),
         }
     }
 }

@@ -108,6 +108,17 @@ fn test_diagnostics_not_succeeded() {
 }
 
 #[test]
+fn test_diagnostics_records_timeout_separately_from_error() {
+    let mut diagnostics = Diagnostics::new();
+    diagnostics.record("slow", PluginStatus::TimedOut, Duration::from_millis(25));
+
+    let entry = diagnostics.plugins.first().expect("timeout diagnostic");
+    assert!(matches!(entry.status, PluginStatus::TimedOut));
+    assert_eq!(entry.duration_ms, 25);
+    assert!(!diagnostics.succeeded("slow"));
+}
+
+#[test]
 fn test_diagnostics_pipeline_duration() {
     let diag = Diagnostics::new();
     std::thread::sleep(Duration::from_millis(1));

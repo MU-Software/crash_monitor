@@ -2,10 +2,21 @@
 //!
 //! Keeps the most recent 50% of lines to preserve recent session history.
 
-use crate::pipeline::{CrashEvent, Plugin, PostProcessor, Priority, ReportResult};
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use crate::pipeline::{
+    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+
+// Rotation may read at most this much beyond the configured trigger. This keeps
+// the operation bounded without making thresholds at or above 8 MiB impossible
+// to satisfy.
+const MAX_LOG_ROTATION_OVERAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
+const MAX_LOG_LINES: usize = 100_000;
+const LOG_IO_CHUNK_BYTES: usize = 16 * 1024;
 
 pub struct LogRotator {
     max_size_bytes: u64,
@@ -46,43 +57,165 @@ impl Plugin for LogRotator {
     fn name(&self) -> &'static str {
         "LogRotator"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Low
     }
 }
 
 impl PostProcessor for LogRotator {
-    fn process(&self, _event: &CrashEvent, _result: &mut ReportResult) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        context.checkpoint()?;
         let log_path = self.log_path()?;
 
-        let Ok(metadata) = fs::metadata(&log_path) else {
-            return Ok(()); // File doesn't exist — nothing to rotate
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
+            .open(&log_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("cannot open sessions.jsonl: {error}")),
         };
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("cannot stat sessions.jsonl: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err("sessions.jsonl is not a regular file".to_string());
+        }
 
         if metadata.len() <= self.max_size_bytes {
             return Ok(());
         }
+        let max_rotation_overage = u64::try_from(MAX_LOG_ROTATION_OVERAGE_BYTES)
+            .map_err(|_| "log rotation byte limit does not fit u64".to_string())?;
+        let max_rotation_bytes = self.max_size_bytes.saturating_add(max_rotation_overage);
+        if metadata.len() > max_rotation_bytes {
+            return Err(format!(
+                "sessions.jsonl exceeds configured threshold plus rotation overage ({max_rotation_bytes} bytes)"
+            ));
+        }
+        let max_rotation_bytes = usize::try_from(max_rotation_bytes)
+            .map_err(|_| "configured log threshold does not fit usize".to_string())?;
 
-        // Read all lines, keep the most recent 50%
-        let file =
-            fs::File::open(&log_path).map_err(|e| format!("cannot open sessions.jsonl: {e}"))?;
-        let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
+        // The byte vector is explicitly bounded, including a cap+1 growth
+        // probe. Each read boundary observes cooperative cancellation.
+        let bytes = read_bounded_log(&mut file, max_rotation_bytes, context)?;
+        if bytes
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.len() > MAX_LOG_LINE_BYTES)
+        {
+            return Err(format!(
+                "sessions.jsonl contains a line larger than {MAX_LOG_LINE_BYTES} bytes"
+            ));
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|error| format!("sessions.jsonl is not UTF-8: {error}"))?;
+        let mut lines = Vec::new();
+        for line in text.lines() {
+            context.checkpoint()?;
+            if lines.len() == MAX_LOG_LINES {
+                return Err(format!(
+                    "sessions.jsonl exceeds line-count limit ({MAX_LOG_LINES})"
+                ));
+            }
+            lines.push(line);
+        }
 
         let keep_from = lines.len() / 2;
         let kept = &lines[keep_from..];
-
-        // Write to tmp, then rename
-        let tmp_path = log_path.with_extension("jsonl.tmp");
-        let mut tmp = fs::File::create(&tmp_path).map_err(|e| format!("cannot create tmp: {e}"))?;
-        for line in kept {
-            writeln!(tmp, "{line}").map_err(|e| format!("write failed: {e}"))?;
-        }
-        drop(tmp);
-
-        fs::rename(&tmp_path, &log_path).map_err(|e| format!("rename failed: {e}"))?;
-
-        Ok(())
+        replace_log_atomically(&log_path, kept, context)
     }
+}
+
+fn read_bounded_log(
+    file: &mut File,
+    max_rotation_bytes: usize,
+    context: &PluginContext,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; LOG_IO_CHUNK_BYTES];
+    loop {
+        context.checkpoint()?;
+        let remaining = max_rotation_bytes
+            .saturating_add(1)
+            .saturating_sub(bytes.len());
+        if remaining == 0 {
+            return Err(format!(
+                "sessions.jsonl exceeds rotation input limit ({max_rotation_bytes} bytes)"
+            ));
+        }
+        let slice_len = remaining.min(chunk.len());
+        match file.read(&mut chunk[..slice_len]) {
+            Ok(0) => return Ok(bytes),
+            Ok(read) => {
+                bytes.extend_from_slice(&chunk[..read]);
+                if bytes.len() > max_rotation_bytes {
+                    return Err(format!(
+                        "sessions.jsonl exceeds rotation input limit ({max_rotation_bytes} bytes)"
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(format!("cannot read sessions.jsonl: {error}")),
+        }
+    }
+}
+
+fn replace_log_atomically(
+    log_path: &Path,
+    lines: &[&str],
+    context: &PluginContext,
+) -> Result<(), String> {
+    let file_name = log_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("log path has no valid filename: '{}'", log_path.display()))?;
+    let tmp_path = log_path.with_file_name(format!(
+        ".{file_name}.log-rotate-{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    context.checkpoint()?;
+    let mut tmp = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&tmp_path)
+        .map_err(|error| format!("cannot create rotation tmp: {error}"))?;
+    let write_result = (|| {
+        for line in lines {
+            for chunk in line.as_bytes().chunks(LOG_IO_CHUNK_BYTES) {
+                context.checkpoint()?;
+                tmp.write_all(chunk)
+                    .map_err(|error| format!("rotation write failed: {error}"))?;
+            }
+            context.checkpoint()?;
+            tmp.write_all(b"\n")
+                .map_err(|error| format!("rotation write failed: {error}"))?;
+        }
+        tmp.flush()
+            .map_err(|error| format!("rotation flush failed: {error}"))?;
+        context.checkpoint()?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = fs::rename(&tmp_path, log_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("rotation rename failed: {error}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

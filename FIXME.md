@@ -35,11 +35,11 @@
 
 ### P0-03. process-global SIGALRM timeout을 안전한 deadline 모델로 교체한다
 
-- [ ] `alarm()`/SIGALRM 기반 plugin timeout을 제거한다.
-- [ ] 비신뢰·blocking plugin은 kill 가능한 별도 process에서 실행하고, 협력적 plugin은 deadline/cancellation token을 사용한다.
-- [ ] 동시 plugin 실행, CPU-bound loop, EINTR 재시도 I/O, sleep/hung worker를 실제 subprocess로 검증한다.
-- [ ] timeout 결과를 `TimedOut`으로 진단하고 기존 signal handler를 변경하지 않게 한다.
-- [ ] 전환 전까지 문서에는 일부 interruptible syscall만 중단할 수 있다는 현재 보장 범위를 정확히 적는다.
+- [x] `alarm()`/SIGALRM 기반 plugin timeout을 제거한다.
+- [x] 비신뢰·blocking plugin은 kill 가능한 별도 process에서 실행하고, 협력적 plugin은 deadline/cancellation token을 사용한다.
+- [x] 동시 plugin 실행, CPU-bound loop, EINTR 재시도 I/O, sleep/hung worker를 실제 subprocess로 검증한다.
+- [x] timeout 결과를 `TimedOut`으로 진단하고 기존 signal handler를 변경하지 않게 한다.
+- [x] 전환 전까지 문서에는 일부 interruptible syscall만 중단할 수 있다는 현재 보장 범위를 정확히 적는다.
 
 범위: `src/pipeline/safety.rs`, timeout tests, `docs/pipeline.md`. 주의: signal이 현재 Mach receive를 `MACH_RCV_INTERRUPTED`로 끝낸다는 인과는 무효다.
 

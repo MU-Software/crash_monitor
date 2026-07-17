@@ -3,7 +3,7 @@ use crate::collectors::RawData;
 use crate::collectors::dylib::RawImageData;
 use crate::collectors::thread::RawThreadData;
 use crate::pipeline::types::CollectedData;
-use crate::pipeline::{CrashEvent, Plugin, PreProcessor, ReportType};
+use crate::pipeline::{CrashEvent, Plugin, PluginContext, PreProcessor, ReportType};
 use std::collections::BTreeMap;
 
 fn make_event() -> CrashEvent {
@@ -85,8 +85,8 @@ fn test_same_backtrace_same_fingerprint() {
         symbols,
     );
 
-    let _ = fp.process(&event, &mut data1);
-    let _ = fp.process(&event, &mut data2);
+    let _ = fp.process(&event, &mut data1, &PluginContext::without_deadline());
+    let _ = fp.process(&event, &mut data2, &PluginContext::without_deadline());
 
     assert!(data1.fingerprint.is_some());
     assert_eq!(data1.fingerprint, data2.fingerprint);
@@ -105,8 +105,8 @@ fn test_different_backtrace_different_fingerprint() {
     let mut data1 = make_data_with_backtrace(vec![0x1_0000_1000], true, vec![app_image()], sym1);
     let mut data2 = make_data_with_backtrace(vec![0x1_0000_3000], true, vec![app_image()], sym2);
 
-    let _ = fp.process(&event, &mut data1);
-    let _ = fp.process(&event, &mut data2);
+    let _ = fp.process(&event, &mut data1, &PluginContext::without_deadline());
+    let _ = fp.process(&event, &mut data2, &PluginContext::without_deadline());
 
     assert!(data1.fingerprint.is_some());
     assert!(data2.fingerprint.is_some());
@@ -136,8 +136,8 @@ fn test_offset_ignored_in_fingerprint() {
         s
     });
 
-    let _ = fp.process(&event, &mut data1);
-    let _ = fp.process(&event, &mut data2);
+    let _ = fp.process(&event, &mut data1, &PluginContext::without_deadline());
+    let _ = fp.process(&event, &mut data2, &PluginContext::without_deadline());
 
     assert_eq!(data1.fingerprint, data2.fingerprint);
 }
@@ -159,14 +159,14 @@ fn test_system_frames_excluded() {
         symbols,
     );
 
-    let _ = fp.process(&event, &mut data);
+    let _ = fp.process(&event, &mut data, &PluginContext::without_deadline());
 
     // Fingerprint should be based only on app_func, not pthread_create
     let mut symbols2 = BTreeMap::new();
     symbols2.insert(0x1_0000_1000, "app_func".into());
     let mut data2 =
         make_data_with_backtrace(vec![0x1_0000_1000], true, vec![app_image()], symbols2);
-    let _ = fp.process(&event, &mut data2);
+    let _ = fp.process(&event, &mut data2, &PluginContext::without_deadline());
 
     assert_eq!(data.fingerprint, data2.fingerprint);
 }
@@ -178,7 +178,7 @@ fn test_empty_backtrace_produces_fingerprint() {
 
     let mut data = make_data_with_backtrace(vec![], true, vec![app_image()], BTreeMap::new());
 
-    let _ = fp.process(&event, &mut data);
+    let _ = fp.process(&event, &mut data, &PluginContext::without_deadline());
     // Even an empty backtrace should produce a fingerprint (hash of empty input)
     assert!(data.fingerprint.is_some());
 }
@@ -199,7 +199,7 @@ fn test_no_crashed_thread_uses_thread_0() {
         symbols,
     );
 
-    let _ = fp.process(&event, &mut data);
+    let _ = fp.process(&event, &mut data, &PluginContext::without_deadline());
     assert!(data.fingerprint.is_some());
 }
 
@@ -209,7 +209,7 @@ fn test_no_threads_no_fingerprint() {
     let event = make_event();
 
     let mut data = CollectedData::default();
-    let _ = fp.process(&event, &mut data);
+    let _ = fp.process(&event, &mut data, &PluginContext::without_deadline());
     // No threads at all — no fingerprint
     assert!(data.fingerprint.is_none());
 }
@@ -238,7 +238,7 @@ fn test_fingerprint_is_16_hex_chars() {
 
     let mut data = make_data_with_backtrace(vec![0x1_0000_1000], true, vec![app_image()], symbols);
 
-    let _ = fp.process(&event, &mut data);
+    let _ = fp.process(&event, &mut data, &PluginContext::without_deadline());
     let fp_str = data.fingerprint.as_ref().unwrap();
     assert_eq!(fp_str.len(), 16);
     assert!(fp_str.chars().all(|c| c.is_ascii_hexdigit()));
@@ -251,4 +251,10 @@ fn test_plugin_metadata() {
     assert_eq!(fp.priority(), Priority::Low);
     assert_eq!(fp.depends_on(), &["SymbolResolver"]);
     assert!(fp.is_available());
+}
+
+#[test]
+fn test_top_frame_count_is_bounded() {
+    let fingerprinter = Fingerprinter::new(usize::MAX);
+    assert_eq!(fingerprinter.top_n, MAX_FINGERPRINT_FRAMES);
 }

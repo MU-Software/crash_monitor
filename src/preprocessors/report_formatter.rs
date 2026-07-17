@@ -221,6 +221,10 @@ fn build_diagnostics_json(diagnostics: &Diagnostics) -> Option<serde_json::Value
                     "error": e,
                     "duration_ms": d.duration_ms,
                 }),
+                PluginStatus::TimedOut => serde_json::json!({
+                    "status": "timed_out",
+                    "duration_ms": d.duration_ms,
+                }),
                 PluginStatus::Skipped(reason) => serde_json::json!({
                     "status": "skipped",
                     "reason": reason,

@@ -3,9 +3,13 @@ use crate::pipeline::report::{
     self, CrashReport, ExceptionReport, HeapSummary, LoadedImageReport, ReportHeader, ThreadReport,
     VmRegionReport,
 };
-use crate::pipeline::{CrashEvent, Plugin, PostProcessor, ReportResult, ReportType};
+use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
 use crate::postprocessors::PNGConverter;
+use nix::sys::stat::Mode;
+use nix::unistd::mkfifo;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn make_event() -> CrashEvent {
     CrashEvent {
@@ -106,6 +110,16 @@ fn test_encode_png_zero_dimension() {
 }
 
 #[test]
+fn test_encode_png_rejects_mismatched_and_unbounded_inputs() {
+    assert!(encode_png(&[0_u8; 4], 2, 2).is_err());
+    assert!(encode_png(&[], super::MAX_RGBA_DIMENSION + 1, 1).is_err());
+    assert!(
+        encode_png(&[], super::MAX_RGBA_DIMENSION, super::MAX_RGBA_DIMENSION).is_err(),
+        "pixel count must also respect the byte cap"
+    );
+}
+
+#[test]
 fn test_converts_rgba_to_png_and_removes_original() {
     let dir = tempfile::tempdir().unwrap();
     let rgba_bytes: Vec<u8> = std::iter::repeat([0u8, 255, 0, 255])
@@ -118,7 +132,11 @@ fn test_converts_rgba_to_png_and_removes_original() {
     );
 
     PNGConverter
-        .process(&make_event(), &mut make_result(json_path.clone()))
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
         .unwrap();
 
     assert!(
@@ -143,12 +161,85 @@ fn test_converts_rgba_to_png_and_removes_original() {
 }
 
 #[test]
+fn test_report_fifo_and_symlink_are_rejected_without_blocking() {
+    let fifo_dir = tempfile::tempdir().unwrap();
+    let fifo_path = fifo_dir.path().join("report.json");
+    mkfifo(&fifo_path, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+    let started = Instant::now();
+    let error = PNGConverter
+        .process(
+            &make_event(),
+            &mut make_result(fifo_path),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap_err();
+    assert!(error.contains("not a regular file"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let symlink_dir = tempfile::tempdir().unwrap();
+    let rgba_path = symlink_dir.path().join("image.rgba");
+    let report_path = write_report_with_rgba_attachments(
+        symlink_dir.path(),
+        &[("image.rgba", 1, 1, vec![0_u8; 4])],
+    );
+    let real_report = symlink_dir.path().join("real-report.json");
+    std::fs::rename(&report_path, &real_report).unwrap();
+    symlink(&real_report, &report_path).unwrap();
+
+    let error = PNGConverter
+        .process(
+            &make_event(),
+            &mut make_result(report_path),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap_err();
+    assert!(error.contains("cannot open report"));
+    assert!(rgba_path.exists());
+    assert!(!symlink_dir.path().join("image.png").exists());
+}
+
+#[test]
+fn test_existing_png_symlink_is_replaced_without_following_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, b"do not overwrite").unwrap();
+    let png_path = dir.path().join("image.png");
+    symlink(&outside, &png_path).unwrap();
+    let json_path =
+        write_report_with_rgba_attachments(dir.path(), &[("image.rgba", 1, 1, vec![0_u8; 4])]);
+
+    PNGConverter
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert_eq!(std::fs::read(&outside).unwrap(), b"do not overwrite");
+    assert!(
+        std::fs::symlink_metadata(&png_path)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+    assert_eq!(
+        report::load_report(&json_path).unwrap().attachments[0]["file"],
+        "image.png"
+    );
+}
+
+#[test]
 fn test_noop_when_no_rgba_attachments() {
     let dir = tempfile::tempdir().unwrap();
     let json_path = write_report_with_rgba_attachments(dir.path(), &[]);
     let before = std::fs::read(&json_path).unwrap();
     PNGConverter
-        .process(&make_event(), &mut make_result(json_path.clone()))
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
         .unwrap();
     let after = std::fs::read(&json_path).unwrap();
     assert_eq!(before, after, "no rgba attachments → file unchanged");
@@ -172,10 +263,111 @@ fn test_missing_rgba_file_does_not_panic() {
 
     // Should succeed (failure-tolerant) and leave attachment unchanged.
     PNGConverter
-        .process(&make_event(), &mut make_result(json_path.clone()))
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
         .unwrap();
     let updated = report::load_report(&json_path).unwrap();
     assert_eq!(updated.attachments[0]["format"], "rgba");
+}
+
+#[test]
+fn test_rgba_size_mismatch_preserves_original_and_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let json_path =
+        write_report_with_rgba_attachments(dir.path(), &[("mismatch.rgba", 1, 1, vec![0_u8; 5])]);
+
+    PNGConverter
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert!(dir.path().join("mismatch.rgba").exists());
+    assert!(!dir.path().join("mismatch.png").exists());
+    let report = report::load_report(&json_path).unwrap();
+    assert_eq!(report.attachments[0]["format"], "rgba");
+    assert_eq!(report.attachments[0]["file"], "mismatch.rgba");
+}
+
+#[test]
+fn test_non_regular_rgba_input_is_not_converted() {
+    let dir = tempfile::tempdir().unwrap();
+    let rgba_name = "directory.rgba";
+    std::fs::create_dir(dir.path().join(rgba_name)).unwrap();
+    let mut report_value = empty_report();
+    report_value.attachments.push(serde_json::json!({
+        "label": "directory",
+        "file": rgba_name,
+        "format": "rgba",
+        "width": 1,
+        "height": 1,
+        "size": 4
+    }));
+    let json_path = dir.path().join("report.json");
+    std::fs::write(
+        &json_path,
+        serde_json::to_vec_pretty(&report_value).unwrap(),
+    )
+    .unwrap();
+
+    PNGConverter
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert!(dir.path().join(rgba_name).is_dir());
+    assert!(!dir.path().join("directory.png").exists());
+    assert_eq!(
+        report::load_report(&json_path).unwrap().attachments[0]["format"],
+        "rgba"
+    );
+}
+
+#[test]
+fn test_rgba_path_traversal_is_ignored() {
+    let root = tempfile::tempdir().unwrap();
+    let report_dir = root.path().join("reports");
+    std::fs::create_dir(&report_dir).unwrap();
+    let outside_rgba = root.path().join("outside.rgba");
+    std::fs::write(&outside_rgba, [1_u8, 2, 3, 4]).unwrap();
+
+    let mut report_value = empty_report();
+    report_value.attachments.push(serde_json::json!({
+        "label": "outside",
+        "file": "../outside.rgba",
+        "format": "rgba",
+        "width": 1,
+        "height": 1,
+        "size": 4
+    }));
+    let json_path = report_dir.join("report.json");
+    std::fs::write(
+        &json_path,
+        serde_json::to_vec_pretty(&report_value).unwrap(),
+    )
+    .unwrap();
+
+    PNGConverter
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert_eq!(std::fs::read(&outside_rgba).unwrap(), [1_u8, 2, 3, 4]);
+    assert!(!root.path().join("outside.png").exists());
+    let unchanged = report::load_report(&json_path).unwrap();
+    assert_eq!(unchanged.attachments[0]["file"], "../outside.rgba");
+    assert_eq!(unchanged.attachments[0]["format"], "rgba");
 }
 
 #[test]
@@ -185,7 +377,13 @@ fn test_no_json_path_is_noop() {
         json_path: None,
         session: None,
     };
-    PNGConverter.process(&make_event(), &mut result).unwrap();
+    PNGConverter
+        .process(
+            &make_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -208,7 +406,11 @@ fn test_multiple_screenshots_all_converted() {
     );
 
     PNGConverter
-        .process(&make_event(), &mut make_result(json_path.clone()))
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
         .unwrap();
 
     for i in 0..3 {
@@ -227,4 +429,109 @@ fn test_multiple_screenshots_all_converted() {
     for a in &updated.attachments {
         assert_eq!(a["format"], "png");
     }
+}
+
+#[test]
+fn test_cancellation_after_png_write_commits_json_before_returning() {
+    let dir = tempfile::tempdir().unwrap();
+    let rgba = vec![0_u8; 2 * 2 * 4];
+    let rgba_path = dir.path().join("report_screenshot_000.rgba");
+    let png_path = dir.path().join("report_screenshot_000.png");
+    let json_path = write_report_with_rgba_attachments(
+        dir.path(),
+        &[("report_screenshot_000.rgba", 2, 2, rgba)],
+    );
+    let mut result = make_result(json_path.clone());
+    let context = PluginContext::without_deadline();
+    let cancellation = context.cancellation_token();
+
+    let error = PNGConverter::process_with_after_png_write(&mut result, &context, || {
+        cancellation.cancel();
+    })
+    .unwrap_err();
+
+    assert_eq!(error, "plugin deadline reached");
+    assert!(png_path.exists(), "published PNG must remain available");
+    assert!(
+        !rgba_path.exists(),
+        "RGBA is removed only after the JSON commit succeeds"
+    );
+    let updated = report::load_report(&json_path).unwrap();
+    assert_eq!(updated.attachments[0]["file"], "report_screenshot_000.png");
+    assert_eq!(updated.attachments[0]["format"], "png");
+    let leaked_temp = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".report.json.png-converter-") && name.ends_with(".tmp")
+        });
+    assert!(
+        !leaked_temp,
+        "atomic replacement must not leak temporary files"
+    );
+}
+
+#[test]
+fn test_stale_legacy_json_temp_does_not_block_or_follow_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let rgba = vec![0_u8; 2 * 2 * 4];
+    let rgba_path = dir.path().join("report_screenshot_000.rgba");
+    let png_path = dir.path().join("report_screenshot_000.png");
+    let json_path = write_report_with_rgba_attachments(
+        dir.path(),
+        &[("report_screenshot_000.rgba", 2, 2, rgba)],
+    );
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, b"do not overwrite").unwrap();
+    let legacy_tmp = dir.path().join(".report.json.png-converter.tmp");
+    symlink(&outside, &legacy_tmp).unwrap();
+
+    PNGConverter
+        .process(
+            &make_event(),
+            &mut make_result(json_path.clone()),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert!(!rgba_path.exists());
+    assert!(png_path.exists());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"do not overwrite");
+    assert!(
+        std::fs::symlink_metadata(&legacy_tmp)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let updated = report::load_report(&json_path).unwrap();
+    assert_eq!(updated.attachments[0]["file"], "report_screenshot_000.png");
+}
+
+#[test]
+fn test_replaced_rgba_path_is_not_deleted_after_json_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let rgba_path = dir.path().join("image.rgba");
+    let original_path = dir.path().join("original.rgba");
+    let json_path =
+        write_report_with_rgba_attachments(dir.path(), &[("image.rgba", 1, 1, vec![0_u8; 4])]);
+    let mut result = make_result(json_path.clone());
+
+    PNGConverter::process_with_after_png_write(
+        &mut result,
+        &PluginContext::without_deadline(),
+        || {
+            std::fs::rename(&rgba_path, &original_path).unwrap();
+            std::fs::write(&rgba_path, b"replacement").unwrap();
+        },
+    )
+    .unwrap();
+
+    assert_eq!(std::fs::read(&rgba_path).unwrap(), b"replacement");
+    assert_eq!(std::fs::read(&original_path).unwrap(), vec![0_u8; 4]);
+    assert_eq!(
+        report::load_report(&json_path).unwrap().attachments[0]["file"],
+        "image.png"
+    );
 }

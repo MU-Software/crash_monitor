@@ -4,7 +4,9 @@
 //! but this pre-processor makes it available as structured data on `CollectedData`
 //! for other pre-processors to inspect (e.g., for fingerprint enrichment).
 
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
+use crate::pipeline::{
+    CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor, Priority,
+};
 
 /// Structured build metadata extracted from `RawCrashContext`.
 #[derive(Debug, Clone)]
@@ -23,13 +25,22 @@ impl Plugin for BuildInfoEnricher {
     fn name(&self) -> &'static str {
         "BuildInfoEnricher"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Medium
     }
 }
 
 impl PreProcessor for BuildInfoEnricher {
-    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        data: &mut CollectedData,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        context.checkpoint()?;
         let Some(ctx) = &data.raw.crash_context else {
             return Ok(()); // No crash context → nothing to extract
         };
@@ -43,6 +54,7 @@ impl PreProcessor for BuildInfoEnricher {
             annotations: ctx.annotations.clone(),
         });
 
+        context.checkpoint()?;
         Ok(())
     }
 }

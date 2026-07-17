@@ -1,5 +1,5 @@
 use crate::collectors::dylib::RawImageData;
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, ReportType};
+use crate::pipeline::{CollectedData, CrashEvent, Plugin, PluginContext, PreProcessor, ReportType};
 use crate::preprocessors::Sanitizer;
 
 fn dummy_event() -> CrashEvent {
@@ -34,7 +34,9 @@ fn test_masks_username_in_image_paths() {
         slide: None,
     });
 
-    sanitizer.process(&event, &mut data).unwrap();
+    sanitizer
+        .process(&event, &mut data, &PluginContext::without_deadline())
+        .unwrap();
     assert_eq!(
         data.raw.images[0].path,
         "/Users/[USERNAME]/project/libfoo.dylib"
@@ -55,7 +57,9 @@ fn test_masks_username_in_symbols() {
         .symbols
         .insert(0x1000, format!("/Users/{user}/src/main.c:foo"));
 
-    sanitizer.process(&event, &mut data).unwrap();
+    sanitizer
+        .process(&event, &mut data, &PluginContext::without_deadline())
+        .unwrap();
     assert_eq!(
         data.raw.symbols[&0x1000],
         "/Users/[USERNAME]/src/main.c:foo"
@@ -75,7 +79,9 @@ fn test_no_username_is_noop() {
         slide: None,
     });
 
-    sanitizer.process(&event, &mut data).unwrap();
+    sanitizer
+        .process(&event, &mut data, &PluginContext::without_deadline())
+        .unwrap();
     // Path should remain unchanged
     assert_eq!(data.raw.images[0].path, "/Users/alice/project/lib.dylib");
 }
@@ -97,6 +103,8 @@ fn test_preserves_non_path_strings() {
         slide: None,
     });
 
-    sanitizer.process(&event, &mut data).unwrap();
+    sanitizer
+        .process(&event, &mut data, &PluginContext::without_deadline())
+        .unwrap();
     assert_eq!(data.raw.images[0].path, "/usr/lib/system/libsystem.dylib");
 }

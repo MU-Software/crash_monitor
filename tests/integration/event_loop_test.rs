@@ -15,8 +15,8 @@ use crash_monitor::event_loop::{
     MonitorOutcome, event_loop,
 };
 use crash_monitor::pipeline::{
-    CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PostProcessor, Priority,
-    ReportResult, TerminationReason,
+    CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PluginContext,
+    PluginExecution, PostProcessor, Priority, ReportResult, TerminationReason,
 };
 use crash_monitor::platform::mock::MockPlatform;
 use crash_monitor::postprocessors::ZIPArchiver;
@@ -134,6 +134,10 @@ impl Plugin for BlockingCollector {
         "BlockingCollector"
     }
 
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
     fn priority(&self) -> Priority {
         Priority::Critical
     }
@@ -145,6 +149,7 @@ impl Collector for BlockingCollector {
         _event: &CrashEvent,
         _task: mach2::port::mach_port_t,
         _data: &mut CollectedData,
+        _context: &PluginContext,
     ) -> Result<(), String> {
         self.gate.wait()
     }
@@ -155,13 +160,22 @@ impl Plugin for BlockingPostProcessor {
         self.name
     }
 
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
     fn priority(&self) -> Priority {
         Priority::Low
     }
 }
 
 impl PostProcessor for BlockingPostProcessor {
-    fn process(&self, _event: &CrashEvent, _result: &mut ReportResult) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
         self.gate.wait()
     }
 }
@@ -179,13 +193,22 @@ impl Plugin for ThreadRecordingPostProcessor {
         "ThreadRecordingPostProcessor"
     }
 
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
     fn priority(&self) -> Priority {
         Priority::Low
     }
 }
 
 impl PostProcessor for ThreadRecordingPostProcessor {
-    fn process(&self, _event: &CrashEvent, _result: &mut ReportResult) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
         let _ = self.thread_tx.send(std::thread::current().id());
         Ok(())
     }
@@ -196,13 +219,17 @@ impl Plugin for BlockingNotifier {
         "BlockingNotifier"
     }
 
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
     fn priority(&self) -> Priority {
         Priority::Low
     }
 }
 
 impl Notifier for BlockingNotifier {
-    fn notify(&self, _report_path: &Path) -> Result<(), String> {
+    fn notify(&self, _report_path: &Path, _context: &PluginContext) -> Result<(), String> {
         self.gate.wait()
     }
 }

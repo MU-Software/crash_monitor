@@ -182,7 +182,11 @@ fn test_feedback_post_processor_with_real_binary() {
         session: None,
     };
 
-    let res = pp.process(&event, &mut result);
+    let res = pp.process(
+        &event,
+        &mut result,
+        &crash_monitor::pipeline::PluginContext::without_deadline(),
+    );
     assert!(res.is_ok());
 
     // Verify the report was patched with the feedback.

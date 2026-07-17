@@ -5,7 +5,9 @@
 //! same fingerprint likely stem from the same root cause.
 
 use crate::collectors::dylib;
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
+use crate::pipeline::{
+    CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor, Priority,
+};
 use sha2::{Digest, Sha256};
 
 /// System library path prefixes — frames from these images are excluded
@@ -17,6 +19,8 @@ const SYSTEM_PREFIXES: &[&str] = &[
     "/AppleInternal/",
 ];
 
+const MAX_FINGERPRINT_FRAMES: usize = 256;
+
 pub struct Fingerprinter {
     top_n: usize,
 }
@@ -24,13 +28,19 @@ pub struct Fingerprinter {
 impl Fingerprinter {
     #[must_use]
     pub fn new(top_n: usize) -> Self {
-        Self { top_n }
+        Self {
+            top_n: top_n.min(MAX_FINGERPRINT_FRAMES),
+        }
     }
 }
 
 impl Plugin for Fingerprinter {
     fn name(&self) -> &'static str {
         "Fingerprinter"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
     }
 
     fn priority(&self) -> Priority {
@@ -47,7 +57,13 @@ impl Plugin for Fingerprinter {
 }
 
 impl PreProcessor for Fingerprinter {
-    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        data: &mut CollectedData,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        context.checkpoint()?;
         // Find the crashed thread, or fall back to thread 0
         let thread = data
             .raw
@@ -67,6 +83,7 @@ impl PreProcessor for Fingerprinter {
         let mut frame_ids: Vec<String> = Vec::with_capacity(self.top_n);
 
         for &addr in &thread.backtrace {
+            context.checkpoint()?;
             if addr == 0 {
                 continue;
             }
@@ -96,6 +113,7 @@ impl PreProcessor for Fingerprinter {
         // Compute SHA-256 of concatenated frame identifiers
         let mut hasher = Sha256::new();
         for (i, id) in frame_ids.iter().enumerate() {
+            context.checkpoint()?;
             if i > 0 {
                 hasher.update(b"\n");
             }
@@ -110,6 +128,7 @@ impl PreProcessor for Fingerprinter {
         );
 
         data.fingerprint = Some(fingerprint);
+        context.checkpoint()?;
         Ok(())
     }
 }

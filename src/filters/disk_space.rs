@@ -1,6 +1,6 @@
 //! Filter: skip report generation when available disk space is too low.
 
-use crate::pipeline::{CrashEvent, Filter, Plugin, Priority};
+use crate::pipeline::{CrashEvent, Filter, Plugin, PluginContext, PluginExecution, Priority};
 use nix::sys::statvfs::statvfs;
 
 pub struct DiskSpaceFilter {
@@ -20,22 +20,28 @@ impl Plugin for DiskSpaceFilter {
     fn name(&self) -> &'static str {
         "DiskSpaceFilter"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
 }
 
 impl Filter for DiskSpaceFilter {
-    fn should_process(&self, _event: &CrashEvent) -> Result<bool, String> {
+    fn should_process(&self, _event: &CrashEvent, context: &PluginContext) -> Result<bool, String> {
+        context.checkpoint()?;
         // Check pending dir first, fall back to root
         let path = crate::utils::paths::pending_dir().unwrap_or_else(|_| "/".into());
-        match statvfs(&*path) {
+        let result = match statvfs(&*path) {
             Ok(stat) => {
                 let available = u64::from(stat.blocks_available()) * stat.fragment_size();
                 Ok(available >= self.min_free_bytes)
             }
             Err(_) => Ok(true), // default PASS on error
-        }
+        };
+        context.checkpoint()?;
+        result
     }
 }
 

@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, Priority};
+use crate::pipeline::{
+    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+};
 use crate::platform::PlatformOps;
 use mach2::port::mach_port_t;
 
@@ -40,6 +42,9 @@ impl Plugin for DylibCollector {
     fn name(&self) -> &'static str {
         "DylibCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Medium
     }
@@ -51,13 +56,16 @@ impl Collector for DylibCollector {
         _event: &CrashEvent,
         task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String> {
+        context.checkpoint()?;
         let platform = self.platform.as_ref();
-        data.raw.images = enumerate_loaded_images(platform, task).unwrap_or_else(|e| {
+        data.raw.images = enumerate_loaded_images(platform, task, context).unwrap_or_else(|e| {
             eprintln!("[monitor] dylib collection failed: {e}");
             vec![]
         });
-        compute_all_slides(platform, task, &mut data.raw.images);
+        context.checkpoint()?;
+        compute_all_slides(platform, task, &mut data.raw.images, context)?;
         Ok(())
     }
 }
@@ -94,12 +102,15 @@ struct DyldImageInfo64 {
 fn enumerate_loaded_images(
     platform: &dyn PlatformOps,
     task: mach_port_t,
+    context: &PluginContext,
 ) -> Result<Vec<RawImageData>, String> {
+    context.checkpoint()?;
     // Step 1: Get dyld_all_image_infos address via task_info
     let mut buf = [0u8; TASK_DYLD_INFO_SIZE];
     platform
         .get_task_info_bytes(task, TASK_DYLD_INFO, &mut buf)
         .map_err(|e| format!("task_info(TASK_DYLD_INFO) failed: {e}"))?;
+    context.checkpoint()?;
 
     // Parse TaskDyldInfo fields: u64 all_image_info_addr (offset 0),
     // u64 all_image_info_size (offset 8), i32 all_image_info_format (offset 16)
@@ -112,6 +123,7 @@ fn enumerate_loaded_images(
     let infos_bytes = platform
         .vm_read(task, infos_addr, std::mem::size_of::<DyldAllImageInfos64>())
         .map_err(|e| format!("Failed to read dyld_all_image_infos: {e}"))?;
+    context.checkpoint()?;
 
     let (info_array, info_count) = parse_all_image_infos(&infos_bytes)?;
     if info_array == 0 || info_count == 0 {
@@ -127,13 +139,16 @@ fn enumerate_loaded_images(
     let array_bytes = platform
         .vm_read(task, info_array, info_count * entry_size)
         .map_err(|e| format!("Failed to read image info array: {e}"))?;
+    context.checkpoint()?;
 
     let mut images = Vec::with_capacity(info_count);
     for i in 0..info_count {
+        context.checkpoint()?;
         let (load_addr, path_addr) = parse_image_info(&array_bytes, i * entry_size)?;
 
-        let path = read_c_string(platform, task, path_addr, 512)
+        let path = read_c_string(platform, task, path_addr, 512, context)
             .unwrap_or_else(|_| format!("<unreadable@{path_addr:#x}>"));
+        context.checkpoint()?;
 
         images.push(RawImageData {
             path,
@@ -205,18 +220,33 @@ const LC_SEGMENT_64: u32 = 0x19;
 /// Compute ASLR slides for all images. Call this post-resume — it does
 /// 2 `vm_read` calls per image and doesn't need the child to be suspended
 /// (Mach-O headers are file-backed and don't change).
-fn compute_all_slides(platform: &dyn PlatformOps, task: mach_port_t, images: &mut [RawImageData]) {
+fn compute_all_slides(
+    platform: &dyn PlatformOps,
+    task: mach_port_t,
+    images: &mut [RawImageData],
+    context: &PluginContext,
+) -> Result<(), String> {
     for img in images {
-        img.slide = compute_slide(platform, task, img.base_address);
+        context.checkpoint()?;
+        img.slide = compute_slide(platform, task, img.base_address, context);
+        context.checkpoint()?;
     }
+    Ok(())
 }
 
 /// Compute the ASLR slide for an image by reading its Mach-O header.
 /// `slide` = `base_address` - `__TEXT` segment `vmaddr`.
-fn compute_slide(platform: &dyn PlatformOps, task: mach_port_t, base_address: u64) -> Option<u64> {
+fn compute_slide(
+    platform: &dyn PlatformOps,
+    task: mach_port_t,
+    base_address: u64,
+    context: &PluginContext,
+) -> Option<u64> {
+    context.checkpoint().ok()?;
     // Read mach_header_64: magic(4) + cputype(4) + cpusubtype(4) + filetype(4) +
     //                      ncmds(4) + sizeofcmds(4) + flags(4) + reserved(4) = 32 bytes
     let header = platform.vm_read(task, base_address, 32).ok()?;
+    context.checkpoint().ok()?;
     let magic = read_u32_le(&header, 0)?;
     if magic != MH_MAGIC_64 {
         return None;
@@ -233,9 +263,11 @@ fn compute_slide(platform: &dyn PlatformOps, task: mach_port_t, base_address: u6
 
     // Read all load commands (start at offset 32, right after the header)
     let cmds = platform.vm_read(task, base_address + 32, sizeofcmds).ok()?;
+    context.checkpoint().ok()?;
 
     let mut offset = 0;
     for _ in 0..ncmds {
+        context.checkpoint().ok()?;
         if offset + 8 > cmds.len() {
             break;
         }
@@ -293,12 +325,15 @@ fn read_c_string(
     task: mach_port_t,
     address: u64,
     max_len: usize,
+    context: &PluginContext,
 ) -> Result<String, String> {
     // Try progressively larger reads — most paths are < 128 bytes,
     // so the first attempt usually succeeds even near page boundaries.
     for &chunk in &[128, 512, max_len] {
+        context.checkpoint()?;
         let try_len = chunk.min(max_len);
         if let Ok(bytes) = platform.vm_read(task, address, try_len) {
+            context.checkpoint()?;
             if let Some(end) = bytes.iter().position(|&b| b == 0) {
                 return Ok(String::from_utf8_lossy(&bytes[..end]).into_owned());
             }

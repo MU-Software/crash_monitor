@@ -10,13 +10,13 @@ fn zeroed_annotations() -> [SutCrashAnnotation; MAX_ANNOTATIONS] {
 
 /// Build a `Vec<c_char>` from bytes (shm char arrays are `c_char`/i8).
 fn cc(bytes: &[u8]) -> Vec<c_char> {
-    bytes.iter().map(|&b| b as c_char).collect()
+    bytes.iter().map(|&b| b.cast_signed()).collect()
 }
 
 /// Copy bytes into a fixed `c_char` slice (leaves the rest untouched).
 fn set(dst: &mut [c_char], s: &[u8]) {
     for (d, &b) in dst.iter_mut().zip(s) {
-        *d = b as c_char;
+        *d = b.cast_signed();
     }
 }
 

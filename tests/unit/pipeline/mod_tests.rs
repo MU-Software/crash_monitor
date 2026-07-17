@@ -20,6 +20,9 @@ impl Plugin for MockCollector {
     fn name(&self) -> &'static str {
         "MockCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Medium
     }
@@ -34,6 +37,7 @@ impl Collector for MockCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         _data: &mut CollectedData,
+        _context: &PluginContext,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -51,13 +55,20 @@ impl Plugin for MockFilter {
     fn name(&self) -> &'static str {
         "MockFilter"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
 }
 
 impl Filter for MockFilter {
-    fn should_process(&self, _event: &CrashEvent) -> Result<bool, String> {
+    fn should_process(
+        &self,
+        _event: &CrashEvent,
+        _context: &PluginContext,
+    ) -> Result<bool, String> {
         Ok(self.allow)
     }
 }
@@ -79,6 +90,59 @@ fn make_event() -> CrashEvent {
         process_name: "test".into(),
         hang_duration_ms: None,
     }
+}
+
+#[test]
+fn subprocess_execution_requires_supervisor_boundary() {
+    let result = run_stage("BoundaryBypass", PluginExecution::Subprocess, 0, |_| Ok(()));
+
+    assert!(matches!(
+        result,
+        PluginRunResult::Failed(error) if error.contains("did not use the subprocess supervisor")
+    ));
+}
+
+#[test]
+fn subprocess_execution_allows_explicit_noop() {
+    let result = run_stage("BoundaryNoop", PluginExecution::Subprocess, 0, |context| {
+        context.mark_subprocess_not_required();
+        Ok(())
+    });
+
+    assert!(matches!(result, PluginRunResult::Completed(())));
+}
+
+#[test]
+fn subprocess_adapter_cancellation_maps_to_pipeline_timeout_status() {
+    let result = run_stage(
+        "CancelledSubprocessAdapter",
+        PluginExecution::Subprocess,
+        0,
+        |context| {
+            let cancellation = context.cancellation_token();
+            let canceller = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cancellation.cancel();
+            });
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30");
+            let subprocess = run_plugin_subprocess("cancelled-adapter", &mut command, context);
+            canceller
+                .join()
+                .map_err(|_| "cancellation thread panicked".to_string())?;
+            match subprocess {
+                PluginRunResult::TimedOut => context.checkpoint(),
+                PluginRunResult::Completed(_) => {
+                    Err("subprocess unexpectedly completed".to_string())
+                }
+                PluginRunResult::Failed(error) => Err(error),
+                PluginRunResult::Panicked => Err("subprocess supervisor panicked".to_string()),
+            }
+        },
+    );
+
+    assert!(matches!(result, PluginRunResult::TimedOut));
+    assert!(matches!(plugin_status(&result), PluginStatus::TimedOut));
 }
 
 // CRITICAL: Test pipelines must always set `output_dir` to a tempdir.
@@ -136,6 +200,24 @@ fn test_handle_event_with_mock_collector() {
 }
 
 #[test]
+fn test_expired_capture_deadline_is_diagnosed_as_timeout() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline =
+        make_pipeline_with_collector(Box::new(MockCollector { dep: &[] }), tempdir.path());
+    let cancelled = Arc::new(AtomicBool::new(true));
+
+    let payload = pipeline.collect_snapshot(&make_event(), 0, &cancelled);
+    let status = payload
+        .diagnostics
+        .plugins
+        .iter()
+        .find(|entry| entry.name == "CaptureDeadline")
+        .map(|entry| &entry.status);
+
+    assert!(matches!(status, Some(PluginStatus::TimedOut)));
+}
+
+#[test]
 fn test_filter_blocks_processing() {
     let tempdir = tempfile::tempdir().unwrap();
     let pipeline = make_pipeline_with_filter(
@@ -180,6 +262,9 @@ impl Plugin for DepCollector {
     fn name(&self) -> &'static str {
         "DepCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Low
     }
@@ -194,6 +279,7 @@ impl Collector for DepCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         _data: &mut CollectedData,
+        _context: &PluginContext,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -220,6 +306,9 @@ impl Plugin for TrackingCollector {
     fn name(&self) -> &'static str {
         "TrackingCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
@@ -231,6 +320,7 @@ impl Collector for TrackingCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         data: &mut CollectedData,
+        _context: &PluginContext,
     ) -> Result<(), String> {
         self.called.store(true, Ordering::SeqCst);
         // Inject a fake thread with port=42 so PortGuard can deallocate it
@@ -257,6 +347,9 @@ impl Plugin for FailingCollector {
     fn name(&self) -> &'static str {
         "FailingCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Medium
     }
@@ -268,6 +361,7 @@ impl Collector for FailingCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         _data: &mut CollectedData,
+        _context: &PluginContext,
     ) -> Result<(), String> {
         Err("intentional failure".into())
     }
@@ -279,6 +373,9 @@ struct DependentOnFailCollector;
 impl Plugin for DependentOnFailCollector {
     fn name(&self) -> &'static str {
         "DependentOnFailCollector"
+    }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
     }
     fn priority(&self) -> Priority {
         Priority::Low
@@ -294,6 +391,7 @@ impl Collector for DependentOnFailCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         _data: &mut CollectedData,
+        _context: &PluginContext,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -592,13 +690,20 @@ impl Plugin for ErroringFilter {
     fn name(&self) -> &'static str {
         "ErroringFilter"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
 }
 
 impl Filter for ErroringFilter {
-    fn should_process(&self, _event: &CrashEvent) -> Result<bool, String> {
+    fn should_process(
+        &self,
+        _event: &CrashEvent,
+        _context: &PluginContext,
+    ) -> Result<bool, String> {
         Err("filter check blew up".into())
     }
 }
@@ -616,6 +721,9 @@ impl Plugin for CfgCollector {
     fn name(&self) -> &'static str {
         self.name
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Medium
     }
@@ -630,6 +738,7 @@ impl Collector for CfgCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         _data: &mut CollectedData,
+        _context: &PluginContext,
     ) -> Result<(), String> {
         self.called.store(true, Ordering::SeqCst);
         assert!(!self.panic, "intentional collector panic");
@@ -651,6 +760,9 @@ impl Plugin for CfgPreProcessor {
     fn name(&self) -> &'static str {
         self.name
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Medium
     }
@@ -660,7 +772,12 @@ impl Plugin for CfgPreProcessor {
 }
 
 impl PreProcessor for CfgPreProcessor {
-    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        data: &mut CollectedData,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
         self.called.store(true, Ordering::SeqCst);
         assert!(!self.panic, "intentional pre-processor panic");
         if self.set_duplicate {
@@ -682,6 +799,9 @@ impl Plugin for CfgPostProcessor {
     fn name(&self) -> &'static str {
         self.name
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Low
     }
@@ -691,10 +811,43 @@ impl Plugin for CfgPostProcessor {
 }
 
 impl PostProcessor for CfgPostProcessor {
-    fn process(&self, _event: &CrashEvent, _result: &mut ReportResult) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
         self.called.store(true, Ordering::SeqCst);
         assert!(!self.panic, "intentional post-processor panic");
         Ok(())
+    }
+}
+
+struct TimingOutPostProcessor;
+
+impl Plugin for TimingOutPostProcessor {
+    fn name(&self) -> &'static str {
+        "TimingOutPost"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Low
+    }
+}
+
+impl PostProcessor for TimingOutPostProcessor {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        context.cancellation_token().cancel();
+        Err("deadline reached".to_string())
     }
 }
 
@@ -709,6 +862,9 @@ impl Plugin for CfgNotifier {
     fn name(&self) -> &'static str {
         self.name
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Low
     }
@@ -718,7 +874,7 @@ impl Plugin for CfgNotifier {
 }
 
 impl Notifier for CfgNotifier {
-    fn notify(&self, report_path: &Path) -> Result<(), String> {
+    fn notify(&self, report_path: &Path, _context: &PluginContext) -> Result<(), String> {
         *self.captured.lock().unwrap() = Some(report_path.to_path_buf());
         Ok(())
     }
@@ -965,6 +1121,28 @@ fn test_postprocessor_runs_and_records() {
 
     assert!(called.load(Ordering::SeqCst));
     assert!(diag.succeeded("RunPost"));
+}
+
+#[test]
+fn test_plugin_timeout_is_diagnosed_separately_from_error() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![],
+        vec![],
+        vec![],
+        vec![Box::new(TimingOutPostProcessor)],
+        vec![],
+        tempdir.path(),
+    );
+
+    let diagnostics = pipeline.handle_event(&make_crash_event(), 0);
+    let status = diagnostics
+        .plugins
+        .iter()
+        .find(|entry| entry.name == "TimingOutPost")
+        .map(|entry| &entry.status);
+
+    assert!(matches!(status, Some(PluginStatus::TimedOut)));
 }
 
 #[test]

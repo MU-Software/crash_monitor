@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mach2::port::mach_port_t;
 
+use crate::pipeline::PluginContext;
+
 use super::{PlatformOps, TaskVmSummary, VmRegionInfo};
 
 /// Mock thread data: port, optional name, register state [u32; 68].
@@ -143,8 +145,13 @@ impl PlatformOps for MockPlatform {
             .ok_or_else(|| format!("mock: no region at {address:#x}"))
     }
 
-    fn enumerate_vm_regions(&self, _task: mach_port_t) -> (Vec<VmRegionInfo>, bool) {
-        (self.regions.clone(), false)
+    fn enumerate_vm_regions(
+        &self,
+        _task: mach_port_t,
+        context: &PluginContext,
+    ) -> Result<(Vec<VmRegionInfo>, bool), String> {
+        context.checkpoint()?;
+        Ok((self.regions.clone(), false))
     }
 
     fn get_task_vm_info(&self, _task: mach_port_t) -> Result<TaskVmSummary, String> {
@@ -173,6 +180,9 @@ impl PlatformOps for MockPlatform {
 mod tests {
     use super::{MockPlatform, PlatformOps};
     use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::pipeline::PluginContext;
 
     #[test]
     fn test_mock_tracks_suspend_resume_counts() {
@@ -223,5 +233,16 @@ mod tests {
         let result = mock.resume_task(0);
         assert!(result.is_err());
         assert_eq!(mock.resume_count(), 1);
+    }
+
+    #[test]
+    fn test_mock_vm_enumeration_honors_expired_context() {
+        let mock = MockPlatform::default();
+        let context = PluginContext::with_timeout(Duration::ZERO);
+
+        match mock.enumerate_vm_regions(0, &context) {
+            Err(error) => assert_eq!(error, "plugin deadline reached"),
+            Ok(_) => panic!("expired context should cancel VM enumeration"),
+        }
     }
 }

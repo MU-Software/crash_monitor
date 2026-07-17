@@ -1,4 +1,4 @@
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, ReportType};
+use crate::pipeline::{CollectedData, CrashEvent, Plugin, PluginContext, PreProcessor, ReportType};
 use crate::preprocessors::BuildInfoEnricher;
 use crate::shm::RawCrashContext;
 
@@ -42,7 +42,9 @@ fn test_extracts_version_from_context() {
     let mut data = CollectedData::default();
     data.raw.crash_context = Some(make_context());
 
-    enricher.process(&event, &mut data).unwrap();
+    enricher
+        .process(&event, &mut data, &PluginContext::without_deadline())
+        .unwrap();
 
     let info = data.build_info.as_ref().expect("build_info should be set");
     assert_eq!(info.app_version, "1.2.3");
@@ -57,7 +59,9 @@ fn test_extracts_annotations() {
     let mut data = CollectedData::default();
     data.raw.crash_context = Some(make_context());
 
-    enricher.process(&event, &mut data).unwrap();
+    enricher
+        .process(&event, &mut data, &PluginContext::without_deadline())
+        .unwrap();
 
     let info = data.build_info.as_ref().unwrap();
     assert_eq!(info.annotations.len(), 1);
@@ -71,7 +75,9 @@ fn test_no_context_is_noop() {
     let mut data = CollectedData::default();
     // crash_context is None
 
-    enricher.process(&event, &mut data).unwrap();
+    enricher
+        .process(&event, &mut data, &PluginContext::without_deadline())
+        .unwrap();
     assert!(data.build_info.is_none());
 }
 

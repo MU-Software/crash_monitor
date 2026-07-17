@@ -3,11 +3,30 @@
 use mach2::port::mach_port_t;
 use std::path::Path;
 
+use super::safety::PluginContext;
 use super::types::{CollectedData, CrashEvent, Priority, ReportResult};
 
+/// Required execution boundary for a registered plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginExecution {
+    /// Audited implementation whose bounded work observes
+    /// [`PluginContext`] checkpoints.
+    Cooperative,
+    /// A trusted, in-process adapter whose potentially blocking or untrusted
+    /// payload must be launched through the killable subprocess supervisor.
+    /// The pipeline verifies that the adapter crosses that boundary (or
+    /// explicitly records that the invocation is a no-op) before accepting a
+    /// completed result.
+    Subprocess,
+}
+
 /// Base trait for all plugins.
+///
+/// Metadata methods are evaluated outside the execution runner. They must be
+/// constant-time accessors over cached state and must not perform blocking I/O.
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &'static str;
+    fn execution(&self) -> PluginExecution;
     #[allow(dead_code)] // Phase 4+: used for plugin ordering
     fn priority(&self) -> Priority;
     /// Dependencies within the SAME category. Cross-category dependencies are forbidden.
@@ -36,6 +55,7 @@ pub trait Collector: Plugin {
         event: &CrashEvent,
         task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String>;
 }
 
@@ -45,7 +65,12 @@ pub trait PreProcessor: Plugin {
     ///
     /// # Errors
     /// Returns an error if processing fails.
-    fn process(&self, event: &CrashEvent, data: &mut CollectedData) -> Result<(), String>;
+    fn process(
+        &self,
+        event: &CrashEvent,
+        data: &mut CollectedData,
+        context: &PluginContext,
+    ) -> Result<(), String>;
 }
 
 /// Post-processor — operates on the written report file.
@@ -56,7 +81,12 @@ pub trait PostProcessor: Plugin {
     ///
     /// # Errors
     /// Returns an error if post-processing fails.
-    fn process(&self, event: &CrashEvent, result: &mut ReportResult) -> Result<(), String>;
+    fn process(
+        &self,
+        event: &CrashEvent,
+        result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String>;
 }
 
 /// Filter — decides whether to process an event.
@@ -65,7 +95,7 @@ pub trait Filter: Plugin {
     ///
     /// # Errors
     /// Returns an error if the filtering check itself fails.
-    fn should_process(&self, event: &CrashEvent) -> Result<bool, String>;
+    fn should_process(&self, event: &CrashEvent, context: &PluginContext) -> Result<bool, String>;
 }
 
 /// Notifier — fire-and-forget notification after report generation.
@@ -75,5 +105,5 @@ pub trait Notifier: Plugin {
     ///
     /// # Errors
     /// Returns an error if notification delivery fails.
-    fn notify(&self, report_path: &Path) -> Result<(), String>;
+    fn notify(&self, report_path: &Path, context: &PluginContext) -> Result<(), String>;
 }

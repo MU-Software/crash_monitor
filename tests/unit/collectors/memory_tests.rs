@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::PluginContext;
 use crate::platform::VmRegionInfo;
 use crate::platform::mock::MockPlatform;
 
@@ -22,10 +23,22 @@ fn test_collect_memory_map() {
         make_region(0x5000, 0x1000, 30, 5),
     ];
 
-    let regions = collect_memory_map(&plat, 0);
+    let regions = collect_memory_map(&plat, 0, &PluginContext::without_deadline()).unwrap();
     assert_eq!(regions.len(), 2);
     assert_eq!(regions[0].address, 0x1000);
     assert_eq!(regions[1].address, 0x5000);
+}
+
+#[test]
+fn test_collect_memory_map_propagates_cancellation() {
+    let plat = MockPlatform::default();
+    let context = PluginContext::without_deadline();
+    context.cancellation_token().cancel();
+
+    match collect_memory_map(&plat, 0, &context) {
+        Err(error) => assert_eq!(error, "plugin deadline reached"),
+        Ok(_) => panic!("cancelled context should stop memory-map collection"),
+    }
 }
 
 #[test]
@@ -37,7 +50,8 @@ fn test_collect_heap_summary_malloc_tags() {
     ];
 
     let plat = MockPlatform::default();
-    let heap = collect_heap_summary(&plat, 0, &regions);
+    let heap =
+        collect_heap_summary(&plat, 0, &regions, &PluginContext::without_deadline()).unwrap();
 
     assert_eq!(heap.malloc_zones.len(), 2);
 
@@ -56,7 +70,8 @@ fn test_collect_heap_summary_no_malloc() {
     let regions = vec![make_region(0x8000, 0x1000, 30, 3)]; // Stack only
 
     let plat = MockPlatform::default();
-    let heap = collect_heap_summary(&plat, 0, &regions);
+    let heap =
+        collect_heap_summary(&plat, 0, &regions, &PluginContext::without_deadline()).unwrap();
 
     assert!(heap.malloc_zones.is_empty());
 }

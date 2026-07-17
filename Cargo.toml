@@ -19,7 +19,7 @@ path = "src/main.rs"
 unsafe_op_in_unsafe_fn = "warn"
 
 # CRITICAL: Do NOT set panic = "abort" in any profile.
-# The pipeline's run_plugin_safe() depends on catch_unwind (panic = "unwind").
+# Cooperative plugin panic isolation depends on catch_unwind (panic = "unwind").
 [profile.release]
 panic = "unwind"
 
@@ -59,8 +59,8 @@ name = "shm_validation_failure"
 path = "tests/integration/shm_validation_failure.rs"
 
 [[test]]
-name = "alarm_timeout"
-path = "tests/integration/alarm_timeout.rs"
+name = "plugin_timeout"
+path = "tests/integration/plugin_timeout.rs"
 
 [[test]]
 name = "event_loop_test"

@@ -1,6 +1,6 @@
 use crate::collectors::environment::EnvironmentCollector;
 use crate::pipeline::traits::Collector;
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, ReportType};
+use crate::pipeline::{CollectedData, CrashEvent, Plugin, PluginContext, ReportType};
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
@@ -23,7 +23,9 @@ fn test_captures_os_info() {
     let event = dummy_event();
     let mut data = CollectedData::default();
 
-    collector.collect(&event, 0, &mut data).unwrap();
+    collector
+        .collect(&event, 0, &mut data, &PluginContext::without_deadline())
+        .unwrap();
 
     let env = data
         .raw
@@ -48,7 +50,9 @@ fn test_filters_sensitive_env_vars() {
         std::env::set_var("CRASH_TEST_API_TOKEN", "hidden");
     }
 
-    collector.collect(&event, 0, &mut data).unwrap();
+    collector
+        .collect(&event, 0, &mut data, &PluginContext::without_deadline())
+        .unwrap();
 
     let env = data.raw.environment.as_ref().unwrap();
 

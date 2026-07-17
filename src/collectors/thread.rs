@@ -3,12 +3,17 @@
 //! Self-contained — absorbs all logic from `thread_inspector` and `memory_reader::read_u64`.
 //! Stack capture is included here because SP comes from thread registers.
 
-use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, Priority};
+use crate::pipeline::{
+    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+};
 use crate::platform;
 use crate::platform::PlatformOps;
 use mach2::port::mach_port_t;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// Bound per-event register/stack work and retained Mach send rights.
+const MAX_CAPTURED_THREADS: usize = 512;
 
 // ═══════════════════════════════════════════════════
 //  Raw data types
@@ -50,6 +55,9 @@ impl Plugin for ThreadCollector {
     fn name(&self) -> &'static str {
         "ThreadCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
@@ -61,8 +69,12 @@ impl Collector for ThreadCollector {
         event: &CrashEvent,
         task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String> {
-        data.raw.threads = inspect_all_threads(self.platform.as_ref(), task, event.crashed_thread);
+        context.checkpoint()?;
+        data.raw.threads =
+            inspect_all_threads(self.platform.as_ref(), task, event.crashed_thread, context);
+        context.checkpoint()?;
         Ok(())
     }
 }
@@ -77,8 +89,9 @@ fn inspect_all_threads(
     plat: &dyn PlatformOps,
     task: mach_port_t,
     crashed_thread: Option<mach_port_t>,
+    context: &PluginContext,
 ) -> Vec<RawThreadData> {
-    let threads = match plat.get_task_threads(task) {
+    let mut threads = match plat.get_task_threads(task) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("[monitor] Failed to enumerate threads: {e}");
@@ -86,39 +99,80 @@ fn inspect_all_threads(
         }
     };
 
-    threads
-        .into_iter()
-        .map(|thread| {
-            let name = plat.get_thread_name(thread).unwrap_or(None);
-            let crashed = crashed_thread == Some(thread);
+    if threads.len() > MAX_CAPTURED_THREADS {
+        // Preserve the crashed thread even when it appears after the cap.
+        if let Some(crashed_thread) = crashed_thread
+            && let Some(index) = threads.iter().position(|thread| *thread == crashed_thread)
+            && index >= MAX_CAPTURED_THREADS
+        {
+            threads.swap(MAX_CAPTURED_THREADS - 1, index);
+        }
+        for thread in threads.drain(MAX_CAPTURED_THREADS..) {
+            plat.deallocate_thread_port(thread);
+        }
+        eprintln!(
+            "[monitor] ThreadCollector: truncated thread list to {MAX_CAPTURED_THREADS} entries"
+        );
+    }
 
-            match inspect_thread(plat, task, thread) {
-                Ok((registers, backtrace)) => {
-                    let stack_capture = registers
-                        .get("sp")
-                        .copied()
-                        .and_then(|sp| read_stack_memory(plat, task, sp).ok());
+    let mut inspected = Vec::with_capacity(threads.len());
+    for thread in threads {
+        let crashed = crashed_thread == Some(thread);
+        if context.is_timed_out() {
+            // Preserve every acquired port in the payload so the pipeline's
+            // PortGuard can still release it after cooperative cancellation.
+            inspected.push(RawThreadData {
+                thread_port: thread,
+                name: None,
+                crashed,
+                registers: None,
+                backtrace: Vec::new(),
+                stack_capture: None,
+            });
+            continue;
+        }
 
-                    RawThreadData {
-                        thread_port: thread,
-                        name,
-                        crashed,
-                        registers: Some(registers),
-                        backtrace,
-                        stack_capture,
-                    }
-                }
-                Err(_) => RawThreadData {
+        let name = plat.get_thread_name(thread).unwrap_or(None);
+        let result = inspect_thread(plat, task, thread, context);
+        if context.is_timed_out() {
+            inspected.push(RawThreadData {
+                thread_port: thread,
+                name,
+                crashed,
+                registers: None,
+                backtrace: Vec::new(),
+                stack_capture: None,
+            });
+            continue;
+        }
+
+        match result {
+            Ok((registers, backtrace)) => {
+                let stack_capture = registers
+                    .get("sp")
+                    .copied()
+                    .and_then(|sp| read_stack_memory(plat, task, sp, context).ok());
+
+                inspected.push(RawThreadData {
                     thread_port: thread,
                     name,
                     crashed,
-                    registers: None,
-                    backtrace: Vec::new(),
-                    stack_capture: None,
-                },
+                    registers: Some(registers),
+                    backtrace,
+                    stack_capture,
+                });
             }
-        })
-        .collect()
+            Err(_) => inspected.push(RawThreadData {
+                thread_port: thread,
+                name,
+                crashed,
+                registers: None,
+                backtrace: Vec::new(),
+                stack_capture: None,
+            }),
+        }
+    }
+    inspected
 }
 
 /// Collect full thread state: registers + backtrace.
@@ -126,14 +180,16 @@ fn inspect_thread(
     plat: &dyn PlatformOps,
     task: mach_port_t,
     thread: mach_port_t,
+    context: &PluginContext,
 ) -> Result<(BTreeMap<String, u64>, Vec<u64>), String> {
-    let regs = get_registers(plat, thread)?;
+    context.checkpoint()?;
+    let regs = get_registers(plat, thread, context)?;
 
     let fp = regs.get("fp").copied().unwrap_or(0);
     let pc = regs.get("pc").copied().unwrap_or(0);
 
     let mut backtrace = vec![pc];
-    backtrace.extend(walk_backtrace(plat, task, fp, 128));
+    backtrace.extend(walk_backtrace(plat, task, fp, 128, context)?);
 
     Ok((regs, backtrace))
 }
@@ -142,13 +198,17 @@ fn inspect_thread(
 fn get_registers(
     plat: &dyn PlatformOps,
     thread: mach_port_t,
+    context: &PluginContext,
 ) -> Result<BTreeMap<String, u64>, String> {
+    context.checkpoint()?;
     let state = plat.get_thread_state(thread)?;
+    context.checkpoint()?;
 
     let mut regs = BTreeMap::new();
 
     // ARM64 state layout: 33 u64 values (x0-x28, fp, lr, sp, pc) stored as pairs of u32
     for (i, name) in platform::ARM64_GPR_NAMES.iter().enumerate() {
+        context.checkpoint()?;
         let lo = u64::from(state[i * 2]);
         let hi = u64::from(state[i * 2 + 1]);
         regs.insert(name.to_string(), lo | (hi << 32));
@@ -173,11 +233,13 @@ fn walk_backtrace(
     task: mach_port_t,
     fp: u64,
     max_depth: usize,
-) -> Vec<u64> {
+    context: &PluginContext,
+) -> Result<Vec<u64>, String> {
     let mut frames = Vec::new();
     let mut current_fp = fp;
 
     for _ in 0..max_depth {
+        context.checkpoint()?;
         if current_fp == 0 || !current_fp.is_multiple_of(8) {
             break;
         }
@@ -203,7 +265,7 @@ fn walk_backtrace(
         current_fp = prev_fp;
     }
 
-    frames
+    Ok(frames)
 }
 
 // ═══════════════════════════════════════════════════
@@ -222,7 +284,9 @@ fn read_stack_memory(
     plat: &dyn PlatformOps,
     task: mach_port_t,
     sp: u64,
+    context: &PluginContext,
 ) -> Result<RawStackCapture, String> {
+    context.checkpoint()?;
     if sp == 0 {
         return Err("SP is null".into());
     }
@@ -232,6 +296,7 @@ fn read_stack_memory(
     let bytes = plat
         .vm_read(task, sp, read_size)
         .map_err(|e| format!("stack read failed: {e}"))?;
+    context.checkpoint()?;
 
     Ok(RawStackCapture { sp, bytes })
 }

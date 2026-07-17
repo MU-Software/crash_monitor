@@ -280,6 +280,21 @@ fn test_diagnostics_field_layout() {
 }
 
 #[test]
+fn test_diagnostics_summary_counts_timeouts_separately() {
+    let mut value: serde_json::Value = serde_json::from_str(&full_crash_report_json()).unwrap();
+    value["_diagnostics"]["plugins"]["Feedback"] = serde_json::json!({
+        "status": "timed_out",
+        "duration_ms": 5000
+    });
+    let report: CrashReport = serde_json::from_value(value).unwrap();
+
+    assert_eq!(
+        diagnostics_summary(&report).as_deref(),
+        Some("Pipeline: 1 ok, 1 error, 1 timed out, 1 skipped  (105ms total)")
+    );
+}
+
+#[test]
 fn test_breadcrumb_field_layout() {
     // Verify breadcrumb format matches report_formatter::format_breadcrumbs
     let json = full_crash_report_json();

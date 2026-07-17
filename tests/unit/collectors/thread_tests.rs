@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::PluginContext;
 use crate::platform::mock::{MockPlatform, MockThread};
 
 /// Helper: create a 68-element u32 state vector with all zeros,
@@ -30,7 +31,7 @@ fn test_inspect_all_threads_success() {
         },
     ];
 
-    let result = inspect_all_threads(&plat, 0, Some(100));
+    let result = inspect_all_threads(&plat, 0, Some(100), &PluginContext::without_deadline());
     assert_eq!(result.len(), 2);
 
     assert_eq!(result[0].thread_port, 100);
@@ -42,6 +43,34 @@ fn test_inspect_all_threads_success() {
     assert!(!result[1].crashed);
     assert!(result[1].registers.is_some());
     assert_eq!(result[1].name, None);
+}
+
+#[test]
+fn test_thread_cap_preserves_crashed_thread_and_releases_surplus_ports() {
+    let mut plat = MockPlatform::default();
+    plat.threads = (0..MAX_CAPTURED_THREADS + 3)
+        .map(|index| MockThread {
+            port: u32::try_from(index + 1).unwrap(),
+            name: None,
+            state: make_state(&[]),
+        })
+        .collect();
+    let crashed_port = u32::try_from(MAX_CAPTURED_THREADS + 3).unwrap();
+
+    let result = inspect_all_threads(
+        &plat,
+        0,
+        Some(crashed_port),
+        &PluginContext::without_deadline(),
+    );
+
+    assert_eq!(result.len(), MAX_CAPTURED_THREADS);
+    assert!(
+        result
+            .iter()
+            .any(|thread| thread.thread_port == crashed_port)
+    );
+    assert_eq!(plat.deallocated_ports().len(), 3);
 }
 
 #[test]
@@ -62,7 +91,7 @@ fn test_get_registers_arm64() {
         ]),
     }];
 
-    let regs = get_registers(&plat, 10).unwrap();
+    let regs = get_registers(&plat, 10, &PluginContext::without_deadline()).unwrap();
     assert_eq!(regs["x0"], 0x1_0000_0042);
     assert_eq!(regs["fp"], 0xF0);
     assert_eq!(regs["sp"], 0x0001_0000_00FF);
@@ -85,14 +114,14 @@ fn test_walk_backtrace_chain() {
     frame2.extend_from_slice(&0xBBBBu64.to_le_bytes()); // lr
     plat.memory.insert(0x2000, frame2);
 
-    let bt = walk_backtrace(&plat, 0, 0x1000, 128);
+    let bt = walk_backtrace(&plat, 0, 0x1000, 128, &PluginContext::without_deadline()).unwrap();
     assert_eq!(bt, vec![0xAAAA, 0xBBBB]);
 }
 
 #[test]
 fn test_walk_backtrace_null_fp() {
     let plat = MockPlatform::default();
-    let frames = walk_backtrace(&plat, 0, 0, 128);
+    let frames = walk_backtrace(&plat, 0, 0, 128, &PluginContext::without_deadline()).unwrap();
     assert!(frames.is_empty());
 }
 

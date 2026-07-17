@@ -5,7 +5,9 @@
 //! from runaway report generation. State is in-memory only; monitor restart
 //! resets the window.
 
-use crate::pipeline::{CrashEvent, Filter, Plugin, Priority, ReportType};
+use crate::pipeline::{
+    CrashEvent, Filter, Plugin, PluginContext, PluginExecution, Priority, ReportType,
+};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -26,13 +28,23 @@ impl RateLimiter {
         }
     }
 
-    fn check_and_record(&self, report_type: ReportType, now: Instant) -> bool {
-        let Ok(mut recent) = self.recent.lock() else {
-            // Poisoned mutex: fail open (allow the report through).
-            return true;
+    fn check_and_record(
+        &self,
+        report_type: ReportType,
+        now: Instant,
+        context: &PluginContext,
+    ) -> Result<bool, String> {
+        context.checkpoint()?;
+        let Ok(mut recent) = self.recent.try_lock() else {
+            // A deadline cannot interrupt Mutex::lock. This state is only
+            // advisory, so contention or poisoning fails open rather than
+            // waiting behind another plugin invocation.
+            return Ok(true);
         };
+        context.checkpoint()?;
         let entry = recent.entry(report_type).or_default();
         while let Some(&front) = entry.front() {
+            context.checkpoint()?;
             if now.duration_since(front) >= self.window {
                 entry.pop_front();
             } else {
@@ -40,10 +52,11 @@ impl RateLimiter {
             }
         }
         if entry.len() >= self.max_events {
-            return false;
+            return Ok(false);
         }
         entry.push_back(now);
-        true
+        context.checkpoint()?;
+        Ok(true)
     }
 }
 
@@ -51,14 +64,17 @@ impl Plugin for RateLimiter {
     fn name(&self) -> &'static str {
         "RateLimiter"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Critical
     }
 }
 
 impl Filter for RateLimiter {
-    fn should_process(&self, event: &CrashEvent) -> Result<bool, String> {
-        Ok(self.check_and_record(event.report_type, Instant::now()))
+    fn should_process(&self, event: &CrashEvent, context: &PluginContext) -> Result<bool, String> {
+        self.check_and_record(event.report_type, Instant::now(), context)
     }
 }
 

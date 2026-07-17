@@ -1,7 +1,9 @@
 //! Collector: capture environment variables and system information.
 
 use crate::pipeline::traits::Collector;
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, Priority};
+use crate::pipeline::{
+    CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+};
 use mach2::port::mach_port_t;
 use nix::sys::utsname::uname;
 
@@ -30,6 +32,9 @@ impl Plugin for EnvironmentCollector {
     fn name(&self) -> &'static str {
         "EnvironmentCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Low
     }
@@ -41,7 +46,9 @@ impl Collector for EnvironmentCollector {
         _event: &CrashEvent,
         _task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String> {
+        context.checkpoint()?;
         let (os_version, os_build, arch) = match uname() {
             Ok(info) => (
                 info.release().to_string_lossy().into_owned(),
@@ -55,9 +62,14 @@ impl Collector for EnvironmentCollector {
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let env_vars: Vec<(String, String)> = std::env::vars()
-            .filter(|(key, _)| !is_sensitive(key))
-            .collect();
+        context.checkpoint()?;
+        let mut env_vars = Vec::new();
+        for (key, value) in std::env::vars() {
+            context.checkpoint()?;
+            if !is_sensitive(&key) {
+                env_vars.push((key, value));
+            }
+        }
 
         data.raw.environment = Some(RawEnvironment {
             os_version,
@@ -67,6 +79,7 @@ impl Collector for EnvironmentCollector {
             env_vars,
         });
 
+        context.checkpoint()?;
         Ok(())
     }
 }

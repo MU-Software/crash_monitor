@@ -113,6 +113,8 @@ pub enum Priority {
 pub enum PluginStatus {
     Ok,
     Error(String),
+    /// The plugin's absolute deadline or cancellation token fired.
+    TimedOut,
     Skipped(String),
 }
 

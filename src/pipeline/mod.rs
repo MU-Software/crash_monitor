@@ -12,12 +12,17 @@ use mach2::port::mach_port_t;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::platform::PlatformOps;
 
-pub use safety::{run_plugin_catching_panics, run_plugin_safe};
-pub use traits::{Collector, Filter, Notifier, Plugin, PostProcessor, PreProcessor};
+pub use safety::{
+    CancellationToken, PluginContext, PluginRunResult, SubprocessOutput,
+    run_plugin_catching_panics, run_plugin_cooperative, run_plugin_subprocess,
+};
+pub use traits::{
+    Collector, Filter, Notifier, Plugin, PluginExecution, PostProcessor, PreProcessor,
+};
 pub use types::{
     CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, Diagnostics,
     PluginStatus, Priority, RawShmSnapshot, ReportResult, ReportType, TerminationReason,
@@ -42,7 +47,7 @@ pub struct Pipeline {
     pub output_dir: Option<PathBuf>,
 }
 
-// Category-specific timeouts (seconds). `alarm()` has 1s granularity.
+// Category-specific cooperative deadlines (seconds).
 const FILTER_TIMEOUT: u32 = 1;
 const COLLECTOR_TIMEOUT: u32 = 5;
 const PREPROC_TIMEOUT: u32 = 2;
@@ -50,21 +55,67 @@ const POSTPROC_TIMEOUT: u32 = 30;
 const NOTIFIER_TIMEOUT: u32 = 5;
 const STAGE_TIMEOUT: u32 = 5;
 
-#[derive(Clone, Copy)]
-enum ExecutionMode {
-    Timed,
-    PanicOnly,
+fn run_stage<T>(
+    name: &str,
+    execution: PluginExecution,
+    timeout_secs: u32,
+    f: impl FnOnce(&PluginContext) -> Result<T, String>,
+) -> PluginRunResult<T> {
+    let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
+    let context = PluginContext::from_timeout(timeout);
+    enforce_execution_boundary(
+        name,
+        execution,
+        &context,
+        run_plugin_cooperative(name, &context, f),
+    )
 }
 
-fn run_stage<T>(
-    mode: ExecutionMode,
+fn run_cancellable_stage<T>(
     name: &str,
+    execution: PluginExecution,
     timeout_secs: u32,
-    f: impl FnOnce() -> Result<T, String>,
-) -> Option<T> {
-    match mode {
-        ExecutionMode::Timed => run_plugin_safe(name, timeout_secs, f),
-        ExecutionMode::PanicOnly => run_plugin_catching_panics(name, f),
+    cancellation: CancellationToken,
+    f: impl FnOnce(&PluginContext) -> Result<T, String>,
+) -> PluginRunResult<T> {
+    let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
+    let context = PluginContext::from_timeout_and_cancellation(timeout, cancellation);
+    enforce_execution_boundary(
+        name,
+        execution,
+        &context,
+        run_plugin_cooperative(name, &context, f),
+    )
+}
+
+fn enforce_execution_boundary<T>(
+    name: &str,
+    execution: PluginExecution,
+    context: &PluginContext,
+    result: PluginRunResult<T>,
+) -> PluginRunResult<T> {
+    if execution == PluginExecution::Subprocess
+        && !context.subprocess_boundary_satisfied()
+        && matches!(
+            result,
+            PluginRunResult::Completed(_) | PluginRunResult::Failed(_)
+        )
+    {
+        let error =
+            format!("plugin {name} declared Subprocess but did not use the subprocess supervisor");
+        eprintln!("[monitor] {error}");
+        PluginRunResult::Failed(error)
+    } else {
+        result
+    }
+}
+
+fn plugin_status<T>(result: &PluginRunResult<T>) -> PluginStatus {
+    match result {
+        PluginRunResult::Completed(_) => PluginStatus::Ok,
+        PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
+        PluginRunResult::Panicked => PluginStatus::Error("panicked".to_string()),
+        PluginRunResult::TimedOut => PluginStatus::TimedOut,
     }
 }
 
@@ -77,9 +128,7 @@ impl Pipeline {
     #[must_use]
     pub fn handle_event(&self, event: &CrashEvent, task: mach_port_t) -> Diagnostics {
         match self.capture_event(event, task) {
-            CaptureOutcome::Captured(captured) => {
-                self.finalize_captured(captured, ExecutionMode::Timed)
-            }
+            CaptureOutcome::Captured(captured) => self.finalize_captured(captured),
             CaptureOutcome::Skipped(diagnostics) => diagnostics,
         }
     }
@@ -99,8 +148,8 @@ impl Pipeline {
             true
         };
 
-        let cancelled = AtomicBool::new(false);
-        let payload = self.collect_snapshot(event, task, &cancelled, ExecutionMode::Timed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let payload = self.collect_snapshot(event, task, &cancelled);
 
         if suspended && let Err(e) = self.platform.resume_task(task) {
             eprintln!("[monitor] resume_task failed: {e}");
@@ -119,14 +168,13 @@ impl Pipeline {
 
     /// Collect only data that requires access to the live task.
     ///
-    /// The caller owns suspension and resume. Worker callers pass a shared
-    /// cancellation flag and use panic-only execution to avoid SIGALRM races.
+    /// The caller owns suspension and resume. Worker callers pass the shared
+    /// absolute-deadline cancellation flag into every cooperative collector.
     fn collect_snapshot(
         &self,
         event: &CrashEvent,
         task: mach_port_t,
-        cancelled: &AtomicBool,
-        mode: ExecutionMode,
+        cancelled: &Arc<AtomicBool>,
     ) -> CapturePayload {
         let mut diagnostics = Diagnostics::new();
 
@@ -134,10 +182,7 @@ impl Pipeline {
         let mut data = CollectedData::default();
         for c in &self.collectors {
             if cancelled.load(Ordering::Acquire) {
-                diagnostics.record_immediate(
-                    "CaptureDeadline",
-                    PluginStatus::Error("absolute capture deadline reached".into()),
-                );
+                diagnostics.record_immediate("CaptureDeadline", PluginStatus::TimedOut);
                 break;
             }
             if !c.is_available() {
@@ -152,12 +197,12 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(c.timeout_secs(), COLLECTOR_TIMEOUT);
-            let status = match run_stage(mode, c.name(), timeout, || {
-                c.collect(event, task, &mut data)
-            }) {
-                Some(()) => PluginStatus::Ok,
-                None => PluginStatus::Error("failed or panicked".into()),
-            };
+            let cancellation = CancellationToken::from_atomic(cancelled.clone());
+            let outcome =
+                run_cancellable_stage(c.name(), c.execution(), timeout, cancellation, |context| {
+                    c.collect(event, task, &mut data, context)
+                });
+            let status = plugin_status(&outcome);
             diagnostics.record(c.name(), status, start.elapsed());
         }
 
@@ -185,18 +230,18 @@ impl Pipeline {
         &self,
         event: &CrashEvent,
         task: mach_port_t,
-        cancelled: &AtomicBool,
+        cancelled: &Arc<AtomicBool>,
     ) -> CapturePayload {
-        self.collect_snapshot(event, task, cancelled, ExecutionMode::PanicOnly)
+        self.collect_snapshot(event, task, cancelled)
     }
 
     pub(super) fn finalize_captured_for_worker(&self, captured: CapturedEvent) -> Diagnostics {
-        self.finalize_captured(captured, ExecutionMode::PanicOnly)
+        self.finalize_captured(captured)
     }
 
     /// Finalize owned capture data without a task port or live SHM view.
     #[allow(clippy::too_many_lines)]
-    fn finalize_captured(&self, mut captured: CapturedEvent, mode: ExecutionMode) -> Diagnostics {
+    fn finalize_captured(&self, mut captured: CapturedEvent) -> Diagnostics {
         let event = &captured.event;
         let data = &mut captured.data;
         let diagnostics = &mut captured.diagnostics;
@@ -215,11 +260,14 @@ impl Pipeline {
         // Filters run after resume so filesystem and lock contention cannot
         // extend the Mach critical section.
         for filter in &self.filters {
+            let start = Instant::now();
             let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
-            let pass = run_stage(mode, filter.name(), timeout, || {
-                filter.should_process(event)
-            })
-            .unwrap_or(true);
+            let outcome = run_stage(filter.name(), filter.execution(), timeout, |context| {
+                filter.should_process(event, context)
+            });
+            let status = plugin_status(&outcome);
+            let pass = outcome.into_option().unwrap_or(true);
+            diagnostics.record(filter.name(), status, start.elapsed());
             if !pass {
                 return std::mem::take(diagnostics);
             }
@@ -241,10 +289,10 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(pp.timeout_secs(), PREPROC_TIMEOUT);
-            let status = match run_stage(mode, pp.name(), timeout, || pp.process(event, data)) {
-                Some(()) => PluginStatus::Ok,
-                None => PluginStatus::Error("failed or panicked".into()),
-            };
+            let outcome = run_stage(pp.name(), pp.execution(), timeout, |context| {
+                pp.process(event, data, context)
+            });
+            let status = plugin_status(&outcome);
             diagnostics.record(pp.name(), status, start.elapsed());
         }
 
@@ -255,23 +303,36 @@ impl Pipeline {
         }
 
         // ── Stage 1: Raw data (fail-safe) ──
-        let raw_path: Option<PathBuf> = run_stage(mode, "Stage1Raw", STAGE_TIMEOUT, || {
-            safety::write_raw_stage1(&pending, event.report_type, event.pid, &data.raw.threads)
-        });
+        let raw_path: Option<PathBuf> = run_stage(
+            "Stage1Raw",
+            PluginExecution::Cooperative,
+            STAGE_TIMEOUT,
+            |_| safety::write_raw_stage1(&pending, event.report_type, event.pid, &data.raw.threads),
+        )
+        .into_option();
 
         // Stage 1 shm dump (breadcrumbs + context raw bytes)
         if let Some(raw_shm) = &captured.raw_shm {
-            let _ = run_stage(mode, "Stage1Shm", STAGE_TIMEOUT, || {
-                safety::write_raw_shm_stage1(&pending, event.report_type, event.pid, raw_shm)
-            });
+            let _ = run_stage(
+                "Stage1Shm",
+                PluginExecution::Cooperative,
+                STAGE_TIMEOUT,
+                |_| safety::write_raw_shm_stage1(&pending, event.report_type, event.pid, raw_shm),
+            );
         }
 
         // ── Stage 2: Full JSON report + screenshot PNGs ──
         let screenshots = std::mem::take(&mut data.raw.screenshots);
-        let json_path: Option<PathBuf> = run_stage(mode, "Stage2Json", STAGE_TIMEOUT, || {
-            let mut crash_report = report::build_report(event, data, diagnostics);
-            report::write_report(&pending, &mut crash_report, &screenshots)
-        });
+        let json_path: Option<PathBuf> = run_stage(
+            "Stage2Json",
+            PluginExecution::Cooperative,
+            STAGE_TIMEOUT,
+            |_| {
+                let mut crash_report = report::build_report(event, data, diagnostics);
+                report::write_report(&pending, &mut crash_report, &screenshots)
+            },
+        )
+        .into_option();
 
         let result = ReportResult {
             raw_path,
@@ -289,11 +350,10 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
-            let status =
-                match run_stage(mode, pp.name(), timeout, || pp.process(event, &mut result)) {
-                    Some(()) => PluginStatus::Ok,
-                    None => PluginStatus::Error("failed or panicked".into()),
-                };
+            let outcome = run_stage(pp.name(), pp.execution(), timeout, |context| {
+                pp.process(event, &mut result, context)
+            });
+            let status = plugin_status(&outcome);
             diagnostics.record(pp.name(), status, start.elapsed());
         }
 
@@ -307,10 +367,10 @@ impl Pipeline {
                 }
                 let start = Instant::now();
                 let timeout = plugin_timeout(n.timeout_secs(), NOTIFIER_TIMEOUT);
-                let status = match run_stage(mode, n.name(), timeout, || n.notify(path)) {
-                    Some(()) => PluginStatus::Ok,
-                    None => PluginStatus::Error("failed or panicked".into()),
-                };
+                let outcome = run_stage(n.name(), n.execution(), timeout, |context| {
+                    n.notify(path, context)
+                });
+                let status = plugin_status(&outcome);
                 diagnostics.record(n.name(), status, start.elapsed());
             }
         }
@@ -329,15 +389,15 @@ impl Pipeline {
     /// payload for this path.
     #[must_use]
     pub fn handle_termination_event(&self, event: &CrashEvent) -> Diagnostics {
-        self.finalize_termination_event(event, ExecutionMode::Timed)
+        self.finalize_termination_event(event)
     }
 
     pub(super) fn finalize_termination_event_for_worker(&self, event: &CrashEvent) -> Diagnostics {
-        self.finalize_termination_event(event, ExecutionMode::PanicOnly)
+        self.finalize_termination_event(event)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn finalize_termination_event(&self, event: &CrashEvent, mode: ExecutionMode) -> Diagnostics {
+    fn finalize_termination_event(&self, event: &CrashEvent) -> Diagnostics {
         debug_assert!(event.termination.is_some());
         let mut diagnostics = Diagnostics::new();
 
@@ -353,11 +413,14 @@ impl Pipeline {
         };
 
         for filter in &self.filters {
+            let start = Instant::now();
             let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
-            let pass = run_stage(mode, filter.name(), timeout, || {
-                filter.should_process(event)
-            })
-            .unwrap_or(true);
+            let outcome = run_stage(filter.name(), filter.execution(), timeout, |context| {
+                filter.should_process(event, context)
+            });
+            let status = plugin_status(&outcome);
+            let pass = outcome.into_option().unwrap_or(true);
+            diagnostics.record(filter.name(), status, start.elapsed());
             if !pass {
                 return diagnostics;
             }
@@ -377,10 +440,16 @@ impl Pipeline {
         }
 
         let data = CollectedData::default();
-        let json_path: Option<PathBuf> = run_stage(mode, "Stage2Json", STAGE_TIMEOUT, || {
-            let mut crash_report = report::build_report(event, &data, &diagnostics);
-            report::write_report(&pending, &mut crash_report, &[])
-        });
+        let json_path: Option<PathBuf> = run_stage(
+            "Stage2Json",
+            PluginExecution::Cooperative,
+            STAGE_TIMEOUT,
+            |_| {
+                let mut crash_report = report::build_report(event, &data, &diagnostics);
+                report::write_report(&pending, &mut crash_report, &[])
+            },
+        )
+        .into_option();
         let mut result = ReportResult {
             raw_path: None,
             json_path,
@@ -397,12 +466,13 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
-            let status = match run_stage(mode, post_processor.name(), timeout, || {
-                post_processor.process(event, &mut result)
-            }) {
-                Some(()) => PluginStatus::Ok,
-                None => PluginStatus::Error("failed or panicked".into()),
-            };
+            let outcome = run_stage(
+                post_processor.name(),
+                post_processor.execution(),
+                timeout,
+                |context| post_processor.process(event, &mut result, context),
+            );
+            let status = plugin_status(&outcome);
             diagnostics.record(post_processor.name(), status, start.elapsed());
         }
 
@@ -417,11 +487,11 @@ impl Pipeline {
                 }
                 let start = Instant::now();
                 let timeout = plugin_timeout(notifier.timeout_secs(), NOTIFIER_TIMEOUT);
-                let status =
-                    match run_stage(mode, notifier.name(), timeout, || notifier.notify(path)) {
-                        Some(()) => PluginStatus::Ok,
-                        None => PluginStatus::Error("failed or panicked".into()),
-                    };
+                let outcome =
+                    run_stage(notifier.name(), notifier.execution(), timeout, |context| {
+                        notifier.notify(path, context)
+                    });
+                let status = plugin_status(&outcome);
                 diagnostics.record(notifier.name(), status, start.elapsed());
             }
         }

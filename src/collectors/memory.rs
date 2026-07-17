@@ -4,7 +4,9 @@
 //! Heap summary uses out-of-process VM region analysis + `TASK_VM_INFO`.
 //! `malloc_get_all_zones()` is in-process only — not usable from the monitor.
 
-use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, Priority};
+use crate::pipeline::{
+    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+};
 use crate::platform::{PlatformOps, TaskVmSummary, VmRegionInfo};
 use crate::utils::vm_tags;
 use mach2::port::mach_port_t;
@@ -50,6 +52,9 @@ impl Plugin for MemoryCollector {
     fn name(&self) -> &'static str {
         "MemoryCollector"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::High
     }
@@ -64,10 +69,13 @@ impl Collector for MemoryCollector {
         _event: &CrashEvent,
         task: mach_port_t,
         data: &mut CollectedData,
+        context: &PluginContext,
     ) -> Result<(), String> {
+        context.checkpoint()?;
         let platform = self.platform.as_ref();
-        data.raw.memory_map = collect_memory_map(platform, task);
-        data.raw.heap = collect_heap_summary(platform, task, &data.raw.memory_map);
+        data.raw.memory_map = collect_memory_map(platform, task, context)?;
+        data.raw.heap = collect_heap_summary(platform, task, &data.raw.memory_map, context)?;
+        context.checkpoint()?;
         Ok(())
     }
 }
@@ -77,14 +85,20 @@ impl Collector for MemoryCollector {
 // ═══════════════════════════════════════════════════
 
 /// Collect the full VM memory map of the target process.
-fn collect_memory_map(platform: &dyn PlatformOps, task: mach_port_t) -> Vec<VmRegionInfo> {
-    let (regions, truncated) = platform.enumerate_vm_regions(task);
+fn collect_memory_map(
+    platform: &dyn PlatformOps,
+    task: mach_port_t,
+    context: &PluginContext,
+) -> Result<Vec<VmRegionInfo>, String> {
+    context.checkpoint()?;
+    let (regions, truncated) = platform.enumerate_vm_regions(task, context)?;
+    context.checkpoint()?;
 
     if truncated {
         eprintln!("[monitor] VM region list truncated (>2000 regions)");
     }
 
-    regions
+    Ok(regions)
 }
 
 // ═══════════════════════════════════════════════════
@@ -96,7 +110,9 @@ fn collect_heap_summary(
     platform: &dyn PlatformOps,
     task: mach_port_t,
     regions: &[VmRegionInfo],
-) -> RawHeapData {
+    context: &PluginContext,
+) -> Result<RawHeapData, String> {
+    context.checkpoint()?;
     let vm_summary = platform
         .get_task_vm_info(task)
         .map_err(|e| eprintln!("[monitor] get_task_vm_info failed: {e}"))
@@ -104,6 +120,7 @@ fn collect_heap_summary(
 
     let mut tag_groups: BTreeMap<u32, (u32, u64, u32)> = BTreeMap::new();
     for region in regions {
+        context.checkpoint()?;
         if vm_tags::is_malloc_tag(region.user_tag) {
             let entry = tag_groups.entry(region.user_tag).or_insert((0, 0, 0));
             entry.0 += 1;
@@ -112,20 +129,21 @@ fn collect_heap_summary(
         }
     }
 
-    let malloc_zones: Vec<RawMallocZone> = tag_groups
-        .into_iter()
-        .map(|(tag, (count, size, resident))| RawMallocZone {
+    let mut malloc_zones = Vec::with_capacity(tag_groups.len());
+    for (tag, (count, size, resident)) in tag_groups {
+        context.checkpoint()?;
+        malloc_zones.push(RawMallocZone {
             name: vm_tags::user_tag_label(tag).to_string(),
             region_count: count,
             total_size: size,
             resident_pages: resident,
-        })
-        .collect();
+        });
+    }
 
-    RawHeapData {
+    Ok(RawHeapData {
         vm_summary,
         malloc_zones,
-    }
+    })
 }
 
 #[cfg(test)]

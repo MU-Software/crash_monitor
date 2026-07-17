@@ -4,7 +4,9 @@
 //! event's fingerprint was already seen within the window, sets
 //! `data.duplicate_detected = true` so the pipeline skips report writing.
 
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
+use crate::pipeline::{
+    CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor, Priority,
+};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -29,6 +31,10 @@ impl Plugin for DuplicateDetector {
         "DuplicateDetector"
     }
 
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
     fn priority(&self) -> Priority {
         Priority::High
     }
@@ -39,7 +45,13 @@ impl Plugin for DuplicateDetector {
 }
 
 impl PreProcessor for DuplicateDetector {
-    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        data: &mut CollectedData,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        context.checkpoint()?;
         let fp = match &data.fingerprint {
             Some(fp) => fp.clone(),
             None => return Ok(()), // No fingerprint → cannot deduplicate → pass through
@@ -47,13 +59,24 @@ impl PreProcessor for DuplicateDetector {
 
         let mut recent = self
             .recent
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
+            .try_lock()
+            .map_err(|error| format!("duplicate state unavailable: {error}"))?;
+        context.checkpoint()?;
         let now = Instant::now();
 
         // Evict expired entries
         let window = self.window;
-        recent.retain(|_, ts| now.duration_since(*ts) < window);
+        let mut expired = Vec::new();
+        for (fingerprint, timestamp) in recent.iter() {
+            context.checkpoint()?;
+            if now.duration_since(*timestamp) >= window {
+                expired.push(fingerprint.clone());
+            }
+        }
+        for fingerprint in expired {
+            context.checkpoint()?;
+            recent.remove(&fingerprint);
+        }
 
         // Check for duplicate
         if recent.contains_key(&fp) {
@@ -63,6 +86,7 @@ impl PreProcessor for DuplicateDetector {
         // Record this fingerprint (even if duplicate — updates timestamp)
         recent.insert(fp, now);
 
+        context.checkpoint()?;
         Ok(())
     }
 }

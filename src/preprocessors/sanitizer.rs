@@ -3,7 +3,9 @@
 //! Must run AFTER `Fingerprinter` so the fingerprint is computed on
 //! unsanitized data, producing stable hashes for identical crashes.
 
-use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
+use crate::pipeline::{
+    CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor, Priority,
+};
 
 pub struct Sanitizer {
     /// The username to mask, detected from `$USER`.
@@ -32,6 +34,9 @@ impl Plugin for Sanitizer {
     fn name(&self) -> &'static str {
         "Sanitizer"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Low
     }
@@ -41,28 +46,38 @@ impl Plugin for Sanitizer {
 }
 
 impl PreProcessor for Sanitizer {
-    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        data: &mut CollectedData,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        context.checkpoint()?;
         if self.username.is_none() {
             return Ok(());
         }
 
         // Sanitize image paths
         for img in &mut data.raw.images {
+            context.checkpoint()?;
             self.sanitize_str(&mut img.path);
         }
 
         // Sanitize symbol names in-place
         for sym in data.raw.symbols.values_mut() {
+            context.checkpoint()?;
             self.sanitize_str(sym);
         }
 
         // Sanitize environment variable values
         if let Some(ref mut env) = data.raw.environment {
             for (_, val) in &mut env.env_vars {
+                context.checkpoint()?;
                 self.sanitize_str(val);
             }
         }
 
+        context.checkpoint()?;
         Ok(())
     }
 }

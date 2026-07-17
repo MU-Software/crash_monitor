@@ -19,7 +19,7 @@ MONITOR_BIN        := target/release/crash_monitor
 MONITOR_DIALOG_BIN := target/release/crash_dialog_macos
 
 INTEGRATION_TESTS := --test shm_round_trip --test shm_validation_failure \
-                     --test alarm_timeout --test event_loop_test
+                     --test plugin_timeout --test event_loop_test
 
 # Self-contained e2e crash producer (schema-only; no host app dependency).
 E2E_CHILD := tests/e2e/fixtures/crash_app

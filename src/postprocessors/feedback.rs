@@ -4,41 +4,44 @@
 //! any `AppKit` crash cannot take down the monitor. User feedback text is read from
 //! the child's stdout and patched into the already-written report JSON.
 
-use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use crate::pipeline::report;
-use crate::pipeline::{CrashEvent, Plugin, PostProcessor, Priority, ReportResult};
+use crate::pipeline::{
+    CrashEvent, Plugin, PluginContext, PluginExecution, PluginRunResult, PostProcessor, Priority,
+    ReportResult, run_plugin_subprocess,
+};
 
 /// Default timeout waiting for the user to submit feedback (5 minutes).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How often to poll `try_wait` while the dialog process is running.
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
-
 pub struct FeedbackPostProcessor {
     dialog_binary: PathBuf,
     timeout: Duration,
+    available: bool,
 }
 
 impl FeedbackPostProcessor {
     #[must_use]
     pub fn new(dialog_binary: PathBuf) -> Self {
+        let available = dialog_binary.is_file();
         Self {
             dialog_binary,
             timeout: DEFAULT_TIMEOUT,
+            available,
         }
     }
 
     #[cfg(test)]
     #[must_use]
     pub fn with_timeout(dialog_binary: PathBuf, timeout: Duration) -> Self {
+        let available = dialog_binary.is_file();
         Self {
             dialog_binary,
             timeout,
+            available,
         }
     }
 }
@@ -48,24 +51,40 @@ impl Plugin for FeedbackPostProcessor {
         "FeedbackDialog"
     }
 
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Subprocess
+    }
+
     fn priority(&self) -> Priority {
         Priority::Low
     }
 
     fn is_available(&self) -> bool {
-        self.dialog_binary.exists()
+        self.available
     }
 
-    /// Disable alarm-based timeout — this plugin manages its own timeout
-    /// via `try_wait` polling with a deadline.
     fn timeout_secs(&self) -> u32 {
-        0
+        let rounded = self
+            .timeout
+            .as_secs()
+            .saturating_add(u64::from(self.timeout.subsec_nanos() != 0));
+        u32::try_from(rounded).unwrap_or(u32::MAX - 1)
     }
 }
 
 impl PostProcessor for FeedbackPostProcessor {
-    fn process(&self, event: &CrashEvent, result: &mut ReportResult) -> Result<(), String> {
+    fn process(
+        &self,
+        event: &CrashEvent,
+        result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String> {
         let Some(json_path) = &result.json_path else {
+            // This invocation has no external work to perform. Explicitly
+            // satisfy the declared boundary so the pipeline can distinguish
+            // an intentional no-op from a Subprocess plugin that forgot to
+            // use the supervisor.
+            context.mark_subprocess_not_required();
             return Ok(());
         };
 
@@ -74,67 +93,50 @@ impl PostProcessor for FeedbackPostProcessor {
             .as_ref()
             .map_or_else(|| "unknown".to_string(), |s| s.start.clone());
 
-        let mut child = Command::new(&self.dialog_binary)
+        let mut command = Command::new(&self.dialog_binary);
+        command
             .arg("--type")
             .arg(event.report_type.as_str())
             .arg("--process")
             .arg(&event.process_name)
             .arg("--timestamp")
-            .arg(timestamp)
-            // Own process group (pgid == child pid) so a timeout can kill the
-            // whole subtree, not just the direct child. Without this, a dialog
-            // that spawned helpers would orphan them on kill.
-            .process_group(0)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn dialog: {e}"))?;
+            .arg(timestamp);
 
-        // Poll with timeout.
-        let deadline = Instant::now() + self.timeout;
-        let exit_status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        eprintln!("[monitor] FeedbackDialog timed out, killing");
-                        // Kill the whole process group (child + any descendants).
-                        // child.kill() alone would orphan grandchildren.
-                        #[allow(clippy::cast_possible_wrap)] // PID always fits in i32
-                        let pgid = nix::unistd::Pid::from_raw(child.id() as i32);
-                        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
-                        let _ = child.wait();
-                        return Ok(());
-                    }
-                    std::thread::sleep(POLL_INTERVAL);
-                }
-                Err(e) => {
-                    eprintln!("[monitor] FeedbackDialog wait error: {e}");
-                    return Ok(());
-                }
+        let isolated_context = context.bounded_by(self.timeout);
+        let output = match run_plugin_subprocess(self.name(), &mut command, &isolated_context) {
+            PluginRunResult::Completed(output) => output,
+            PluginRunResult::TimedOut => {
+                // Propagate the nested helper deadline to the outer plugin
+                // runner so diagnostics record `TimedOut`, not `Error`.
+                context.cancellation_token().cancel();
+                return Err("feedback dialog timed out".to_string());
+            }
+            PluginRunResult::Failed(error) => return Err(error),
+            PluginRunResult::Panicked => {
+                return Err("feedback subprocess supervisor panicked".to_string());
             }
         };
 
-        if !exit_status.success() {
+        if !output.status.success() {
             // exit 1 = skip, anything else = dialog error/crash.
-            let code = exit_status.code().unwrap_or(-1);
+            let code = output.status.code().unwrap_or(-1);
             if code == 1 {
                 eprintln!("[monitor] Feedback skipped by user");
-            } else {
-                eprintln!("[monitor] FeedbackDialog exited with code {code}");
+                return Ok(());
             }
-            return Ok(());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "FeedbackDialog exited with {}: {}",
+                output.status,
+                stderr.trim()
+            ));
         }
 
-        // Read feedback text from stdout.
-        let mut feedback = String::new();
-        if let Some(mut stdout) = child.stdout.take()
-            && let Err(e) = stdout.read_to_string(&mut feedback)
-        {
-            eprintln!("[monitor] Failed to read feedback: {e}");
-            return Ok(());
+        if output.stdout_truncated {
+            return Err("feedback output exceeded 1 MiB".to_string());
         }
-
+        let feedback = String::from_utf8(output.stdout)
+            .map_err(|error| format!("feedback output was not UTF-8: {error}"))?;
         let feedback = feedback.trim();
         if feedback.is_empty() {
             return Ok(());

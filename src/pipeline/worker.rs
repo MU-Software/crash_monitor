@@ -86,11 +86,11 @@ impl CaptureWorker {
         deadline: Instant,
     ) -> CaptureOutcome {
         if Instant::now() >= deadline {
-            return minimal_capture(event, "absolute capture deadline already elapsed");
+            return timed_out_capture(event, "absolute capture deadline already elapsed");
         }
 
         if let Some(reason) = &self.unavailable_reason {
-            return minimal_capture(event, reason);
+            return failed_capture(event, reason);
         }
 
         let suspended = match self.pipeline.platform.suspend_task(task) {
@@ -109,7 +109,7 @@ impl CaptureWorker {
 
         if Instant::now() >= deadline {
             self.resume_if_needed(task, suspended);
-            return minimal_capture(event, "absolute capture deadline elapsed during suspend");
+            return timed_out_capture(event, "absolute capture deadline elapsed during suspend");
         }
 
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -124,7 +124,7 @@ impl CaptureWorker {
 
         let Some(sender) = &self.sender else {
             self.resume_if_needed(task, suspended);
-            return minimal_capture(job.event, "capture worker is unavailable");
+            return failed_capture(job.event, "capture worker is unavailable");
         };
 
         if let Err(error) = sender.try_send(job) {
@@ -133,7 +133,7 @@ impl CaptureWorker {
             };
             self.resume_if_needed(task, suspended);
             self.retire("capture worker queue unavailable");
-            return minimal_capture(event, "capture worker queue unavailable");
+            return failed_capture(event, "capture worker queue unavailable");
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -149,14 +149,14 @@ impl CaptureWorker {
             Ok(payload) => CaptureOutcome::Captured(CapturedEvent::new(event_for_result, payload)),
             Err(RecvTimeoutError::Timeout) => {
                 self.retire("capture worker exceeded absolute deadline");
-                minimal_capture(
+                timed_out_capture(
                     event_for_result,
                     "capture worker exceeded absolute deadline",
                 )
             }
             Err(RecvTimeoutError::Disconnected) => {
                 self.retire("capture worker disconnected");
-                minimal_capture(event_for_result, "capture worker disconnected")
+                failed_capture(event_for_result, "capture worker disconnected")
             }
         }
     }
@@ -183,10 +183,18 @@ impl CaptureWorker {
     }
 }
 
-fn minimal_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {
+fn timed_out_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {
+    minimal_capture(event, reason, PluginStatus::TimedOut)
+}
+
+fn failed_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {
+    minimal_capture(event, reason, PluginStatus::Error(reason.to_string()))
+}
+
+fn minimal_capture(event: super::CrashEvent, reason: &str, status: PluginStatus) -> CaptureOutcome {
     eprintln!("[monitor] {reason}; continuing with minimum capture payload");
     let mut diagnostics = Diagnostics::new();
-    diagnostics.record_immediate("CaptureWorker", PluginStatus::Error(reason.to_string()));
+    diagnostics.record_immediate("CaptureWorker", status);
     CaptureOutcome::Captured(CapturedEvent::new(
         event,
         CapturePayload {
@@ -297,8 +305,10 @@ pub(crate) fn finalize_terminated_child(
             None
         }
         Err(RecvTimeoutError::Timeout) => {
-            // The handle is intentionally detached. P0-03 replaces this
-            // thread containment with a killable worker process.
+            // The pipeline thread is intentionally detached. Every plugin
+            // expected to wait indefinitely must place that payload behind
+            // the killable subprocess supervisor; audited cooperative work
+            // can still be inside a non-preemptible synchronous OS call.
             None
         }
     }
@@ -437,7 +447,8 @@ fn finish_thread(done_rx: &Receiver<()>, handle: Option<JoinHandle<()>>, timeout
 mod tests {
     use super::*;
     use crate::pipeline::{
-        CollectedData, CrashEvent, Plugin, PostProcessor, Priority, ReportResult, ReportType,
+        CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
+        ReportResult, ReportType,
     };
     use crate::platform::mock::MockPlatform;
     use std::sync::Condvar;
@@ -455,13 +466,22 @@ mod tests {
             "BlockingPostProcessor"
         }
 
+        fn execution(&self) -> PluginExecution {
+            PluginExecution::Cooperative
+        }
+
         fn priority(&self) -> Priority {
             Priority::Low
         }
     }
 
     impl PostProcessor for BlockingPostProcessor {
-        fn process(&self, _event: &CrashEvent, _result: &mut ReportResult) -> Result<(), String> {
+        fn process(
+            &self,
+            _event: &CrashEvent,
+            _result: &mut ReportResult,
+            _context: &PluginContext,
+        ) -> Result<(), String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let _ = self.entered_tx.send(());
             let (lock, condvar) = &*self.release;
@@ -550,6 +570,27 @@ mod tests {
         };
         *released = true;
         condvar.notify_all();
+    }
+
+    #[test]
+    fn expired_capture_worker_deadline_is_timed_out() {
+        let fixture = worker_fixture();
+        let mut worker = CaptureWorker::start(fixture.pipeline.clone());
+        let event = captured(9).event;
+
+        let outcome = worker.capture(event, 0, Instant::now());
+        let CaptureOutcome::Captured(captured) = outcome else {
+            panic!("an elapsed capture deadline should keep a minimum payload");
+        };
+        let status = captured
+            .diagnostics
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "CaptureWorker")
+            .map(|entry| &entry.status);
+        assert!(matches!(status, Some(PluginStatus::TimedOut)));
+
+        worker.shutdown(Duration::from_secs(1));
     }
 
     #[test]

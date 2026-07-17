@@ -256,9 +256,13 @@ fn print_breadcrumbs(report: &CrashReport) {
 fn print_diagnostics(report: &CrashReport) {
     // _diagnostics format (from report_formatter::build_diagnostics_json):
     //   { "pipeline_duration_ms": <u64>, "plugins": { "<name>": { "status", "duration_ms", ... } } }
-    let Some(ref diag) = report.diagnostics else {
-        return;
-    };
+    if let Some(summary) = diagnostics_summary(report) {
+        println!("{summary}");
+    }
+}
+
+fn diagnostics_summary(report: &CrashReport) -> Option<String> {
+    let diag = report.diagnostics.as_ref()?;
 
     let total_ms = diag
         .get("pipeline_duration_ms")
@@ -269,6 +273,7 @@ fn print_diagnostics(report: &CrashReport) {
 
     let mut ok_count = 0u32;
     let mut err_count = 0u32;
+    let mut timeout_count = 0u32;
     let mut skip_count = 0u32;
 
     if let Some(plugins) = plugins {
@@ -277,14 +282,15 @@ fn print_diagnostics(report: &CrashReport) {
                 Some("ok") => ok_count += 1,
                 Some("skipped") => skip_count += 1,
                 Some("error") => err_count += 1,
+                Some("timed_out") => timeout_count += 1,
                 _ => {}
             }
         }
     }
 
-    println!(
-        "Pipeline: {ok_count} ok, {err_count} error, {skip_count} skipped  ({total_ms}ms total)"
-    );
+    Some(format!(
+        "Pipeline: {ok_count} ok, {err_count} error, {timeout_count} timed out, {skip_count} skipped  ({total_ms}ms total)"
+    ))
 }
 
 fn format_duration(secs: u64) -> String {

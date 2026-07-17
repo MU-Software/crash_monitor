@@ -6,10 +6,14 @@
 //! - total size > `max_total_bytes`
 //! - age > `max_age_days`
 
-use crate::pipeline::{CrashEvent, Plugin, PostProcessor, Priority, ReportResult};
+use crate::pipeline::{
+    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
+
+const MAX_RETENTION_SCAN_ENTRIES: usize = 10_000;
 
 pub struct RetentionManager {
     max_count: usize,
@@ -54,6 +58,9 @@ impl Plugin for RetentionManager {
     fn name(&self) -> &'static str {
         "RetentionManager"
     }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
     fn priority(&self) -> Priority {
         Priority::Low
     }
@@ -66,10 +73,16 @@ struct ReportEntry {
 }
 
 impl PostProcessor for RetentionManager {
-    fn process(&self, _event: &CrashEvent, _result: &mut ReportResult) -> Result<(), String> {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        context.checkpoint()?;
         let dir = self.target_dir()?;
 
-        let mut entries = collect_entries(&dir)?;
+        let mut entries = collect_entries(&dir, context)?;
         if entries.is_empty() {
             return Ok(());
         }
@@ -80,52 +93,79 @@ impl PostProcessor for RetentionManager {
         let now = SystemTime::now();
 
         // Pass 1: delete files older than max_age
-        entries.retain(|e| {
-            let age = now.duration_since(e.modified).unwrap_or(Duration::ZERO);
+        let mut retained = Vec::with_capacity(entries.len());
+        for entry in entries {
+            context.checkpoint()?;
+            let age = now.duration_since(entry.modified).unwrap_or(Duration::ZERO);
             if age > self.max_age {
-                let _ = fs::remove_file(&e.path);
-                false
+                let _ = fs::remove_file(&entry.path);
             } else {
-                true
+                retained.push(entry);
             }
-        });
+        }
+        entries = retained;
 
         // Pass 2: delete oldest while count exceeds limit
         if entries.len() > self.max_count {
             for e in entries.drain(..entries.len() - self.max_count) {
+                context.checkpoint()?;
                 let _ = fs::remove_file(&e.path);
             }
         }
 
         // Pass 3: delete oldest while total size exceeds limit
-        let mut total: u64 = entries.iter().map(|e| e.size).sum();
+        let mut total = 0_u64;
+        for entry in &entries {
+            context.checkpoint()?;
+            total = total.saturating_add(entry.size);
+        }
         let mut remove_count = 0;
         while total > self.max_total_bytes && remove_count < entries.len() {
+            context.checkpoint()?;
             total -= entries[remove_count].size;
             remove_count += 1;
         }
         if remove_count > 0 {
             for e in entries.drain(..remove_count) {
+                context.checkpoint()?;
                 let _ = fs::remove_file(&e.path);
             }
         }
 
+        context.checkpoint()?;
         Ok(())
     }
 }
 
-fn collect_entries(dir: &std::path::Path) -> Result<Vec<ReportEntry>, String> {
+fn collect_entries(
+    dir: &std::path::Path,
+    context: &PluginContext,
+) -> Result<Vec<ReportEntry>, String> {
+    collect_entries_bounded(dir, context, MAX_RETENTION_SCAN_ENTRIES)
+}
+
+fn collect_entries_bounded(
+    dir: &std::path::Path,
+    context: &PluginContext,
+    max_entries: usize,
+) -> Result<Vec<ReportEntry>, String> {
+    context.checkpoint()?;
     let read_dir =
         fs::read_dir(dir).map_err(|e| format!("cannot read '{}': {e}", dir.display()))?;
 
     let mut entries = Vec::new();
     for entry in read_dir {
+        context.checkpoint()?;
         let Ok(entry) = entry else { continue };
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
         if !metadata.is_file() {
             continue;
+        }
+        if entries.len() >= max_entries {
+            eprintln!("[monitor] RetentionManager: scan truncated at {max_entries} regular files");
+            break;
         }
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         entries.push(ReportEntry {

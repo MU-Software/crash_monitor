@@ -69,7 +69,10 @@ never awaited before reply or child reap begins.
 
 During normal shutdown, the monitor drains queued background work for at most
 two seconds. A worker that is still blocked after that deadline is detached so
-shutdown cannot wait forever.
+shutdown cannot wait forever. Detaching bounds the caller's wait; it does not
+terminate arbitrary in-process Rust or a synchronous OS call already in
+progress. Work that is expected to wait indefinitely must use the subprocess
+boundary below.
 
 | Boundary | Deadline / bound | Expiry policy |
 |----------|------------------|---------------|
@@ -77,25 +80,42 @@ shutdown cannot wait forever.
 | Snapshot/ANR queue submission | non-blocking, capacity 2 | log and drop when full/disconnected |
 | Background shutdown drain | 2 s | detach any worker still running |
 | Fatal termination handoff | no independent timer | wait for the supervisor's explicit reason/`None`, or channel disconnect; never write JSON/ZIP first |
-| Fatal or task-independent terminal finalization | 310 s supervisor wait | detach and report no final artifact if the worker has not completed |
-| Feedback dialog | 300 s, enforced by the dialog post-processor | kill its process group and continue finalization |
+| Fatal or task-independent terminal finalization | 310 s caller wait | detach the in-process worker and return no artifact path to the caller; the worker may still finish later |
+| Cooperative filter / collector / pre-processor | 1 s / 5 s / 2 s defaults | publish an invocation-local absolute deadline; plugin checkpoints stop further work and record `TimedOut` |
+| Cooperative post-processor / notifier | 30 s / 5 s defaults | stop at the next checkpoint, retain completed earlier stages, and record `TimedOut` |
+| Feedback dialog | 300 s hard deadline | kill its process group, reap the helper, record `TimedOut`, and continue finalization |
+| System notification helper | 5 s hard deadline | kill its process group, reap it, record `TimedOut`, and continue finalization |
 
-Other worker plugins currently have no hard per-plugin deadline. They are
-panic-isolated and kept off the event-loop thread; killable per-plugin deadlines
-belong to P0-03.
+Every registered plugin declares `Cooperative` or `Subprocess`, and every
+pipeline category consumes that declaration. `Cooperative` is reserved for
+audited in-process implementations that receive a mandatory `PluginContext`
+and check it at bounded work boundaries. `Subprocess` denotes a small trusted
+in-process adapter whose blocking or untrusted payload must use the subprocess
+supervisor described below. The pipeline rejects an adapter result if it did
+not cross that boundary (except an explicitly recorded no-op invocation).
+Plugin metadata (`name`, execution kind, priority, dependencies, availability,
+and timeout) is cached, constant-time state; metadata access performs no I/O.
 
 ## Failure policy
 
-- If capture reaches its absolute deadline or its capture thread/collector
-  fails, the monitor discards any unfinished mutable worker state, creates an
-  immutable minimum crash payload, and immediately proceeds to resume and
-  reply. The timed-out worker is retired and cannot accept another capture.
+- If capture reaches its outer absolute deadline, or the capture thread panics
+  or disconnects, the monitor discards its unfinished mutable worker state,
+  creates an immutable minimum crash payload, and immediately proceeds to
+  resume and reply. The timed-out worker is retired and cannot accept another
+  capture.
 - A manual snapshot or ANR that requires a consistent suspended snapshot is
   skipped when task suspension fails. It is not finalized from inconsistent
   live data.
-- When a collector returns an ordinary error, earlier completed collector data
-  is retained. A deadline timeout is different: the in-flight mutable payload
-  is quarantined as a unit and only event metadata enters the minimum snapshot.
+- When an individual collector returns an ordinary error or observes its
+  cooperative plugin deadline, safely owned data already written by it and
+  earlier collectors is retained. Only the outer capture deadline quarantines
+  the worker's mutable payload as a unit and falls back to event metadata.
+- A plugin deadline is recorded as `TimedOut`, separately from an ordinary
+  returned error or a caught panic. Collector and pre-processor hard
+  dependencies do not treat a timed-out prerequisite as successful.
+  Post-processor dependencies are currently ordering-only, so later artifact
+  cleanup can still run after a timeout; P0-05 makes that distinction explicit
+  in configuration validation.
 - A queue-full snapshot/ANR is logged and dropped. It does not block capture,
   resume, reply, or child-state observation.
 - Fatal finalization waits for the supervisor's termination handoff before
@@ -104,27 +124,58 @@ belong to P0-03.
 
 ## Panic and timeout isolation
 
-Plugin panics are isolated with `catch_unwind`, so one plugin cannot unwind
-through the worker or discard already completed stages. Release profiles must
-therefore continue to use `panic = "unwind"`.
+Plugin panics are isolated with `catch_unwind`, so one cooperative plugin cannot
+unwind through the worker or discard already completed stages. Release profiles
+must therefore continue to use `panic = "unwind"`.
 
-The finalization worker deliberately does **not** arm process-global `SIGALRM`.
-An alarm set by one worker can be delivered to the event loop or Mach listener,
-and it cannot reliably stop CPU-bound or otherwise non-cooperative code. Worker
-execution currently provides panic isolation and critical-path isolation, not
-forced termination of arbitrary plugin code.
+Plugin timeout code never installs a signal handler and never arms `alarm()`.
+Each invocation instead owns an absolute monotonic deadline and a cloneable
+cancellation token. Concurrent plugins therefore cannot overwrite one another's
+timer or alter the event loop's signal disposition. Cooperative plugins check
+the context before work and within potentially long loops. Capture collectors
+also share the supervisor's absolute cancellation flag, so expiry stops the
+next checkpoint rather than starting another task-facing operation.
 
-Hard cancellation for non-cooperative plugins is deferred to P0-03, where such
-plugins run in a killable process. Until then, a hung worker is contained by the
-bounded queue and two-second shutdown-drain policy; the supervisor stops
-waiting at the capture deadline and does not delay a Mach reply for the worker.
+This cooperative mechanism diagnoses expiry at checkpoints and after the
+plugin returns; it cannot preempt a syscall, Mach call, codec call, lock wait,
+or CPU loop while execution is between checkpoints. A plugin whose
+uncheckpointed work can remain unbounded must not be classified
+`Cooperative`. Built-in cooperative plugins checkpoint their loops and apply
+stage-specific caps where available (VM enumeration also has independent query
+and failure budgets). ZIP archival accepts at most 256 matching entries, only
+regular files, at most 256 MiB per file and 512 MiB total; file bodies are
+streamed through 64 KiB checkpointed buffers. Move-to-sent accepts regular
+files up to 576 MiB; an `EXDEV` fallback streams through the same buffer size to
+a unique temporary destination before publishing it and deleting the source.
+PNG conversion reads only regular report/RGBA files through one descriptor,
+caps report JSON at 256 MiB and decoded RGBA at 128 MiB, and publishes through
+unique temporary files. Session-log rotation reads no more than the configured
+trigger plus 8 MiB and caps individual lines and line count.
+A cooperative deadline is not a universal resource limit:
+an individual synchronous filesystem, kernel, or codec call remains
+non-preemptible, and artifact formats without a streaming byte budget can run
+past the deadline before returning. Finalization isolation keeps that work away
+from task resume and the Mach reply, but a detached in-process worker may keep
+running. The outer capture supervisor still resumes/replies at its absolute
+deadline and quarantines any late mutable result. `task_suspend` and
+`task_resume` themselves are synchronous kernel calls too. The Stage-1/Stage-2
+five-second setting has the same cooperative semantics: it diagnoses an
+overrun after serialization or a synchronous write returns; it is not a hard
+I/O preemption boundary.
 
-Cancellation is cooperative at collector boundaries in this phase. An
-individual collector or Mach kernel call already in progress cannot be killed
-inside the Rust process; after the supervisor deadline its late result is
-quarantined and discarded, but the call may return after task resume. Likewise,
-`task_suspend`/`task_resume` themselves are synchronous kernel calls. P0-03 is
-the work item that turns non-cooperative execution into a hard kill guarantee.
+Payloads deliberately designed to wait (the feedback UI and system notifier
+helper) run through an `exec`-based subprocess supervisor; the trusted adapter
+does not run Rust in the post-`fork` child. The child gets a dedicated process
+group; stdout and stderr are drained concurrently, capped at 1 MiB per stream,
+and an incomplete capture is an error rather than a partial success. At
+deadline expiry the supervisor sends `SIGKILL` to the group and reaps the
+direct child before returning `TimedOut`. It also removes same-group descendants
+left by a normally exiting direct child. A child that does not become waitable
+within the two-second cleanup grace produces an error instead of `TimedOut`;
+a background waiter retains direct-child reaping ownership. Feedback and macOS
+system notification use this boundary. This is lifecycle isolation, not an OS
+sandbox: a malicious helper could deliberately create a new session/process
+group and escape group cleanup, so only trusted executables may be configured.
 
 ## Stability invariants
 
@@ -143,9 +194,12 @@ outcome**, worse than a degraded report. The design rules:
    serialization, so a report exists even if formatting later fails.
 7. **Bounded background work** — snapshot/ANR submission never waits for queue
    space, and shutdown never waits more than two seconds for a hung worker.
-8. **Input size caps** — bounded report / dSYM / decoded-stack sizes guard
+8. **No process-global plugin timers** — plugin deadlines never change signal
+   dispositions or arm a process-wide timer; helper payloads designed to wait
+   are owned, killable subprocesses.
+9. **Input size caps** — bounded report / dSYM / decoded-stack sizes guard
    against pathological input.
-9. **No cross-category plugin dependencies** — a plugin's `depends_on` may name
+10. **No cross-category plugin dependencies** — a plugin's `depends_on` may name
    only same-category plugins, keeping ordering acyclic and local.
 
 ## Configuration

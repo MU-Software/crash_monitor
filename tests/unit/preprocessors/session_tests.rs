@@ -9,7 +9,7 @@ fn test_read_session_lock_rfc3339() {
     let lock_path = tmp_dir.path().join("session.lock");
     std::fs::write(&lock_path, format!("{uuid}\n{timestamp}\n")).unwrap();
 
-    let result = read_session_lock_from(tmp_dir.path());
+    let result = read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline());
     assert!(result.is_some(), "should parse RFC3339 session lock");
     let session = result.unwrap();
     assert_eq!(session.id, uuid);
@@ -25,7 +25,7 @@ fn test_read_session_lock_unix_timestamp() {
     let lock_path = tmp_dir.path().join("session.lock");
     std::fs::write(&lock_path, format!("{uuid}\n{unix_ts}\n")).unwrap();
 
-    let result = read_session_lock_from(tmp_dir.path());
+    let result = read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline());
     assert!(result.is_some(), "should parse Unix timestamp session lock");
     let session = result.unwrap();
     assert_eq!(session.id, uuid);
@@ -40,7 +40,7 @@ fn test_read_session_lock_unix_timestamp() {
 fn test_read_session_lock_missing_file() {
     let tmp_dir = tempfile::tempdir().unwrap();
     // No session.lock written
-    let result = read_session_lock_from(tmp_dir.path());
+    let result = read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline());
     assert!(result.is_none(), "missing lock file should return None");
 }
 
@@ -51,6 +51,33 @@ fn test_read_session_lock_truncated() {
     // Only one line — missing timestamp
     std::fs::write(&lock_path, "abc-123\n").unwrap();
 
-    let result = read_session_lock_from(tmp_dir.path());
+    let result = read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline());
     assert!(result.is_none(), "truncated lock file should return None");
+}
+
+#[test]
+fn test_read_session_lock_rejects_oversized_file_and_lines() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let lock_path = tmp_dir.path().join("session.lock");
+
+    std::fs::write(&lock_path, vec![b'x'; MAX_SESSION_LOCK_BYTES + 1]).unwrap();
+    assert!(
+        read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline()).is_none(),
+        "the total file-size cap must be enforced"
+    );
+
+    let long_id = "x".repeat(MAX_SESSION_LOCK_LINE_BYTES + 1);
+    std::fs::write(&lock_path, format!("{long_id}\n1711720800\n")).unwrap();
+    assert!(
+        read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline()).is_none(),
+        "the per-line cap must be enforced"
+    );
+}
+
+#[test]
+fn test_read_session_lock_rejects_non_regular_file() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp_dir.path().join("session.lock")).unwrap();
+
+    assert!(read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline()).is_none());
 }

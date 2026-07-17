@@ -9,6 +9,8 @@ pub mod mock;
 
 use mach2::port::mach_port_t;
 
+use crate::pipeline::PluginContext;
+
 /// Abstraction over Mach kernel APIs used by collectors and pipeline.
 /// Enables mock-based unit testing without real child processes.
 pub trait PlatformOps: Send + Sync {
@@ -64,7 +66,14 @@ pub trait PlatformOps: Send + Sync {
     fn vm_region_query(&self, task: mach_port_t, address: u64) -> Result<VmRegionInfo, String>;
 
     /// Enumerate all VM regions in the target task's address space.
-    fn enumerate_vm_regions(&self, task: mach_port_t) -> (Vec<VmRegionInfo>, bool);
+    ///
+    /// # Errors
+    /// Returns an error when the plugin deadline or cancellation token fires.
+    fn enumerate_vm_regions(
+        &self,
+        task: mach_port_t,
+        context: &PluginContext,
+    ) -> Result<(Vec<VmRegionInfo>, bool), String>;
 
     /// Get high-level VM statistics for a task.
     ///
@@ -126,8 +135,12 @@ impl PlatformOps for MacOsPlatform {
         macos::vm_region_query(task, &mut addr).map_err(|e| e.to_string())
     }
 
-    fn enumerate_vm_regions(&self, task: mach_port_t) -> (Vec<VmRegionInfo>, bool) {
-        macos::enumerate_vm_regions(task)
+    fn enumerate_vm_regions(
+        &self,
+        task: mach_port_t,
+        context: &PluginContext,
+    ) -> Result<(Vec<VmRegionInfo>, bool), String> {
+        macos::enumerate_vm_regions(task, || context.checkpoint())
     }
 
     fn get_task_vm_info(&self, task: mach_port_t) -> Result<TaskVmSummary, String> {

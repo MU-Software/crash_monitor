@@ -5,6 +5,12 @@ use mach2::kern_return::KERN_INVALID_ADDRESS;
 /// Maximum number of VM regions to enumerate (safety cap).
 pub(crate) const MAX_VM_REGIONS: usize = 2000;
 
+/// Maximum kernel queries, including failed queries that do not add a region.
+pub(crate) const MAX_VM_REGION_QUERY_ATTEMPTS: usize = MAX_VM_REGIONS * 4;
+
+/// Stop after this many consecutive non-terminal query failures.
+pub(crate) const MAX_CONSECUTIVE_VM_REGION_FAILURES: usize = 64;
+
 /// Result of processing one VM region query in the enumeration loop.
 pub(crate) enum VmEnumAction {
     /// Add region and advance address.
@@ -37,6 +43,20 @@ pub(crate) fn vm_enum_action(
             next_address: address.saturating_add(4096),
         },
     }
+}
+
+/// Whether the enumeration's independent query/failure budget is exhausted.
+///
+/// The region-count cap alone cannot bound a loop that repeatedly fails before
+/// adding a region, so the FFI loop applies both limits.
+pub(crate) fn vm_enum_budget_exhausted(query_attempts: usize, consecutive_failures: usize) -> bool {
+    query_attempts >= MAX_VM_REGION_QUERY_ATTEMPTS
+        || consecutive_failures >= MAX_CONSECUTIVE_VM_REGION_FAILURES
+}
+
+/// Return whether an enumeration action advances beyond the current address.
+pub(crate) fn vm_enum_made_progress(current_address: u64, next_address: u64) -> bool {
+    next_address > current_address
 }
 
 #[cfg(test)]
