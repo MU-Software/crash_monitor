@@ -31,7 +31,7 @@ unsafe fn write_cstr(base: *mut u8, offset: usize, s: &str) {
 fn test_shm_create_validate_drop() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     assert!(shm.validate(), "freshly created shm should validate");
-    assert!(shm.name().starts_with("/mbb_crash_"));
+    assert!(shm.name().starts_with("/crash_monitor_"));
     assert_eq!(shm.read_heartbeat(), 0);
     assert!(shm.read_breadcrumbs().is_empty());
     // Drop cleans up

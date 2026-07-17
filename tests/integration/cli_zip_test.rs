@@ -16,7 +16,7 @@ fn sample_report_json() -> String {
             "timestamp": "2026-04-05T12:00:00.000000000+09:00",
             "pid": 1234,
             "process": "voxelcore_desktop",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "threads": [{
@@ -70,7 +70,7 @@ fn test_analyze_reads_report_from_zip() {
         ],
     );
 
-    let exit_code = mbb_monitor::cli::analyze::run(zip_path.to_str().unwrap());
+    let exit_code = crash_monitor::cli::analyze::run(zip_path.to_str().unwrap());
     assert_eq!(exit_code, 0);
 }
 
@@ -84,7 +84,7 @@ fn test_stack_reads_report_from_zip() {
         &[("crash_20260405_120000_1234.json", json.as_bytes())],
     );
 
-    let exit_code = mbb_monitor::cli::stack::run(zip_path.to_str().unwrap(), 0);
+    let exit_code = crash_monitor::cli::stack::run(zip_path.to_str().unwrap(), 0);
     assert_eq!(exit_code, 0);
 }
 
@@ -94,6 +94,6 @@ fn test_analyze_zip_without_report_json_errors() {
     let zip_path = dir.path().join("crash_x.zip");
     build_zip(&zip_path, &[("crash_x_screenshot_000.rgba", b"raw pixels")]);
 
-    let exit_code = mbb_monitor::cli::analyze::run(zip_path.to_str().unwrap());
+    let exit_code = crash_monitor::cli::analyze::run(zip_path.to_str().unwrap());
     assert_eq!(exit_code, 1);
 }

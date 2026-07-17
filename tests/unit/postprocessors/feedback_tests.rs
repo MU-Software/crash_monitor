@@ -70,7 +70,7 @@ fn make_mock_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
 
 #[test]
 fn test_not_available_when_missing() {
-    let pp = FeedbackPostProcessor::new(PathBuf::from("/nonexistent/mbb_crash_dialog_macos"));
+    let pp = FeedbackPostProcessor::new(PathBuf::from("/nonexistent/crash_dialog_macos"));
     assert!(!pp.is_available());
 }
 

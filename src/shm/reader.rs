@@ -79,7 +79,7 @@ impl SharedMemory {
         crate::platform::macos::ffi::shm::create_shared_memory(monitor_pid)
     }
 
-    /// The shm name (e.g., `/mbb_crash_12345`) for passing via environment variable.
+    /// The shm name (e.g., `/crash_monitor_12345`) for passing via environment variable.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name

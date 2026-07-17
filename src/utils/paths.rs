@@ -3,19 +3,25 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Environment variable to override the base data directory.
+/// Environment variable that a host project sets to choose the base data
+/// directory (where crash reports, sessions, and locks live).
 ///
-/// Set by `tools/crash_monitor/.cargo/config.toml` for `cargo test`/`cargo run`
-/// invocations so that any code path which falls back to `pending_dir()`
-/// (e.g. tests with `output_dir: None`) writes to a sandbox under `target/`
-/// instead of polluting the user's `~/.modelblockbuilder/`.
+/// This is the project-configuration point: a project embedding the crash
+/// monitor points it at its own namespace (e.g. `~/.myapp`) by exporting
+/// `CRASH_MONITOR_DATA_DIR` before launching the monitor — the same value is
+/// inherited by the monitored child, so the C reporter and the Rust monitor
+/// agree on one location. It is also set by `tools/crash_monitor/.cargo/config.toml`
+/// during `cargo test`/`cargo run` to a sandbox under `target/` so tests never
+/// touch the real data directory.
 ///
-/// Production builds (the codesigned binary launched by `make desktop-monitor-run`)
-/// do NOT set this variable, so they continue to use `~/.modelblockbuilder/`.
-const DATA_DIR_OVERRIDE_ENV: &str = "MBB_CRASH_DATA_DIR";
+/// When unset, both sides fall back to the tool default `~/.crash_monitor/`.
+const DATA_DIR_OVERRIDE_ENV: &str = "CRASH_MONITOR_DATA_DIR";
 
-/// Base directory for crash reporter data: `~/.modelblockbuilder/` (or
-/// `$MBB_CRASH_DATA_DIR` if set, e.g. during `cargo test`).
+/// Tool-default base directory name under `$HOME` when the override env is unset.
+const DEFAULT_DATA_DIR_NAME: &str = ".crash_monitor";
+
+/// Base directory for crash reporter data: `$CRASH_MONITOR_DATA_DIR` if set,
+/// else `~/.crash_monitor/`.
 pub fn data_dir() -> Result<PathBuf, String> {
     let dir = if let Ok(override_path) = std::env::var(DATA_DIR_OVERRIDE_ENV) {
         if override_path.is_empty() {
@@ -24,7 +30,7 @@ pub fn data_dir() -> Result<PathBuf, String> {
         PathBuf::from(override_path)
     } else {
         let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-        PathBuf::from(home).join(".modelblockbuilder")
+        PathBuf::from(home).join(DEFAULT_DATA_DIR_NAME)
     };
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create data dir: {e}"))?;
     Ok(dir)

@@ -3,7 +3,7 @@
 use std::mem::{offset_of, size_of};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use mbb_monitor::shm::*;
+use crash_monitor::shm::*;
 
 /// Unique PID per test to avoid shm name collisions.
 fn unique_pid() -> u32 {

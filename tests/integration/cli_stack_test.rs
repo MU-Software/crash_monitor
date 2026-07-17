@@ -15,7 +15,7 @@ fn test_stack_valid_report() {
             "timestamp": "2026-04-05T12:00:00+09:00",
             "pid": 1234,
             "process": "test",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "threads": [{
@@ -40,7 +40,7 @@ fn test_stack_valid_report() {
     f.write_all(json.to_string().as_bytes()).unwrap();
     f.flush().unwrap();
 
-    let exit_code = mbb_monitor::cli::stack::run(f.path().to_str().unwrap(), 0);
+    let exit_code = crash_monitor::cli::stack::run(f.path().to_str().unwrap(), 0);
     assert_eq!(exit_code, 0);
 }
 
@@ -52,7 +52,7 @@ fn test_stack_thread_out_of_range() {
             "timestamp": "2026-04-05T12:00:00+09:00",
             "pid": 1234,
             "process": "test",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "threads": [{
@@ -72,7 +72,7 @@ fn test_stack_thread_out_of_range() {
     f.write_all(json.to_string().as_bytes()).unwrap();
     f.flush().unwrap();
 
-    let exit_code = mbb_monitor::cli::stack::run(f.path().to_str().unwrap(), 5);
+    let exit_code = crash_monitor::cli::stack::run(f.path().to_str().unwrap(), 5);
     assert_eq!(exit_code, 1);
 }
 
@@ -84,7 +84,7 @@ fn test_stack_no_memory() {
             "timestamp": "2026-04-05T12:00:00+09:00",
             "pid": 1234,
             "process": "test",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "threads": [{
@@ -105,6 +105,6 @@ fn test_stack_no_memory() {
     f.flush().unwrap();
 
     // No stack memory — exit 0 (informational, not an error)
-    let exit_code = mbb_monitor::cli::stack::run(f.path().to_str().unwrap(), 0);
+    let exit_code = crash_monitor::cli::stack::run(f.path().to_str().unwrap(), 0);
     assert_eq!(exit_code, 0);
 }

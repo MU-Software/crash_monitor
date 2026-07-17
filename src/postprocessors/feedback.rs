@@ -1,6 +1,6 @@
 //! Post-processor: launch the native feedback dialog as a separate process.
 //!
-//! The dialog binary (`mbb_crash_dialog_macos`) runs in its own process so that
+//! The dialog binary (`crash_dialog_macos`) runs in its own process so that
 //! any `AppKit` crash cannot take down the monitor. User feedback text is read from
 //! the child's stdout and patched into the already-written report JSON.
 

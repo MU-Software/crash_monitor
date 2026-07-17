@@ -7,9 +7,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use mbb_monitor::event_loop::{EventSource, MonitorEvent, event_loop};
-use mbb_monitor::pipeline::Pipeline;
-use mbb_monitor::platform::mock::MockPlatform;
+use crash_monitor::event_loop::{EventSource, MonitorEvent, event_loop};
+use crash_monitor::pipeline::Pipeline;
+use crash_monitor::platform::mock::MockPlatform;
 
 // ═══════════════════════════════════════════════════
 //  TestEventSource

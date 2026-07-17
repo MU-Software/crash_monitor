@@ -18,11 +18,11 @@ fn make_crash_event() -> CrashEvent {
 
 #[test]
 fn test_raw_cleanup_deletes_file() {
-    let tmp = std::env::temp_dir().join("mbb_test_raw_cleanup.bin");
+    let tmp = std::env::temp_dir().join("crash_test_raw_cleanup.bin");
     std::fs::write(&tmp, b"raw data").unwrap();
     assert!(tmp.exists());
 
-    let json_path = PathBuf::from("/tmp/mbb_test_report.json");
+    let json_path = PathBuf::from("/tmp/crash_test_report.json");
     let mut result = ReportResult {
         raw_path: Some(tmp.clone()),
         json_path: Some(json_path),

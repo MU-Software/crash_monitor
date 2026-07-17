@@ -18,4 +18,4 @@
 # automatically removed by `cargo clean`.
 
 [env]
-MBB_CRASH_DATA_DIR = { value = "target/test-crash-data", relative = true }
+CRASH_MONITOR_DATA_DIR = { value = "target/test-crash-data", relative = true }

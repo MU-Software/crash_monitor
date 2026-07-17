@@ -43,7 +43,7 @@ impl Notifier for SystemNotification {
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
         let script = format!(
-            "display notification \"Crash report saved: {filename}\" with title \"MBB Crash Monitor\""
+            "display notification \"Crash report saved: {filename}\" with title \"Crash Monitor\""
         );
         std::process::Command::new("osascript")
             .args(["-e", &script])

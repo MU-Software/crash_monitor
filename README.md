@@ -1,6 +1,6 @@
-# mbb_monitor — Crash Monitor for Model Block Builder
+# crash_monitor — Crash Monitor for Model Block Builder
 
-`mbb_monitor` is an out-of-process crash reporter for Model Block Builder (macOS).
+`crash_monitor` is an out-of-process crash reporter for Model Block Builder (macOS).
 It spawns the desktop app as a child process, monitors for crashes via Mach
 exception ports, captures full diagnostic state on crash/snapshot, and provides
 offline CLI tools for analyzing the resulting reports.
@@ -11,7 +11,7 @@ Two-process model:
 
 ```
 ┌────────────────────────────────────────────┐
-│  mbb_monitor (Rust, parent)                │
+│  crash_monitor (Rust, parent)                │
 │  - Mach exception port + SIGUSR1 handler   │
 │  - POSIX shared memory (breadcrumbs/ctx)   │
 │  - ANR watchdog (heartbeat polling)        │
@@ -44,8 +44,8 @@ make crash-monitor          # builds and codesigns the release binary
 
 The signed binary is placed at:
 
-- `tools/crash_monitor/target/release/mbb_monitor`
-- `apps/desktop/build-debug/mbb_monitor` (also copied here)
+- `tools/crash_monitor/target/release/crash_monitor`
+- `apps/desktop/build-debug/crash_monitor` (also copied here)
 
 The codesign step uses [`crash_monitor.entitlements`](crash_monitor.entitlements)
 to grant `com.apple.security.cs.debugger` so the monitor can attach to its
@@ -57,7 +57,7 @@ child via `task_for_pid()` without sudo.
 make desktop-monitor-run    # build + run app under monitor
 ```
 
-This launches the desktop app as a child of `mbb_monitor`. While running:
+This launches the desktop app as a child of `crash_monitor`. While running:
 
 - **Crashes** are caught automatically via Mach exception port
 - **F8** triggers a manual snapshot (app keeps running)
@@ -191,10 +191,10 @@ Notes:
 Without using make targets:
 
 ```bash
-./tools/crash_monitor/target/release/mbb_monitor analyze <report.json>
-./tools/crash_monitor/target/release/mbb_monitor stack <report.json> --thread <N>
-./tools/crash_monitor/target/release/mbb_monitor symbolicate <report.json> --dsym <path> [--output <out.json>]
-./tools/crash_monitor/target/release/mbb_monitor --help
+./tools/crash_monitor/target/release/crash_monitor analyze <report.json>
+./tools/crash_monitor/target/release/crash_monitor stack <report.json> --thread <N>
+./tools/crash_monitor/target/release/crash_monitor symbolicate <report.json> --dsym <path> [--output <out.json>]
+./tools/crash_monitor/target/release/crash_monitor --help
 ```
 
 ## Report Format
@@ -276,11 +276,11 @@ make crash-monitor-coverage            # combined HTML coverage report
 ```
 
 E2E tests run in parallel — each test creates its own temporary directory via
-`MBB_CRASH_DATA_DIR` so there is no shared state between tests. Both release
+`CRASH_MONITOR_DATA_DIR` so there is no shared state between tests. Both release
 (codesigned) and debug (unsigned) builds are required. `make crash-monitor-test`
 handles this automatically. The `test_e2e_unsigned_binary_fails_fast` test uses
 the debug build to verify the entitlement self-check; it is skipped if
-`target/debug/mbb_monitor` does not exist.
+`target/debug/crash_monitor` does not exist.
 
 Coverage report: `tools/crash_monitor/coverage-report/html/index.html`.
 

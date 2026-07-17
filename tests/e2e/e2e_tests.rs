@@ -1,12 +1,12 @@
-//! End-to-end tests: spawn `mbb_monitor` with a `crash_app` child, verify report output.
+//! End-to-end tests: spawn `crash_monitor` with a `crash_app` child, verify report output.
 //!
 //! These tests require:
-//! 1. `mbb_monitor` binary built (`cargo build --release` or `make crash-monitor`)
+//! 1. `crash_monitor` binary built (`cargo build --release` or `make crash-monitor`)
 //! 2. `crash_app` test child built (`make crash-monitor-e2e-child` or cc directly)
-//! 3. Debugger entitlement on `mbb_monitor` (codesign)
+//! 3. Debugger entitlement on `crash_monitor` (codesign)
 //! 4. Debug build (`cargo build`) for `test_e2e_unsigned_binary_fails_fast`
 //!
-//! Each test uses its own temporary directory via `MBB_CRASH_DATA_DIR` so that
+//! Each test uses its own temporary directory via `CRASH_MONITOR_DATA_DIR` so that
 //! tests can run in parallel without interfering with each other.
 
 use std::io::Read;
@@ -21,30 +21,30 @@ fn crash_app_path() -> PathBuf {
     manifest.join("tests/e2e/fixtures/crash_app")
 }
 
-/// Locate the `mbb_monitor` binary (release build).
+/// Locate the `crash_monitor` binary (release build).
 fn monitor_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("target/release/mbb_monitor")
+    manifest.join("target/release/crash_monitor")
 }
 
-/// Locate the `mbb_crash_dialog_mock` binary (release build).
+/// Locate the `crash_dialog_mock` binary (release build).
 fn mock_dialog_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("target/release/mbb_crash_dialog_mock")
+    manifest.join("target/release/crash_dialog_mock")
 }
 
 /// Create a `Command` for the monitor with test-safe defaults.
 ///
 /// Each test passes its own `data_dir` so reports are isolated.
-/// Sets `MBB_CRASH_DIALOG_BIN` to the mock dialog binary so the pipeline
+/// Sets `CRASH_MONITOR_DIALOG_BIN` to the mock dialog binary so the pipeline
 /// exercises the full feedback flow (spawn → read stdout → patch JSON)
 /// without showing any interactive UI.
 fn monitor_cmd(data_dir: &Path) -> Command {
     let mut cmd = Command::new(monitor_path());
-    cmd.env("MBB_CRASH_DATA_DIR", data_dir);
+    cmd.env("CRASH_MONITOR_DATA_DIR", data_dir);
     let mock = mock_dialog_path();
     if mock.exists() {
-        cmd.env("MBB_CRASH_DIALOG_BIN", &mock);
+        cmd.env("CRASH_MONITOR_DIALOG_BIN", &mock);
     }
     cmd
 }
@@ -82,7 +82,7 @@ fn check_prerequisites() -> bool {
     let monitor = monitor_path();
     let child = crash_app_path();
     if !monitor.exists() {
-        eprintln!("SKIP: mbb_monitor not found at {}", monitor.display());
+        eprintln!("SKIP: crash_monitor not found at {}", monitor.display());
         eprintln!("      Run: make crash-monitor");
         return false;
     }
@@ -101,7 +101,7 @@ fn check_prerequisites() -> bool {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if !stdout.contains("com.apple.security.cs.debugger") {
-                eprintln!("SKIP: mbb_monitor lacks com.apple.security.cs.debugger entitlement");
+                eprintln!("SKIP: crash_monitor lacks com.apple.security.cs.debugger entitlement");
                 eprintln!("      Run: make crash-monitor");
                 return false;
             }
@@ -152,7 +152,7 @@ fn test_e2e_crash_sigsegv() {
         .arg(crash_app_path())
         .arg("sigsegv")
         .output()
-        .expect("failed to run mbb_monitor");
+        .expect("failed to run crash_monitor");
 
     // Monitor should exit with non-zero (child crashed)
     assert!(
@@ -186,7 +186,7 @@ fn test_e2e_crash_sigabrt() {
         .arg(crash_app_path())
         .arg("sigabrt")
         .output()
-        .expect("failed to run mbb_monitor");
+        .expect("failed to run crash_monitor");
 
     assert!(!output.status.success());
 
@@ -210,7 +210,7 @@ fn test_e2e_clean_exit() {
         .arg(crash_app_path())
         .arg("clean")
         .output()
-        .expect("failed to run mbb_monitor");
+        .expect("failed to run crash_monitor");
 
     // Monitor should exit 0 on clean exit
     assert!(
@@ -239,14 +239,14 @@ fn test_e2e_anr() {
     // generate a report, and the child keeps running. We kill the monitor after timeout.
     // Override ANR timings via env vars to keep the test fast.
     let mut child = monitor_cmd(data_dir.path())
-        .env("MBB_ANR_WARMUP_MS", "500")
-        .env("MBB_ANR_THRESHOLD_MS", "500")
-        .env("MBB_ANR_CHECK_INTERVAL_MS", "250")
+        .env("CRASH_MONITOR_ANR_WARMUP_MS", "500")
+        .env("CRASH_MONITOR_ANR_THRESHOLD_MS", "500")
+        .env("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", "250")
         .arg("run")
         .arg(crash_app_path())
         .arg("anr")
         .spawn()
-        .expect("failed to spawn mbb_monitor");
+        .expect("failed to spawn crash_monitor");
 
     // Wait for ANR detection (warmup=500ms + threshold=500ms + buffer)
     std::thread::sleep(Duration::from_secs(3));
@@ -276,9 +276,9 @@ fn test_e2e_unsigned_binary_fails_fast() {
 
     // Use the debug build which is ad-hoc signed but lacks the entitlement.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let debug_monitor = manifest.join("target/debug/mbb_monitor");
+    let debug_monitor = manifest.join("target/debug/crash_monitor");
     if !debug_monitor.exists() {
-        eprintln!("SKIP: debug mbb_monitor not found (run `cargo build` first)");
+        eprintln!("SKIP: debug crash_monitor not found (run `cargo build` first)");
         return;
     }
 
@@ -303,7 +303,7 @@ fn test_e2e_unsigned_binary_fails_fast() {
         .arg(&child)
         .arg("clean")
         .output()
-        .expect("failed to run debug mbb_monitor");
+        .expect("failed to run debug crash_monitor");
 
     assert!(
         !output.status.success(),

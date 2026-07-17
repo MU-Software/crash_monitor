@@ -1,4 +1,4 @@
-//! `mbb_monitor analyze <report.json>` — human-readable report summary.
+//! `crash_monitor analyze <report.json>` — human-readable report summary.
 
 use crate::pipeline::ReportType;
 use crate::pipeline::report::{self, CrashReport};

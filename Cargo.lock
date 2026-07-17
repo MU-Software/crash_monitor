@@ -289,6 +289,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "crash_dialog_macos"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+]
+
+[[package]]
+name = "crash_dialog_mock"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
+name = "crash_monitor"
+version = "0.1.0"
+dependencies = [
+ "addr2line",
+ "base64",
+ "bindgen",
+ "chrono",
+ "clap",
+ "crash_monitor",
+ "filetime",
+ "mach2",
+ "nix",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -615,45 +654,6 @@ name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
-
-[[package]]
-name = "mbb_crash_dialog_macos"
-version = "0.1.0"
-dependencies = [
- "clap",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
-]
-
-[[package]]
-name = "mbb_crash_dialog_mock"
-version = "0.1.0"
-dependencies = [
- "clap",
-]
-
-[[package]]
-name = "mbb_monitor"
-version = "0.1.0"
-dependencies = [
- "addr2line",
- "base64",
- "bindgen",
- "chrono",
- "clap",
- "filetime",
- "mach2",
- "mbb_monitor",
- "nix",
- "png",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "uuid",
- "zip",
-]
 
 [[package]]
 name = "memchr"

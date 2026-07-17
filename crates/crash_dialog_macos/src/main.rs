@@ -1,6 +1,6 @@
 //! macOS native feedback dialog for crash/snapshot/ANR reports.
 //!
-//! Launched by `mbb_monitor` as a separate process. Displays an NSAlert with
+//! Launched by `crash_monitor` as a separate process. Displays an NSAlert with
 //! a text field for the tester to describe what they were doing. The feedback
 //! text is written to **stdout** (nothing else). All logs go to stderr.
 //!
@@ -11,7 +11,7 @@ use clap::Parser;
 mod dialog;
 
 #[derive(Parser)]
-#[command(name = "mbb_crash_dialog_macos")]
+#[command(name = "crash_dialog_macos")]
 struct Args {
     /// Report type: "crash", "snapshot", or "anr".
     #[arg(long, rename_all = "verbatim")]

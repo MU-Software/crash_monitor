@@ -432,18 +432,18 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
         post_processors.push(Box::new(PNGConverter));
     }
 
-    // Feedback dialog: MBB_CRASH_DIALOG_BIN overrides the default path — used by
+    // Feedback dialog: CRASH_MONITOR_DIALOG_BIN overrides the default path — used by
     // E2E tests to substitute the mock dialog (no UI, fixed stdout output).
     if on(
         cfg.post_processors.enabled,
         cfg.post_processors.feedback_dialog.enabled,
     ) {
-        let dialog_bin = std::env::var_os("MBB_CRASH_DIALOG_BIN")
+        let dialog_bin = std::env::var_os("CRASH_MONITOR_DIALOG_BIN")
             .map(std::path::PathBuf::from)
             .or_else(|| {
                 std::env::current_exe()
                     .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("mbb_crash_dialog_macos")))
+                    .and_then(|p| p.parent().map(|d| d.join("crash_dialog_macos")))
             });
         if let Some(bin) = dialog_bin
             && bin.exists()

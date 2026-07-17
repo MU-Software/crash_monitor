@@ -1,11 +1,11 @@
 [package]
-name = "mbb_crash_dialog_mock"
+name = "crash_dialog_mock"
 version = "0.1.0"
 edition = "2024"
 description = "Mock feedback dialog for E2E tests — outputs fixed text, no UI"
 
 [[bin]]
-name = "mbb_crash_dialog_mock"
+name = "crash_dialog_mock"
 path = "src/main.rs"
 
 [dependencies]

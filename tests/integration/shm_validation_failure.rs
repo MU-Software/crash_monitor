@@ -3,7 +3,7 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use mbb_monitor::shm::*;
+use crash_monitor::shm::*;
 
 fn unique_pid() -> u32 {
     static COUNTER: AtomicU32 = AtomicU32::new(800_000);

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use mbb_monitor::pipeline::run_plugin_safe;
+use crash_monitor::pipeline::run_plugin_safe;
 
 #[test]
 fn test_timeout_interrupts_blocking_call() {

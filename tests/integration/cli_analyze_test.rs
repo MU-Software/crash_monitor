@@ -11,7 +11,7 @@ fn test_analyze_valid_report() {
             "timestamp": "2026-04-05T12:00:00.000000000+09:00",
             "pid": 1234,
             "process": "voxelcore_desktop",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "exception": {
@@ -40,7 +40,7 @@ fn test_analyze_valid_report() {
     f.write_all(json.to_string().as_bytes()).unwrap();
     f.flush().unwrap();
 
-    let exit_code = mbb_monitor::cli::analyze::run(f.path().to_str().unwrap());
+    let exit_code = crash_monitor::cli::analyze::run(f.path().to_str().unwrap());
     assert_eq!(exit_code, 0);
 }
 
@@ -50,12 +50,12 @@ fn test_analyze_malformed_json() {
     f.write_all(b"{ not valid json }").unwrap();
     f.flush().unwrap();
 
-    let exit_code = mbb_monitor::cli::analyze::run(f.path().to_str().unwrap());
+    let exit_code = crash_monitor::cli::analyze::run(f.path().to_str().unwrap());
     assert_eq!(exit_code, 1);
 }
 
 #[test]
 fn test_analyze_file_not_found() {
-    let exit_code = mbb_monitor::cli::analyze::run("/nonexistent/report.json");
+    let exit_code = crash_monitor::cli::analyze::run("/nonexistent/report.json");
     assert_eq!(exit_code, 1);
 }

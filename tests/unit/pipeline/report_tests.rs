@@ -13,7 +13,7 @@ fn sample_report_json() -> String {
             "timestamp": "2026-04-05T12:00:00.000000000+09:00",
             "pid": 1234,
             "process": "voxelcore_desktop",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "threads": [{

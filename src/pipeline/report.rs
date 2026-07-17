@@ -91,7 +91,7 @@ impl ReportHeader {
             timestamp: Local::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false),
             pid: event.pid,
             process: event.process_name.clone(),
-            collector: "mbb_monitor".into(),
+            collector: "crash_monitor".into(),
             report_type: event.report_type,
             trigger,
             hang_duration_ms,

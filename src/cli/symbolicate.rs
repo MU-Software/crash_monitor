@@ -1,4 +1,4 @@
-//! `mbb_monitor symbolicate <report.json> --dsym <path>` — resolve addresses to `source:line`.
+//! `crash_monitor symbolicate <report.json> --dsym <path>` — resolve addresses to `source:line`.
 //!
 //! Uses `addr2line::Loader` to parse DWARF debug info from a dSYM bundle
 //! and resolve backtrace addresses to source file, function, and line number.

@@ -5,7 +5,7 @@ use std::path::Path;
 #[test]
 fn test_console_notifier_runs() {
     let notifier = ConsoleNotifier;
-    let path = Path::new("/tmp/mbb_test_report.json");
+    let path = Path::new("/tmp/crash_test_report.json");
     assert!(notifier.notify(path).is_ok());
 }
 

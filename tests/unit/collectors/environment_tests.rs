@@ -42,21 +42,21 @@ fn test_filters_sensitive_env_vars() {
 
     // SAFETY: These test-specific env vars don't interfere with other tests.
     unsafe {
-        std::env::set_var("MBB_TEST_NORMAL", "visible");
-        std::env::set_var("MBB_TEST_SECRET_VALUE", "hidden");
-        std::env::set_var("MBB_TEST_API_TOKEN", "hidden");
+        std::env::set_var("CRASH_TEST_NORMAL", "visible");
+        std::env::set_var("CRASH_TEST_SECRET_VALUE", "hidden");
+        std::env::set_var("CRASH_TEST_API_TOKEN", "hidden");
     }
 
     collector.collect(&event, 0, &mut data).unwrap();
 
     let env = data.raw.environment.as_ref().unwrap();
 
-    let has_normal = env.env_vars.iter().any(|(k, _)| k == "MBB_TEST_NORMAL");
+    let has_normal = env.env_vars.iter().any(|(k, _)| k == "CRASH_TEST_NORMAL");
     let has_secret = env
         .env_vars
         .iter()
-        .any(|(k, _)| k == "MBB_TEST_SECRET_VALUE");
-    let has_token = env.env_vars.iter().any(|(k, _)| k == "MBB_TEST_API_TOKEN");
+        .any(|(k, _)| k == "CRASH_TEST_SECRET_VALUE");
+    let has_token = env.env_vars.iter().any(|(k, _)| k == "CRASH_TEST_API_TOKEN");
 
     assert!(has_normal, "normal env var should be captured");
     assert!(!has_secret, "SECRET env var should be filtered");
@@ -64,9 +64,9 @@ fn test_filters_sensitive_env_vars() {
 
     // Clean up
     unsafe {
-        std::env::remove_var("MBB_TEST_NORMAL");
-        std::env::remove_var("MBB_TEST_SECRET_VALUE");
-        std::env::remove_var("MBB_TEST_API_TOKEN");
+        std::env::remove_var("CRASH_TEST_NORMAL");
+        std::env::remove_var("CRASH_TEST_SECRET_VALUE");
+        std::env::remove_var("CRASH_TEST_API_TOKEN");
     }
 }
 

@@ -1,4 +1,4 @@
-//! `mbb_monitor stack <report.json> --thread <N>` — hex dump of stack memory.
+//! `crash_monitor stack <report.json> --thread <N>` — hex dump of stack memory.
 
 use crate::pipeline::report;
 use std::path::Path;

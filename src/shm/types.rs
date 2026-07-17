@@ -35,7 +35,7 @@ pub use ffi::{
 //  Constants
 // ═══════════════════════════════════════════════════
 
-pub const SHM_MAGIC: u32 = 0x4D42_4243; // "MBBC"
+pub const SHM_MAGIC: u32 = 0x434D_4F4E; // "CMON" (Crash MONitor)
 pub const SHM_VERSION: u32 = 1;
 pub const SHM_CANARY: u32 = 0xDEAD_BEEF;
 

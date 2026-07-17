@@ -20,7 +20,7 @@ use crate::shm::types::{
 /// # Errors
 /// Returns an error if `shm_open`, `ftruncate`, or `mmap` fails.
 pub fn create_shared_memory(monitor_pid: u32) -> Result<SharedMemory, String> {
-    let name = format!("/mbb_crash_{monitor_pid}");
+    let name = format!("/crash_monitor_{monitor_pid}");
     let c_name = CString::new(name.as_str()).map_err(|e| format!("CString::new failed: {e}"))?;
 
     // Try to unlink any stale segment with the same name (e.g., from a crashed test).

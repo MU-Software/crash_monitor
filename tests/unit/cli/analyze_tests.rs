@@ -9,7 +9,7 @@ fn minimal_report_json() -> String {
             "timestamp": "2026-04-05T12:00:00.000000000+09:00",
             "pid": 1234,
             "process": "voxelcore_desktop",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "threads": [],
@@ -27,7 +27,7 @@ fn full_crash_report_json() -> String {
             "timestamp": "2026-04-05T12:00:00.000000000+09:00",
             "pid": 1234,
             "process": "voxelcore_desktop",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "crash"
         },
         "exception": {
@@ -117,7 +117,7 @@ fn test_parse_snapshot_report() {
             "timestamp": "2026-04-05T12:00:00+09:00",
             "pid": 5678,
             "process": "voxelcore_desktop",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "snapshot"
         },
         "threads": [{
@@ -148,7 +148,7 @@ fn test_parse_anr_report() {
             "timestamp": "2026-04-05T12:00:00+09:00",
             "pid": 9999,
             "process": "voxelcore_desktop",
-            "collector": "mbb_monitor",
+            "collector": "crash_monitor",
             "type": "anr",
             "trigger": "watchdog_5s",
             "hang_duration_ms": 6200

@@ -1,7 +1,7 @@
-//! `mbb_monitor` library crate — exposes public modules for integration tests.
+//! `crash_monitor` library crate — exposes public modules for integration tests.
 
 #[cfg(not(target_os = "macos"))]
-compile_error!("mbb_monitor requires macOS (Mach kernel APIs)");
+compile_error!("crash_monitor requires macOS (Mach kernel APIs)");
 
 pub mod cli;
 mod collectors;

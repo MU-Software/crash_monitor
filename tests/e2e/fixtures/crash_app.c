@@ -1,5 +1,5 @@
 /**
- * E2E test child for mbb_monitor.
+ * E2E test child for crash_monitor.
  *
  * Usage: crash_app <scenario>
  *   sigsegv  — NULL pointer dereference
@@ -7,7 +7,7 @@
  *   anr      — infinite loop (heartbeat stops)
  *   clean    — normal exit
  *
- * The monitor spawns this binary with MBB_CRASH_SHM env set.
+ * The monitor spawns this binary with CRASH_MONITOR_SHM env set.
  * This app calls sut_crash_reporter_init() to map the shm region.
  */
 
@@ -23,7 +23,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    /* Initialize crash reporter — maps shm from MBB_CRASH_SHM env */
+    /* Initialize crash reporter — maps shm from CRASH_MONITOR_SHM env */
     sut_crash_reporter_init();
     sut_crash_session_begin();
     SUT_CRUMB(SUT_CRUMB_CAT_LIFECYCLE, "crash_app started scenario=%s", argv[1]);

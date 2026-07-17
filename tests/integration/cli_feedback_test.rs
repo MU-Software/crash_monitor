@@ -1,4 +1,4 @@
-//! Integration test: `mbb_crash_dialog_macos` binary with `--mock-input` and `--dry-run`.
+//! Integration test: `crash_dialog_macos` binary with `--mock-input` and `--dry-run`.
 //!
 //! These tests exercise the real binary end-to-end without showing any UI
 //! (AppKit is never initialized). They verify argument parsing, exit codes,
@@ -16,7 +16,7 @@ fn dialog_bin() -> std::path::PathBuf {
         .parent()
         .unwrap()
         .to_path_buf();
-    path.push("mbb_crash_dialog_macos");
+    path.push("crash_dialog_macos");
     path
 }
 
@@ -122,8 +122,8 @@ fn test_mock_input_multiline() {
 fn test_feedback_post_processor_with_real_binary() {
     // End-to-end: FeedbackPostProcessor spawns the real dialog binary
     // with --mock-input, and patches a report JSON file.
-    use mbb_monitor::pipeline::report;
-    use mbb_monitor::pipeline::{CrashEvent, PostProcessor, ReportResult, ReportType};
+    use crash_monitor::pipeline::report;
+    use crash_monitor::pipeline::{CrashEvent, PostProcessor, ReportResult, ReportType};
 
     let dir = tempfile::tempdir().unwrap();
 
@@ -163,7 +163,7 @@ fn test_feedback_post_processor_with_real_binary() {
     )
     .unwrap();
 
-    let pp = mbb_monitor::postprocessors::FeedbackPostProcessor::new(wrapper_path);
+    let pp = crash_monitor::postprocessors::FeedbackPostProcessor::new(wrapper_path);
     let event = CrashEvent {
         report_type: ReportType::Crash,
         exception_type: None,

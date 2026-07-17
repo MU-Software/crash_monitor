@@ -1,4 +1,4 @@
-//! `mbb_monitor` — Out-of-process crash monitor for Model Block Builder.
+//! `crash_monitor` — Out-of-process crash monitor for Model Block Builder.
 //!
 //! Spawns the desktop app as a child process, monitors for crashes via
 //! Mach exception ports, and handles F8 manual snapshots via SIGUSR1.
@@ -6,7 +6,7 @@
 //! macOS only — uses Mach kernel APIs (exception ports, `vm_read`, `task_for_pid`).
 
 #[cfg(not(target_os = "macos"))]
-compile_error!("mbb_monitor requires macOS (Mach kernel APIs)");
+compile_error!("crash_monitor requires macOS (Mach kernel APIs)");
 
 mod cli;
 mod collectors;
@@ -36,9 +36,9 @@ use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
-    name = "mbb_monitor",
+    name = "crash_monitor",
     version,
-    about = "Crash monitor for Model Block Builder"
+    about = "Out-of-process crash monitor for native applications"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -216,14 +216,14 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     }
     let c_argv: Vec<&std::ffi::CStr> = c_argv_owned.iter().map(AsRef::as_ref).collect();
 
-    // Build environment: inherit current env + add MBB_CRASH_SHM=<name>
+    // Build environment: inherit current env + add CRASH_MONITOR_SHM=<name>
     let mut env_strings: Vec<CString> = std::env::vars()
         .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok()) // skip invalid env vars
         .collect();
     let shm_env_value = shared_memory
         .as_ref()
         .map_or_else(|| "1".to_string(), |s| s.name().to_string());
-    if let Ok(shm_env) = CString::new(format!("MBB_CRASH_SHM={shm_env_value}")) {
+    if let Ok(shm_env) = CString::new(format!("CRASH_MONITOR_SHM={shm_env_value}")) {
         env_strings.push(shm_env);
     }
     let c_envp: Vec<&std::ffi::CStr> = env_strings.iter().map(AsRef::as_ref).collect();
@@ -254,7 +254,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         Err(e) => {
             eprintln!(
                 "[monitor] {e}. Cannot inspect crashes or take snapshots.\n\
-                 [monitor] This usually means mbb_monitor lacks the debugger entitlement.\n\
+                 [monitor] This usually means crash_monitor lacks the debugger entitlement.\n\
                  [monitor] Run `make crash-monitor` to rebuild with codesign."
             );
             let _ = waitpid(child_pid, None);
@@ -283,10 +283,10 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // ANR watchdog config (used inline by event_loop, no dedicated thread).
     // Environment overrides allow E2E tests to use shorter timeouts.
     let anr_config = event_loop::AnrConfig {
-        warmup_ms: env_u64("MBB_ANR_WARMUP_MS", 10_000),
-        threshold_ms: env_u64("MBB_ANR_THRESHOLD_MS", 5_000),
-        check_interval_ms: env_u64("MBB_ANR_CHECK_INTERVAL_MS", 2_000),
-        cooldown_ms: env_u64("MBB_ANR_COOLDOWN_MS", 60_000),
+        warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", 10_000),
+        threshold_ms: env_u64("CRASH_MONITOR_ANR_THRESHOLD_MS", 5_000),
+        check_interval_ms: env_u64("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", 2_000),
+        cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", 60_000),
     };
 
     // Build event source from Mac-specific channels
@@ -358,10 +358,10 @@ fn main() {
         }) => cli::symbolicate::run(&report, &dsym, output.as_deref()),
         None => {
             // No subcommand: treat positional args as "run" mode
-            // Usage: mbb_monitor ./voxelcore_desktop [args...]
-            //    or: mbb_monitor -- ./voxelcore_desktop [args...]
+            // Usage: crash_monitor ./voxelcore_desktop [args...]
+            //    or: crash_monitor -- ./voxelcore_desktop [args...]
             if cli.args.is_empty() {
-                eprintln!("Usage: mbb_monitor [run] <app_path> [args...]");
+                eprintln!("Usage: crash_monitor [run] <app_path> [args...]");
                 1
             } else {
                 let app_path = &cli.args[0];
