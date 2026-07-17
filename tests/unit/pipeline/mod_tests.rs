@@ -883,6 +883,8 @@ fn identical_pid_type_and_second_create_two_isolated_reports() {
     let first = make_crash_event();
     let second = make_crash_event();
     assert_ne!(first.report_id, second.report_id);
+    assert_eq!(first.pid, second.pid);
+    assert_eq!(first.report_type, second.report_type);
 
     let first_path = pipeline
         .handle_event(&first, 123)
@@ -1165,14 +1167,30 @@ fn concurrent_retention_never_removes_a_report_from_a_live_notifier() {
     )
     .unwrap();
 
-    // Once the older notifier finishes, its own final-cleanup pass may remove
-    // that older report and leave the newer committed report in place.
+    // Once the older notifier finishes, its own publication lease remains
+    // active through FinalCleanup. The impossible one-report quota must be
+    // reported as deferred rather than invalidating either committed path.
     gate.release(&id_a);
     let diagnostics_a = thread_a.join().unwrap();
     assert!(!gate.missing_path.load(Ordering::SeqCst));
-    assert!(!path_a.exists());
+    assert!(path_a.exists());
     assert!(path_b.exists());
-    assert!(diagnostics_a.report_path.is_none());
+    assert!(diagnostics_a.report_path.is_some());
+    assert!(diagnostics_a.plugins.iter().any(|plugin| {
+        plugin.name == "RetentionManager"
+            && matches!(
+                &plugin.status,
+                PluginStatus::Error(error) if error.contains("deferred by a live lease")
+            )
+    }));
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -2658,6 +2676,27 @@ fn test_global_disable_skips_every_report_type_without_side_effects() {
     assert!(artifacts.is_empty(), "global disable created {artifacts:?}");
 }
 
+#[test]
+fn disabled_pipeline_recovery_is_a_filesystem_noop() {
+    let root = tempfile::tempdir().unwrap();
+    let output_root = root.path().join("not-created");
+    let pipeline = Pipeline {
+        enabled: false,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(output_root.clone()),
+    };
+
+    assert_eq!(pipeline.recover_prepared_artifacts().unwrap(), 0);
+    assert!(!output_root.exists());
+}
+
 // ── Real factory: builds and passes dependency-order validation ──
 
 #[test]
@@ -3116,6 +3155,47 @@ fn after_commit_stage_cannot_mutate_the_sealed_transaction() {
     assert!(diagnostics.report_path.is_some());
 }
 
+#[test]
+fn post_publish_sync_failure_keeps_report_notifier_and_diagnostic() {
+    let root = tempfile::tempdir().unwrap();
+    let notified = Arc::new(Mutex::new(None));
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![Box::new(CfgNotifier {
+            name: "DurabilityNotifier",
+            available: true,
+            captured: notified.clone(),
+        })],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(root.path().to_path_buf()),
+    };
+
+    let diagnostics =
+        crate::pipeline::artifact::with_test_directory_sync_failure(root.path(), || {
+            pipeline.handle_event(&make_crash_event(), 123)
+        });
+
+    let report_path = diagnostics
+        .report_path
+        .as_ref()
+        .expect("rename remains the publication boundary after fsync failure");
+    assert!(report_path.is_file());
+    assert_eq!(notified.lock().unwrap().as_ref(), Some(report_path));
+    assert!(diagnostics.plugins.iter().any(|plugin| {
+        plugin.name == "ArtifactDurability"
+            && matches!(
+                &plugin.status,
+                PluginStatus::Error(error) if error.contains("simulated directory sync failure")
+            )
+    }));
+}
+
 struct PhaseDependencyPostProcessor {
     name: &'static str,
     phase: PostProcessorPhase,
@@ -3167,8 +3247,16 @@ fn dependency_validation_rejects_dependencies_on_any_later_phase() {
             PostProcessorPhase::AfterNotify,
         ),
         (
+            PostProcessorPhase::BeforeCommit,
+            PostProcessorPhase::FinalCleanup,
+        ),
+        (
             PostProcessorPhase::AfterCommit,
             PostProcessorPhase::AfterNotify,
+        ),
+        (
+            PostProcessorPhase::AfterCommit,
+            PostProcessorPhase::FinalCleanup,
         ),
         (
             PostProcessorPhase::AfterNotify,

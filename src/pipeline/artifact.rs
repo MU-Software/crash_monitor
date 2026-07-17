@@ -38,6 +38,12 @@ const RECOVERY_DEADLINE: Duration = Duration::from_secs(2);
 /// no remaining notifier to protect, and startup recovery may prune normally.
 static PUBLICATION_LEASES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DIRECTORY_SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn publication_leases() -> &'static Mutex<BTreeSet<PathBuf>> {
     PUBLICATION_LEASES.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
@@ -51,6 +57,24 @@ fn register_publication_lease(report_dir: &Path) {
 #[must_use]
 pub(crate) fn is_report_publication_leased(report_dir: &Path) -> bool {
     lock(publication_leases()).contains(report_dir)
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_directory_sync_failure<T>(path: &Path, action: impl FnOnce() -> T) -> T {
+    struct Reset(Option<PathBuf>);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_DIRECTORY_SYNC_FAILURE.with(|failure_path| {
+                failure_path.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = TEST_DIRECTORY_SYNC_FAILURE
+        .with(|failure_path| failure_path.replace(Some(path.to_path_buf())));
+    let _reset = Reset(previous);
+    action()
 }
 
 /// Globally unique identity allocated exactly once for one trigger event.
@@ -467,7 +491,17 @@ impl ArtifactTransaction {
         after_manifest_sync: impl FnOnce() -> Result<(), String>,
         after_directory_publish: impl FnOnce(),
     ) -> Result<CommittedReport, String> {
+        self.commit_with_all_hooks(|| {}, after_manifest_sync, after_directory_publish)
+    }
+
+    fn commit_with_all_hooks(
+        &self,
+        after_begin_commit: impl FnOnce(),
+        after_manifest_sync: impl FnOnce() -> Result<(), String>,
+        after_directory_publish: impl FnOnce(),
+    ) -> Result<CommittedReport, String> {
         let (registered, destination_root) = self.begin_commit()?;
+        after_begin_commit();
         let manifest = self.build_manifest(&registered, &destination_root)?;
         let manifest_json = serde_json::to_vec_pretty(&manifest)
             .map_err(|error| format!("cannot serialize report manifest: {error}"))?;
@@ -497,8 +531,8 @@ impl ArtifactTransaction {
             drop(file);
             fs::rename(&temporary_manifest, &manifest_path)
                 .map_err(|error| format!("cannot commit report manifest: {error}"))?;
-            sync_directory(self.staging_dir())?;
             lock(&self.core).state = TransactionState::Prepared;
+            sync_directory(self.staging_dir())?;
             after_manifest_sync()
         })();
         if prepare_result.is_err() {
@@ -681,6 +715,8 @@ fn recover_prepared_reports_with_limits(
     output_root: &Path,
     limits: RecoveryLimits,
 ) -> Result<usize, String> {
+    let started = Instant::now();
+    let deadline = started.checked_add(limits.deadline).unwrap_or(started);
     let entries = match fs::read_dir(output_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -691,8 +727,6 @@ fn recover_prepared_reports_with_limits(
             ));
         }
     };
-    let started = Instant::now();
-    let deadline = started.checked_add(limits.deadline).unwrap_or(started);
     let mut recovered = 0_usize;
     for (inspected, entry) in entries.enumerate() {
         if inspected >= limits.root_entries {
@@ -1215,6 +1249,16 @@ fn staging_report_id(name: &str) -> Option<&str> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if TEST_DIRECTORY_SYNC_FAILURE
+        .with(|failure_path| failure_path.borrow().as_deref() == Some(path))
+    {
+        return Err(format!(
+            "cannot sync directory '{}': simulated directory sync failure",
+            path.display()
+        ));
+    }
+
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("cannot sync directory '{}': {error}", path.display()))
@@ -1341,6 +1385,63 @@ mod tests {
         assert!(report_dir.join(MANIFEST_FILE_NAME).exists());
         assert!(report_dir.join("report.json").exists());
         assert_eq!(recover_prepared_reports(&pending).unwrap(), 0);
+    }
+
+    #[test]
+    fn manifest_rename_is_preserved_when_staging_directory_sync_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let report_id = event.report_id.clone();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+
+        let error = with_test_directory_sync_failure(transaction.staging_dir(), || {
+            transaction.commit().unwrap_err()
+        });
+        assert!(
+            error.contains("simulated directory sync failure"),
+            "{error}"
+        );
+        assert!(transaction.staging_dir().join(MANIFEST_FILE_NAME).is_file());
+        let staging = transaction.staging_dir().to_path_buf();
+        drop(transaction);
+
+        assert!(staging.join(MANIFEST_FILE_NAME).is_file());
+        assert_eq!(recover_prepared_reports(root.path()).unwrap(), 1);
+        assert!(
+            root.path()
+                .join(report_id.as_str())
+                .join(MANIFEST_FILE_NAME)
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn newly_created_sibling_destination_syncs_its_parent_before_publish() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = root.path().join("pending");
+        let sent = root.path().join("sent");
+        std::fs::create_dir(&pending).unwrap();
+        let event = event();
+        let transaction = ArtifactTransaction::begin(ReportContext::new(&event, &pending)).unwrap();
+        transaction.set_destination_root(&sent).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+
+        let error =
+            with_test_directory_sync_failure(root.path(), || transaction.commit().unwrap_err());
+
+        assert!(
+            error.contains("simulated directory sync failure"),
+            "{error}"
+        );
+        assert!(sent.is_dir());
+        assert!(!sent.join(event.report_id.as_str()).exists());
+        assert!(transaction.staging_dir().join(MANIFEST_FILE_NAME).is_file());
     }
 
     #[test]
@@ -1556,7 +1657,9 @@ mod tests {
                     .map_err(|error| format!("write test artifact: {error}"))
             })
         });
-        entered_rx.recv().unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("writer did not enter the transaction within five seconds");
 
         let started = std::time::Instant::now();
         let error = transaction.commit().unwrap_err();
@@ -1621,6 +1724,42 @@ mod tests {
     }
 
     #[test]
+    fn preparing_transaction_rejects_late_writer_without_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event(), root.path())).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let committing = transaction.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            committing.commit_with_all_hooks(
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || Ok(()),
+                || {},
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("commit did not enter Preparing within five seconds");
+
+        let started = std::time::Instant::now();
+        let error = transaction
+            .write_bytes("late.bin", ArtifactKind::Attachment, b"late")
+            .unwrap_err();
+        assert!(error.contains("preparing"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+
+        release_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
     fn commit_refuses_to_replace_an_existing_report_directory() {
         let root = tempfile::tempdir().unwrap();
         let event = event();
@@ -1639,6 +1778,122 @@ mod tests {
         assert_eq!(
             std::fs::read(existing.join("sentinel")).unwrap(),
             b"preserve"
+        );
+    }
+
+    #[test]
+    fn commit_refuses_to_follow_an_existing_destination_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"preserve").unwrap();
+        let destination = root.path().join(event.report_id.as_str());
+        std::os::unix::fs::symlink(&outside, &destination).unwrap();
+
+        let error = transaction.commit().unwrap_err();
+
+        assert!(error.contains("already exists"), "{error}");
+        assert!(
+            std::fs::symlink_metadata(destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[test]
+    fn recovery_refuses_to_follow_an_existing_destination_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = root.path().join("pending");
+        let sent = root.path().join("sent");
+        let event = event();
+        let transaction = ArtifactTransaction::begin(ReportContext::new(&event, &pending)).unwrap();
+        transaction.set_destination_root(&sent).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        transaction
+            .commit_with_hook(|| Err("interrupt before publish".into()))
+            .unwrap_err();
+        drop(transaction);
+
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&sent).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"preserve").unwrap();
+        let destination = sent.join(event.report_id.as_str());
+        std::os::unix::fs::symlink(&outside, &destination).unwrap();
+
+        assert_eq!(recover_prepared_reports(&pending).unwrap(), 0);
+        assert!(
+            std::fs::symlink_metadata(destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[test]
+    fn commit_and_recovery_preserve_broken_destination_symlinks() {
+        let commit_root = tempfile::tempdir().unwrap();
+        let commit_event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&commit_event, commit_root.path()))
+                .unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let commit_destination = commit_root.path().join(commit_event.report_id.as_str());
+        std::os::unix::fs::symlink(commit_root.path().join("missing"), &commit_destination)
+            .unwrap();
+
+        assert!(transaction.commit().unwrap_err().contains("already exists"));
+        assert!(
+            std::fs::symlink_metadata(&commit_destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let recovery_root = tempfile::tempdir().unwrap();
+        let pending = recovery_root.path().join("pending");
+        let sent = recovery_root.path().join("sent");
+        let recovery_event = event();
+        let recovery =
+            ArtifactTransaction::begin(ReportContext::new(&recovery_event, &pending)).unwrap();
+        recovery.set_destination_root(&sent).unwrap();
+        recovery
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        recovery
+            .commit_with_hook(|| Err("interrupt before publish".into()))
+            .unwrap_err();
+        drop(recovery);
+        std::fs::create_dir(&sent).unwrap();
+        let recovery_destination = sent.join(recovery_event.report_id.as_str());
+        std::os::unix::fs::symlink(recovery_root.path().join("missing"), &recovery_destination)
+            .unwrap();
+
+        assert_eq!(recover_prepared_reports(&pending).unwrap(), 0);
+        assert!(
+            std::fs::symlink_metadata(recovery_destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
     }
 
@@ -1678,7 +1933,7 @@ mod tests {
     #[test]
     fn abrupt_exit_keeps_partial_hidden_and_restart_recovers_prepared_report() {
         fn run_helper(root: &Path, mode: &str, report_id: &ReportId, expected_code: i32) {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "pipeline::artifact::tests::hard_kill_process_helper",
@@ -1688,13 +1943,30 @@ mod tests {
                 .env("CRASH_MONITOR_P013_KILL_MODE", mode)
                 .env("CRASH_MONITOR_P013_KILL_ROOT", root)
                 .env("CRASH_MONITOR_P013_KILL_REPORT_ID", report_id.as_str())
-                .output()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
                 .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("hard-kill helper mode {mode:?} exceeded five seconds");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                std::io::Read::read_to_string(&mut pipe, &mut stderr).unwrap();
+            }
             assert_eq!(
-                output.status.code(),
+                status.code(),
                 Some(expected_code),
-                "helper stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
+                "helper stderr: {stderr}"
             );
         }
 

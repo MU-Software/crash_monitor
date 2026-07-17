@@ -122,7 +122,7 @@ impl PostProcessor for RetentionManager {
     fn process(
         &self,
         _event: &CrashEvent,
-        result: &mut ReportResult,
+        _result: &mut ReportResult,
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
@@ -154,7 +154,6 @@ impl PostProcessor for RetentionManager {
             if !remove_entry(entry, current_report_dir.as_deref(), context) {
                 break;
             }
-            clear_removed_current_result(result, entry, current_report_dir.as_deref());
             entries.remove(0);
         }
 
@@ -169,7 +168,6 @@ impl PostProcessor for RetentionManager {
             {
                 break;
             }
-            clear_removed_current_result(result, oldest, current_report_dir.as_deref());
             entries.remove(0);
         }
 
@@ -187,7 +185,6 @@ impl PostProcessor for RetentionManager {
             {
                 break;
             }
-            clear_removed_current_result(result, oldest, current_report_dir.as_deref());
             total = total.saturating_sub(oldest.size);
             entries.remove(0);
         }
@@ -211,35 +208,8 @@ impl PostProcessor for RetentionManager {
 
 fn entry_is_leased(entry: &ReportEntry, current_report_dir: Option<&Path>) -> bool {
     matches!(entry.kind, ReportEntryKind::CommittedDirectory)
-        && current_report_dir != Some(entry.path.as_path())
-        && is_report_publication_leased(&entry.path)
-}
-
-fn clear_removed_current_result(
-    result: &mut ReportResult,
-    entry: &ReportEntry,
-    current_report_dir: Option<&Path>,
-) {
-    if current_report_dir != Some(entry.path.as_path()) {
-        return;
-    }
-    result
-        .artifact_paths
-        .retain(|path| !path.starts_with(&entry.path));
-    if result
-        .raw_path
-        .as_deref()
-        .is_some_and(|path| path.starts_with(&entry.path))
-    {
-        result.raw_path = None;
-    }
-    if result
-        .json_path
-        .as_deref()
-        .is_some_and(|path| path.starts_with(&entry.path))
-    {
-        result.json_path = None;
-    }
+        && (current_report_dir == Some(entry.path.as_path())
+            || is_report_publication_leased(&entry.path))
 }
 
 fn collect_entries(

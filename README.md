@@ -39,20 +39,27 @@ without sudo. Override the identity with `make build SIGN_IDENTITY="…"`.
 ./target/release/crash_monitor run <path-to-app> [args…]
 ```
 
-Each event receives a UUID `ReportId` and is atomically committed as one
-directory, normally
-`~/.crash_monitor/crashes/sent/<report-id>/{manifest.json,report.json|report.zip}`.
-Until commit, its files remain hidden under `pending/.report-<report-id>.pending`.
-Override the base directory with `CRASH_MONITOR_DATA_DIR`. Report types:
-`crash`, `snapshot`, `anr`, `oom`, `exit_failure`, `signal_failure`.
+Each event is assigned a 32-character `ReportId`. While its artifacts are being
+built, they stay hidden in
+`~/.crash_monitor/crashes/pending/.report-<ReportId>.pending/`. A report becomes
+visible only after `manifest.json` is written last and the whole directory is
+atomically published as either `pending/<ReportId>/` or `sent/<ReportId>/`.
+Prepared reports interrupted just before publication are recovered on restart;
+incomplete staging directories remain hidden. Override the base directory with
+`CRASH_MONITOR_DATA_DIR`. Report types include `crash`, `snapshot`, `anr`,
+`oom`, `exit_failure`, and `signal_failure`.
 
 ## Inspect reports
 
 ```bash
-crash_monitor analyze <report.json>                    # human-readable summary
-crash_monitor stack <report.json> --thread <N>         # stack memory hex dump
-crash_monitor symbolicate <report.json> --dsym <path>  # DWARF source resolution
+crash_monitor analyze <report-dir>/report.zip                    # human-readable summary
+crash_monitor stack <report-dir>/report.zip --thread <N>         # stack memory hex dump
+crash_monitor symbolicate <report-dir>/report.zip --dsym <path>  # DWARF source resolution
 ```
+
+Pass the artifact named by the directory's `manifest.json`, not the report
+directory or manifest itself. The canonical entry has kind `archive` and path
+`report.zip`, or kind `report` and path `report.json` when no archive was made.
 
 ## Test
 

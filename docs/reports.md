@@ -13,42 +13,69 @@
 
 ## Location and lifecycle
 
-Finished reports are written under the data directory:
+Every trigger event receives one globally unique, 32-character `ReportId`.
+That identity is preserved across every pipeline stage and names the final
+report directory:
 
 ```
-<data-dir>/crashes/pending/.report-<report-id>.pending/  # hidden transaction
-<data-dir>/crashes/pending/<report-id>/                  # committed if move is disabled
-<data-dir>/crashes/sent/<report-id>/                     # normal final location
-  manifest.json
-  report.json or report.zip
+<data-dir>/crashes/pending/.report-<ReportId>.pending/  # hidden staging only
+<data-dir>/crashes/pending/<ReportId>/manifest.json     # committed in pending
+<data-dir>/crashes/sent/<ReportId>/manifest.json        # committed after MoveToSent
 ```
+
+Artifacts are written and synced inside the hidden staging directory. The
+monitor writes and syncs `manifest.json` last, then publishes the entire report
+with one atomic directory rename. Readers must ignore hidden staging directories
+and treat only a final `<ReportId>/` directory with a valid manifest and its
+exact artifact set as committed. This prevents a partially written JSON, ZIP,
+attachment, or screenshot from becoming visible as a report.
+
+If the monitor stops after syncing the manifest but before the rename, startup
+recovery validates the prepared manifest and publishes the directory to its
+recorded destination. A staging directory without a valid manifest remains
+hidden and is never presented as a finished report.
 
 The default data directory is `~/.crash_monitor`; see
 [integration.md](integration.md) for overriding it. Post-processors may archive
-the exact registered artifact set into `report.zip`. Retention counts, sizes,
-and deletes whole committed report directories rather than filename families.
+reports, move them to `sent/`, and prune `sent/` by count / size / age.
 
-The trigger allocates one UUID `ReportId`, preserved through capture,
-finalization, the report header, manifest, session record, and notifier. Files
-are written through same-directory temporary files and synced. `manifest.json`
-is written and synced last, then the complete hidden directory is published by
-one atomic rename. Readers treat only a non-hidden `<report-id>/` directory
-with a valid exact manifest as committed.
+### Manifest
 
-At monitor startup, a hidden transaction that already has a complete synced
-manifest is recovered to the destination recorded in that manifest. A partial
-transaction without a manifest remains hidden and is never returned as a
-report. This also makes same-PID, same-type events in the same second distinct;
-timestamps are metadata, not artifact identity.
+`manifest.json` is the commit record and the authoritative artifact registry.
+A representative archived report looks like:
+
+```json
+{
+  "schema_version": 1,
+  "report_id": "55d79fbc138d48b39a640b2aef61cbbb",
+  "report_type": "crash",
+  "pid": 4102,
+  "process": "example-app",
+  "committed_at": "2026-07-18T12:34:56.123456789+09:00",
+  "destination": { "kind": "sibling", "directory": "sent" },
+  "artifacts": [
+    { "path": "report.zip", "kind": "archive", "size": 48123 }
+  ]
+}
+```
+
+`report_id` must match the containing directory, and `report_type` uses
+snake_case. Artifact paths are safe, report-local names; duplicate paths,
+path traversal, non-regular files, size mismatches, and files not listed in the
+manifest invalidate the directory for readers and recovery. The canonical
+report artifact is `{"path":"report.json","kind":"report"}` or, after ZIP
+archiving, `{"path":"report.zip","kind":"archive"}`. Other exact entries may
+describe attachments, screenshots, or fail-safe raw data.
 
 ## JSON shape
 
-A report is a single JSON object. The exact fields depend on which collectors
-ran, but the top-level shape is:
+The `report.json` artifact (also stored inside `report.zip`) is a single JSON
+object. The exact fields depend on which collectors ran, but the top-level
+shape is:
 
 ```jsonc
 {
-  "header":        { "version", "report_id", "timestamp", "pid", "process", "type", "collector" },
+  "header":        { "version", "timestamp", "pid", "process", "type", "collector" },
   "termination":   { "kind": "exited", "exit_code", "runtime_ms" },
   "exception":     { "type", "code", "subcode", "raw_codes": ["0x…", …], "signal", "fault_address" },
   "crash_context": { "annotations": { "<key>": "<value>", … } },   // app state, generic KV
@@ -118,13 +145,14 @@ key-value pairs (the monitor does not interpret them — see
 
 ## CLI analysis tools
 
-The same binary reads reports offline. Reports may be plain `.json` or inside a
-`.zip` archive; both are accepted.
+The same binary reads report artifacts offline. It accepts either the plain
+`report.json` artifact or `report.zip`. Pass the artifact path recorded by
+`manifest.json`; do not pass the report directory or `manifest.json` itself.
 
 ### `analyze` — human-readable summary
 
 ```bash
-crash_monitor analyze <report.json>
+crash_monitor analyze <report-directory>/report.zip
 ```
 
 Prints the header, the annotation map, session, fingerprint, exception details,
@@ -135,7 +163,7 @@ exit code or signal, core-dump status when set, and runtime.
 ### `stack` — stack memory hex dump
 
 ```bash
-crash_monitor stack <report.json> --thread <N>
+crash_monitor stack <report-directory>/report.zip --thread <N>
 ```
 
 Classic hexdump (16 bytes/line + ASCII sidebar) of a thread's captured stack.
@@ -144,7 +172,7 @@ Decoded output is size-capped; larger captures are truncated with a notice.
 ### `symbolicate` — DWARF source resolution
 
 ```bash
-crash_monitor symbolicate <report.json> --dsym <path> [--output <out.json>]
+crash_monitor symbolicate <report-directory>/report.zip --dsym <path> [--output <out.json>]
 ```
 
 Resolves backtrace addresses to `file:line:column` using a dSYM bundle's DWARF

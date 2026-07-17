@@ -14,8 +14,9 @@
 //! Each test uses its own temporary directory via `CRASH_MONITOR_DATA_DIR` so that
 //! tests can run in parallel without interfering with each other.
 
-use crash_monitor::pipeline::{ArtifactKind, load_manifest};
 use crash_monitor::shm::{SHM_TOTAL_SIZE, SHM_VERSION, SharedMemory, ShmHeader};
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::mem::{offset_of, size_of};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,32 @@ const DETECTED_CRASH_EXIT_CODE: i32 = 81;
 const SIGABRT_NUMBER: i32 = 6;
 const SIGSEGV_NUMBER: i32 = 11;
 const SIGTERM_NUMBER: i32 = 15;
+const REPORT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const REPORT_MANIFEST_FILE_NAME: &str = "manifest.json";
+const MAX_REPORT_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+#[derive(Deserialize)]
+struct ReportManifest {
+    schema_version: u32,
+    report_id: String,
+    report_type: String,
+    destination: ManifestDestination,
+    artifacts: Vec<ManifestArtifact>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ManifestDestination {
+    OutputRoot,
+    Sibling { directory: String },
+}
+
+#[derive(Deserialize)]
+struct ManifestArtifact {
+    path: String,
+    kind: String,
+    size: u64,
+}
 
 /// Locate the `crash_app` test child binary.
 fn crash_app_path() -> PathBuf {
@@ -87,53 +114,150 @@ fn archive_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("crashes/sent")
 }
 
-/// List committed reports in the sent directory matching the legacy type
-/// prefix used by these assertions. Each transaction contributes at most one
-/// path, preferring its manifest-registered ZIP over its report JSON.
-fn find_reports(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+/// List canonical report artifacts from committed report directories.
+///
+/// A directory is visible to this test reader only when its identity matches a
+/// valid manifest and the manifest describes the directory's exact regular-file
+/// set. The returned path comes from the canonical `report` or `archive`
+/// manifest entry rather than from a basename scan.
+fn find_reports(dir: &Path, report_type: &str) -> Vec<PathBuf> {
+    find_committed_reports(dir, Some(report_type))
+}
+
+fn find_committed_reports(dir: &Path, report_type: Option<&str>) -> Vec<PathBuf> {
     if !dir.exists() {
         return vec![];
     }
-    let mut reports: Vec<PathBuf> = std::fs::read_dir(dir)
-        .unwrap()
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut reports: Vec<PathBuf> = entries
         .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            let directory_name = entry.file_name();
-            let directory_name = directory_name.to_str()?;
-            if !file_type.is_dir() || directory_name.starts_with('.') {
-                return None;
-            }
-
-            let report_dir = entry.path();
-            let manifest = load_manifest(&report_dir.join("manifest.json")).ok()?;
-            if manifest.report_id.as_str() != directory_name {
-                return None;
-            }
-            let type_prefix = format!("{}_", manifest.report_type.as_str());
-            if !prefix.is_empty() && prefix != type_prefix {
-                return None;
-            }
-
-            let artifact_path = |kind, expected_name: &str| {
-                manifest
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == kind && artifact.path == expected_name)
-                    .map(|artifact| report_dir.join(&artifact.path))
-                    .filter(|path| path.is_file())
-            };
-            artifact_path(ArtifactKind::Archive, "report.zip")
-                .or_else(|| artifact_path(ArtifactKind::Report, "report.json"))
-        })
+        .filter_map(|entry| committed_report_artifact(&entry, report_type))
         .collect();
     reports.sort();
     reports
 }
 
+fn committed_report_artifact(
+    entry: &std::fs::DirEntry,
+    requested_type: Option<&str>,
+) -> Option<PathBuf> {
+    if !entry.file_type().ok()?.is_dir() {
+        return None;
+    }
+    let report_id = entry.file_name().into_string().ok()?;
+    if !is_report_id(&report_id) {
+        return None;
+    }
+
+    let report_dir = entry.path();
+    let manifest_path = report_dir.join(REPORT_MANIFEST_FILE_NAME);
+    let metadata = std::fs::symlink_metadata(&manifest_path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_REPORT_MANIFEST_BYTES {
+        return None;
+    }
+    let manifest: ReportManifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path).ok()?).ok()?;
+    if manifest.schema_version != REPORT_MANIFEST_SCHEMA_VERSION
+        || manifest.report_id != report_id
+        || !is_snake_case(&manifest.report_type)
+        || requested_type.is_some_and(|kind| kind != manifest.report_type)
+        || !manifest.destination.is_safe()
+    {
+        return None;
+    }
+
+    let mut registered = BTreeMap::new();
+    let mut report_artifact = None;
+    let mut archive_artifact = None;
+    for artifact in &manifest.artifacts {
+        if !is_safe_component(&artifact.path)
+            || artifact.path == REPORT_MANIFEST_FILE_NAME
+            || registered
+                .insert(artifact.path.as_str(), artifact)
+                .is_some()
+        {
+            return None;
+        }
+        match (artifact.kind.as_str(), artifact.path.as_str()) {
+            ("report", "report.json") if report_artifact.is_none() => {
+                report_artifact = Some(artifact);
+            }
+            ("archive", "report.zip") if archive_artifact.is_none() => {
+                archive_artifact = Some(artifact);
+            }
+            ("report" | "archive", _) => return None,
+            _ => {}
+        }
+    }
+
+    let mut actual = BTreeMap::new();
+    for artifact_entry in std::fs::read_dir(&report_dir).ok()? {
+        let artifact_entry = artifact_entry.ok()?;
+        let name = artifact_entry.file_name().into_string().ok()?;
+        if name == REPORT_MANIFEST_FILE_NAME {
+            continue;
+        }
+        if !artifact_entry.file_type().ok()?.is_file() {
+            return None;
+        }
+        let size = artifact_entry.metadata().ok()?.len();
+        if actual.insert(name, size).is_some() {
+            return None;
+        }
+    }
+    if registered.len() != actual.len()
+        || registered
+            .iter()
+            .any(|(name, artifact)| actual.get(*name).is_none_or(|size| *size != artifact.size))
+    {
+        return None;
+    }
+
+    archive_artifact
+        .or(report_artifact)
+        .map(|artifact| report_dir.join(&artifact.path))
+}
+
+impl ManifestDestination {
+    fn is_safe(&self) -> bool {
+        match self {
+            Self::OutputRoot => true,
+            Self::Sibling { directory } => is_safe_component(directory),
+        }
+    }
+}
+
+fn is_report_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_snake_case(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('_')
+        && !value.ends_with('_')
+        && !value.contains("__")
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+fn is_safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('.')
+        && matches!(
+            Path::new(value).components().collect::<Vec<_>>().as_slice(),
+            [std::path::Component::Normal(_)]
+        )
+}
+
 /// List every finalized report, regardless of report type.
 fn find_all_reports(dir: &Path) -> Vec<PathBuf> {
-    find_reports(dir, "")
+    find_committed_reports(dir, None)
 }
 
 /// List every file left anywhere in the crash artifact lifecycle tree.
@@ -206,22 +330,217 @@ fn read_report_json(path: &Path) -> serde_json::Value {
         Some("zip") => {
             let file = std::fs::File::open(path).expect("open ZIP");
             let mut archive = zip::ZipArchive::new(file).expect("parse ZIP");
-            // Find the .json entry inside the ZIP
-            for i in 0..archive.len() {
-                let mut entry = archive.by_index(i).expect("ZIP entry");
-                if Path::new(entry.name())
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-                {
-                    let mut content = String::new();
-                    entry.read_to_string(&mut content).expect("read ZIP entry");
-                    return serde_json::from_str(&content).expect("parse JSON from ZIP");
-                }
-            }
-            panic!("no .json file found inside ZIP: {}", path.display());
+            let mut entry = archive
+                .by_name("report.json")
+                .expect("canonical report.json entry in ZIP");
+            let mut content = String::new();
+            entry.read_to_string(&mut content).expect("read ZIP entry");
+            serde_json::from_str(&content).expect("parse JSON from ZIP")
         }
         _ => panic!("unexpected report extension: {}", path.display()),
     }
+}
+
+fn test_manifest(
+    report_id: &str,
+    report_type: &str,
+    artifacts: &[serde_json::Value],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": REPORT_MANIFEST_SCHEMA_VERSION,
+        "report_id": report_id,
+        "report_type": report_type,
+        "destination": { "kind": "sibling", "directory": "sent" },
+        "artifacts": artifacts,
+    })
+}
+
+fn write_test_manifest(report_dir: &Path, manifest: &serde_json::Value) {
+    std::fs::create_dir_all(report_dir).expect("create report directory");
+    std::fs::write(
+        report_dir.join(REPORT_MANIFEST_FILE_NAME),
+        serde_json::to_vec(manifest).expect("serialize test manifest"),
+    )
+    .expect("write test manifest");
+}
+
+#[test]
+fn find_reports_uses_the_manifest_type_and_canonical_artifact() {
+    let root = TempDir::new().expect("create temp dir");
+    let crash_id = "11111111111111111111111111111111";
+    let crash_dir = root.path().join(crash_id);
+    std::fs::create_dir_all(&crash_dir).expect("create crash report directory");
+    std::fs::write(crash_dir.join("report.json"), b"{}").expect("write JSON report");
+    write_test_manifest(
+        &crash_dir,
+        &test_manifest(
+            crash_id,
+            "crash",
+            &[serde_json::json!({
+                "path": "report.json",
+                "kind": "report",
+                "size": 2,
+            })],
+        ),
+    );
+
+    let snapshot_id = "22222222222222222222222222222222";
+    let snapshot_dir = root.path().join(snapshot_id);
+    std::fs::create_dir_all(&snapshot_dir).expect("create snapshot report directory");
+    std::fs::write(snapshot_dir.join("report.zip"), b"ZIP").expect("write ZIP report");
+    write_test_manifest(
+        &snapshot_dir,
+        &test_manifest(
+            snapshot_id,
+            "snapshot",
+            &[serde_json::json!({
+                "path": "report.zip",
+                "kind": "archive",
+                "size": 3,
+            })],
+        ),
+    );
+
+    assert_eq!(
+        find_reports(root.path(), "crash"),
+        vec![crash_dir.join("report.json")]
+    );
+    assert_eq!(
+        find_reports(root.path(), "snapshot"),
+        vec![snapshot_dir.join("report.zip")]
+    );
+    assert_eq!(find_all_reports(root.path()).len(), 2);
+}
+
+#[test]
+fn find_reports_ignores_hidden_incomplete_mismatched_and_extra_reports() {
+    let root = TempDir::new().expect("create temp dir");
+
+    let hidden_id = "33333333333333333333333333333333";
+    let hidden_dir = root.path().join(format!(".report-{hidden_id}.pending"));
+    std::fs::create_dir_all(&hidden_dir).expect("create hidden staging directory");
+    std::fs::write(hidden_dir.join("report.json"), b"{}").expect("write hidden report");
+    write_test_manifest(
+        &hidden_dir,
+        &test_manifest(
+            hidden_id,
+            "crash",
+            &[serde_json::json!({
+                "path": "report.json",
+                "kind": "report",
+                "size": 2,
+            })],
+        ),
+    );
+
+    let incomplete_dir = root.path().join("44444444444444444444444444444444");
+    std::fs::create_dir_all(&incomplete_dir).expect("create incomplete report directory");
+    std::fs::write(incomplete_dir.join("report.json"), b"{}").expect("write partial report");
+
+    let mismatched_dir = root.path().join("55555555555555555555555555555555");
+    std::fs::create_dir_all(&mismatched_dir).expect("create mismatched report directory");
+    std::fs::write(mismatched_dir.join("report.json"), b"{}").expect("write report");
+    write_test_manifest(
+        &mismatched_dir,
+        &test_manifest(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "crash",
+            &[serde_json::json!({
+                "path": "report.json",
+                "kind": "report",
+                "size": 2,
+            })],
+        ),
+    );
+
+    let malformed_dir = root.path().join("66666666666666666666666666666666");
+    std::fs::create_dir_all(&malformed_dir).expect("create malformed report directory");
+    std::fs::write(malformed_dir.join(REPORT_MANIFEST_FILE_NAME), b"{")
+        .expect("write malformed manifest");
+
+    let extra_id = "77777777777777777777777777777777";
+    let extra_dir = root.path().join(extra_id);
+    std::fs::create_dir_all(&extra_dir).expect("create extra-artifact report directory");
+    std::fs::write(extra_dir.join("report.json"), b"{}").expect("write report");
+    std::fs::write(extra_dir.join("unregistered.bin"), b"extra")
+        .expect("write unregistered artifact");
+    write_test_manifest(
+        &extra_dir,
+        &test_manifest(
+            extra_id,
+            "crash",
+            &[serde_json::json!({
+                "path": "report.json",
+                "kind": "report",
+                "size": 2,
+            })],
+        ),
+    );
+
+    assert!(find_reports(root.path(), "crash").is_empty());
+}
+
+#[test]
+fn find_reports_rejects_traversal_duplicates_and_non_regular_artifacts() {
+    let root = TempDir::new().expect("create temp dir");
+
+    let traversal_id = "88888888888888888888888888888888";
+    let traversal_dir = root.path().join(traversal_id);
+    write_test_manifest(
+        &traversal_dir,
+        &test_manifest(
+            traversal_id,
+            "crash",
+            &[serde_json::json!({
+                "path": "../report.json",
+                "kind": "report",
+                "size": 2,
+            })],
+        ),
+    );
+
+    let duplicate_id = "99999999999999999999999999999999";
+    let duplicate_dir = root.path().join(duplicate_id);
+    std::fs::create_dir_all(&duplicate_dir).expect("create duplicate report directory");
+    std::fs::write(duplicate_dir.join("report.json"), b"{}").expect("write report");
+    write_test_manifest(
+        &duplicate_dir,
+        &test_manifest(
+            duplicate_id,
+            "crash",
+            &[
+                serde_json::json!({
+                    "path": "report.json",
+                    "kind": "report",
+                    "size": 2,
+                }),
+                serde_json::json!({
+                    "path": "report.json",
+                    "kind": "report",
+                    "size": 2,
+                }),
+            ],
+        ),
+    );
+
+    let non_regular_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let non_regular_dir = root.path().join(non_regular_id);
+    std::fs::create_dir_all(non_regular_dir.join("report.json"))
+        .expect("create non-regular report artifact");
+    write_test_manifest(
+        &non_regular_dir,
+        &test_manifest(
+            non_regular_id,
+            "crash",
+            &[serde_json::json!({
+                "path": "report.json",
+                "kind": "report",
+                "size": 0,
+            })],
+        ),
+    );
+
+    assert!(find_reports(root.path(), "crash").is_empty());
 }
 
 #[test]
@@ -247,7 +566,7 @@ fn test_e2e_crash_sigsegv() {
     );
 
     // Find the crash report
-    let reports = find_reports(&archive, "crash_");
+    let reports = find_reports(&archive, "crash");
     assert!(
         !reports.is_empty(),
         "expected at least one crash report in {archive:?}",
@@ -350,7 +669,7 @@ fn test_e2e_crash_sigabrt() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let reports = find_reports(&archive, "crash_");
+    let reports = find_reports(&archive, "crash");
     assert!(!reports.is_empty(), "expected crash report");
 
     let json = read_report_json(&reports[0]);
@@ -413,7 +732,7 @@ fn test_e2e_nonzero_exit_reports_termination() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let reports = find_reports(&archive, "exit_failure_");
+    let reports = find_reports(&archive, "exit_failure");
     assert_eq!(
         reports.len(),
         1,
@@ -448,7 +767,7 @@ fn test_e2e_sigterm_preserves_signal_semantics() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let reports = find_reports(&archive, "signal_failure_");
+    let reports = find_reports(&archive, "signal_failure");
     assert_eq!(
         reports.len(),
         1,
@@ -548,7 +867,7 @@ fn test_e2e_anr() {
     let _ = child.kill();
     let _ = child.wait();
 
-    let reports = find_reports(&archive, "anr_");
+    let reports = find_reports(&archive, "anr");
     assert!(!reports.is_empty(), "expected ANR report in {archive:?}");
 
     let json = read_report_json(&reports[0]);

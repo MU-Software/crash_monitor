@@ -532,8 +532,8 @@ pub enum CrashFinalization {
 }
 
 impl CrashFinalization {
-    pub(crate) fn start(pipeline: Arc<Pipeline>, captured: CapturedEvent) -> Self {
-        match CrashFinalizeTicket::spawn(pipeline, captured) {
+    pub(crate) fn start(pipeline: Arc<Pipeline>, captured: Box<CapturedEvent>) -> Self {
+        match CrashFinalizeTicket::spawn(pipeline, *captured) {
             Ok(ticket) => Self::Pending(ticket),
             Err(captured) => Self::Deferred(captured),
         }

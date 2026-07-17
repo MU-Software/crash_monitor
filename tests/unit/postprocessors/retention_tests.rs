@@ -508,7 +508,7 @@ fn test_without_override_scans_the_current_committed_parent() {
 }
 
 #[test]
-fn test_final_cleanup_zero_quota_deletes_current_and_clears_result_paths() {
+fn test_final_cleanup_defers_impossible_zero_quota_without_deleting_current_report() {
     let root = tempfile::tempdir().unwrap();
     let pending = root.path().join("pending");
     let sent = root.path().join("sent");
@@ -523,25 +523,17 @@ fn test_final_cleanup_zero_quota_deletes_current_and_clears_result_paths() {
     let context = PluginContext::without_deadline().with_artifact_transaction(transaction.clone());
     let current = transaction.commit().unwrap();
 
-    let report_path = current.report_dir.join("report.json");
-    let mut result = ReportResult {
-        artifact_paths: vec![report_path.clone()],
-        raw_path: None,
-        json_path: Some(report_path),
-        session: None,
-    };
-    RetentionManager::with_dir(0, 0, 365, sent)
-        .process(&event, &mut result, &context)
-        .unwrap();
+    let error = RetentionManager::with_dir(0, 0, 365, sent)
+        .process(&event, &mut dummy_result(), &context)
+        .unwrap_err();
     transaction.release_publication_lease();
 
-    assert!(!current.report_dir.exists());
-    assert!(result.artifact_paths.is_empty());
-    assert!(result.json_path.is_none());
+    assert!(error.contains("deferred by a live lease"), "{error}");
+    assert!(current.report_dir.join("report.json").is_file());
 }
 
 #[test]
-fn test_final_cleanup_age_quota_deletes_current_report() {
+fn test_final_cleanup_defers_impossible_age_quota_for_current_report() {
     let root = tempfile::tempdir().unwrap();
     let pending = root.path().join("pending");
     let sent = root.path().join("sent");
@@ -561,12 +553,13 @@ fn test_final_cleanup_age_quota_deletes_current_report() {
     )
     .unwrap();
 
-    RetentionManager::with_dir(10, 256, 0, sent)
+    let error = RetentionManager::with_dir(10, 256, 0, sent)
         .process(&event, &mut dummy_result(), &context)
-        .unwrap();
+        .unwrap_err();
     transaction.release_publication_lease();
 
-    assert!(!current.report_dir.exists());
+    assert!(error.contains("oldest_over_age=true"), "{error}");
+    assert!(current.report_dir.join("report.json").is_file());
 }
 
 #[test]

@@ -259,7 +259,7 @@ fn finalize_contained_capture(pipeline: &Arc<Pipeline>, capture: CaptureOutcome)
     let CaptureOutcome::Captured(captured) = capture else {
         return;
     };
-    let diagnostics = CrashFinalization::start(pipeline.clone(), *captured).complete(
+    let diagnostics = CrashFinalization::start(pipeline.clone(), captured).complete(
         pipeline.clone(),
         None,
         BACKGROUND_DRAIN_DEADLINE,
@@ -393,7 +393,7 @@ pub fn event_loop(
                 capture_worker.detach();
                 background_worker.detach();
                 let crash_finalization =
-                    captured.map(|captured| CrashFinalization::start(pipeline.clone(), *captured));
+                    captured.map(|captured| CrashFinalization::start(pipeline.clone(), captured));
                 let outcome = match (task_control_failure, reply_result) {
                     (None, Ok(())) => MonitorOutcome::DetectedCrash {
                         termination: None,
