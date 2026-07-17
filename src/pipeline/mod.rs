@@ -28,11 +28,74 @@ pub use types::{
     PluginStatus, Priority, RawShmSnapshot, ReportResult, ReportType, TerminationReason,
 };
 
+/// Immutable per-trigger report policy installed in a [`Pipeline`].
+///
+/// The global kill switch is deliberately stored separately on `Pipeline`.
+/// This policy distinguishes all report-producing event sources without
+/// granting any of them an implicit emergency-evidence exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // one explicit switch per external trigger
+pub struct TriggerPolicy {
+    pub crash: bool,
+    pub exit_failure: bool,
+    pub signal_failure: bool,
+    pub probable_oom: bool,
+    pub anr: bool,
+    pub snapshot: bool,
+}
+
+impl TriggerPolicy {
+    /// Policy used by tests and callers that want the historical all-on mode.
+    pub const ALL_ENABLED: Self = Self {
+        crash: true,
+        exit_failure: true,
+        signal_failure: true,
+        probable_oom: true,
+        anr: true,
+        snapshot: true,
+    };
+
+    #[must_use]
+    const fn allows(self, report_type: ReportType) -> bool {
+        match report_type {
+            ReportType::Crash => self.crash,
+            ReportType::Snapshot => self.snapshot,
+            ReportType::Anr => self.anr,
+            ReportType::Oom => self.probable_oom,
+            ReportType::ExitFailure => self.exit_failure,
+            ReportType::SignalFailure => self.signal_failure,
+        }
+    }
+}
+
+impl Default for TriggerPolicy {
+    fn default() -> Self {
+        Self::ALL_ENABLED
+    }
+}
+
+impl From<crate::config::ValidatedTriggersConfig> for TriggerPolicy {
+    fn from(config: crate::config::ValidatedTriggersConfig) -> Self {
+        Self {
+            crash: config.crash,
+            exit_failure: config.exit_failure,
+            signal_failure: config.signal_failure,
+            probable_oom: config.probable_oom,
+            anr: config.anr,
+            snapshot: config.snapshot,
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════
 //  Pipeline
 // ═══════════════════════════════════════════════════
 
 pub struct Pipeline {
+    /// Authoritative process-wide report-generation kill switch.
+    pub enabled: bool,
+    /// Explicit policy for each event source that can create a report.
+    pub triggers: TriggerPolicy,
     pub filters: Vec<Box<dyn Filter>>,
     pub collectors: Vec<Box<dyn Collector>>,
     pub pre_processors: Vec<Box<dyn PreProcessor>>,
@@ -120,6 +183,14 @@ fn plugin_status<T>(result: &PluginRunResult<T>) -> PluginStatus {
 }
 
 impl Pipeline {
+    /// Return whether this pipeline may process the given report type.
+    ///
+    /// The global switch is always checked first and has no exception path.
+    #[must_use]
+    pub fn report_enabled(&self, report_type: ReportType) -> bool {
+        self.enabled && self.triggers.allows(report_type)
+    }
+
     /// Process a crash/snapshot event synchronously.
     ///
     /// Production Mach events use [`worker`] so finalization cannot delay
@@ -127,6 +198,9 @@ impl Pipeline {
     /// callers and unit tests that explicitly want synchronous completion.
     #[must_use]
     pub fn handle_event(&self, event: &CrashEvent, task: mach_port_t) -> Diagnostics {
+        if !self.report_enabled(event.report_type) {
+            return Diagnostics::new();
+        }
         match self.capture_event(event, task) {
             CaptureOutcome::Captured(captured) => self.finalize_captured(captured),
             CaptureOutcome::Skipped(diagnostics) => diagnostics,
@@ -135,6 +209,9 @@ impl Pipeline {
 
     /// Suspend, collect task-facing state, release thread rights, and resume.
     fn capture_event(&self, event: &CrashEvent, task: mach_port_t) -> CaptureOutcome {
+        if !self.report_enabled(event.report_type) {
+            return CaptureOutcome::Skipped(Diagnostics::new());
+        }
         let mut diagnostics = Diagnostics::new();
 
         let suspended = if let Err(e) = self.platform.suspend_task(task) {
@@ -176,6 +253,13 @@ impl Pipeline {
         task: mach_port_t,
         cancelled: &Arc<AtomicBool>,
     ) -> CapturePayload {
+        if !self.report_enabled(event.report_type) {
+            return CapturePayload {
+                data: CollectedData::default(),
+                raw_shm: None,
+                diagnostics: Diagnostics::new(),
+            };
+        }
         let mut diagnostics = Diagnostics::new();
 
         // ── Collectors ──
@@ -242,6 +326,9 @@ impl Pipeline {
     /// Finalize owned capture data without a task port or live SHM view.
     #[allow(clippy::too_many_lines)]
     fn finalize_captured(&self, mut captured: CapturedEvent) -> Diagnostics {
+        if !self.report_enabled(captured.event.report_type) {
+            return Diagnostics::new();
+        }
         let event = &captured.event;
         let data = &mut captured.data;
         let diagnostics = &mut captured.diagnostics;
@@ -389,6 +476,9 @@ impl Pipeline {
     /// payload for this path.
     #[must_use]
     pub fn handle_termination_event(&self, event: &CrashEvent) -> Diagnostics {
+        if !self.report_enabled(event.report_type) {
+            return Diagnostics::new();
+        }
         self.finalize_termination_event(event)
     }
 
@@ -399,6 +489,9 @@ impl Pipeline {
     #[allow(clippy::too_many_lines)]
     fn finalize_termination_event(&self, event: &CrashEvent) -> Diagnostics {
         debug_assert!(event.termination.is_some());
+        if !self.report_enabled(event.report_type) {
+            return Diagnostics::new();
+        }
         let mut diagnostics = Diagnostics::new();
 
         let pending = match &self.output_dir {
@@ -566,10 +659,24 @@ fn validate_order_impl<T: Plugin + ?Sized>(category: &str, plugins: &[Box<T>], s
 #[must_use]
 #[allow(clippy::too_many_lines)] // pipeline factory — splitting would scatter registration logic
 pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemory>>) -> Pipeline {
+    let config = crate::config::load_validated_config();
+    default_macos_pipeline_from_config(shm, &config)
+}
+
+/// Build the default macOS pipeline from one already-loaded configuration.
+///
+/// Keeping loading outside this constructor lets startup, event dispatch, and
+/// plugin registration share exactly the same immutable enablement snapshot.
+#[cfg(target_os = "macos")]
+#[must_use]
+#[allow(clippy::too_many_lines)] // pipeline factory — splitting would scatter registration logic
+pub fn default_macos_pipeline_from_config(
+    shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
+    validated: &crate::config::ValidatedConfig,
+) -> Pipeline {
     use crate::collectors::{
         DylibCollector, EnvironmentCollector, MemoryCollector, ThreadCollector,
     };
-    use crate::config;
     use crate::filters::{DiskSpaceFilter, RateLimiter};
     use crate::notifiers::{ConsoleNotifier, SystemNotification};
     use crate::platform::MacOsPlatform;
@@ -583,12 +690,15 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
     };
     use std::time::Duration;
 
-    let cfg = config::load_config();
+    let cfg = validated.config();
+    let triggers = TriggerPolicy::from(validated.triggers);
 
     // ── Early out: global kill switch ──
-    if !cfg.enabled {
+    if !validated.enabled {
         let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform);
         return Pipeline {
+            enabled: false,
+            triggers,
             filters: vec![],
             collectors: vec![],
             shm,
@@ -602,7 +712,7 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
 
     let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform);
 
-    // After the early-out above, cfg.enabled is guaranteed true.
+    // After the early-out above, validated.enabled is guaranteed true.
     // Use 2-arg check: category_enabled && plugin_enabled.
     let on = |cat: bool, plugin: bool| cat && plugin;
 
@@ -799,6 +909,8 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
     }
 
     let pipeline = Pipeline {
+        enabled: true,
+        triggers,
         filters,
         collectors,
         shm,

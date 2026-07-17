@@ -254,6 +254,10 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         return event_loop::EXIT_MONITOR_INTERNAL;
     }
 
+    // Load and normalize enablement once. Every startup branch and the
+    // pipeline factory must observe this same immutable policy snapshot.
+    let validated_config = config::load_validated_config();
+
     eprintln!("[monitor] Starting: {app_path}");
 
     // Set up SIGUSR1 signal pipe
@@ -276,12 +280,16 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     };
 
     // Create shared memory for breadcrumbs/context/screenshots
-    let shared_memory = match shm::SharedMemory::create(std::process::id()) {
-        Ok(s) => Some(Arc::new(s)),
-        Err(e) => {
-            eprintln!("[monitor] Shared memory creation failed (continuing without): {e}");
-            None
+    let shared_memory = if validated_config.enabled {
+        match shm::SharedMemory::create(std::process::id()) {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                eprintln!("[monitor] Shared memory creation failed (continuing without): {e}");
+                None
+            }
         }
+    } else {
+        None
     };
 
     // Build argv and envp for posix_spawn
@@ -339,20 +347,14 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let child_task = match acquire_task_port_or_termination(child_pid, child_started_at) {
         Ok(TaskAcquisition::Acquired(task)) => platform::OwnedMachPort::new(task),
         Ok(TaskAcquisition::ChildTerminated(reason)) => {
-            let cfg = config::load_config();
-            let oom_detection =
-                cfg.enabled && cfg.triggers.enabled && cfg.triggers.oom_detection.enabled;
-            let pl = Arc::new(pipeline::default_macos_pipeline(shared_memory.clone()));
+            let pl = Arc::new(pipeline::default_macos_pipeline_from_config(
+                shared_memory.clone(),
+                &validated_config,
+            ));
             #[allow(clippy::cast_sign_loss)]
             let child_pid_u32 = child_pid_raw as u32;
-            return event_loop::handle_child_termination(
-                &pl,
-                child_pid_u32,
-                process_name,
-                reason,
-                oom_detection,
-            )
-            .exit_code();
+            return event_loop::handle_child_termination(&pl, child_pid_u32, process_name, reason)
+                .exit_code();
         }
         Err(e) => {
             eprintln!(
@@ -366,10 +368,10 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             match wait_for_child_termination(child_pid, child_started_at) {
                 Ok(reason) => {
                     eprintln!("[monitor] Child eventually terminated: {reason:?}");
-                    let cfg = config::load_config();
-                    let oom_detection =
-                        cfg.enabled && cfg.triggers.enabled && cfg.triggers.oom_detection.enabled;
-                    let pl = Arc::new(pipeline::default_macos_pipeline(shared_memory.clone()));
+                    let pl = Arc::new(pipeline::default_macos_pipeline_from_config(
+                        shared_memory.clone(),
+                        &validated_config,
+                    ));
                     #[allow(clippy::cast_sign_loss)]
                     let child_pid_u32 = child_pid_raw as u32;
                     let _ = event_loop::handle_child_termination(
@@ -377,7 +379,6 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
                         child_pid_u32,
                         process_name,
                         reason,
-                        oom_detection,
                     );
                 }
                 Err(wait_err) => eprintln!("[monitor] waitpid cleanup failed: {wait_err}"),
@@ -392,20 +393,21 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     eprintln!("[monitor] Monitoring active. Press F8 in app for manual snapshot.");
 
     // Create the plugin pipeline
-    let pl = Arc::new(pipeline::default_macos_pipeline(shared_memory.clone()));
-
-    // Inline-trigger toggles (Mach/SIGUSR1 are always-on; only OOM is opt-in).
-    let cfg = config::load_config();
-    let oom_detection = cfg.enabled && cfg.triggers.enabled && cfg.triggers.oom_detection.enabled;
+    let pl = Arc::new(pipeline::default_macos_pipeline_from_config(
+        shared_memory.clone(),
+        &validated_config,
+    ));
 
     // ANR watchdog config (used inline by event_loop, no dedicated thread).
     // Environment overrides allow E2E tests to use shorter timeouts.
-    let anr_config = event_loop::AnrConfig {
-        warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", 10_000),
-        threshold_ms: env_u64("CRASH_MONITOR_ANR_THRESHOLD_MS", 5_000),
-        check_interval_ms: env_u64("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", 2_000),
-        cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", 60_000),
-    };
+    let anr_config = pl
+        .report_enabled(pipeline::ReportType::Anr)
+        .then(|| event_loop::AnrConfig {
+            warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", 10_000),
+            threshold_ms: env_u64("CRASH_MONITOR_ANR_THRESHOLD_MS", 5_000),
+            check_interval_ms: env_u64("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", 2_000),
+            cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", 60_000),
+        });
 
     // Build event source from Mac-specific channels
     #[allow(clippy::cast_sign_loss)] // PID is always positive
@@ -424,8 +426,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         process_name,
         &|header| platform::send_deferred_reply(header),
         shared_memory.as_ref(),
-        Some(&anr_config),
-        oom_detection,
+        anr_config.as_ref(),
     );
 
     // After a crash, destroy the exception port so that if the child re-faults
@@ -457,6 +458,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             }
         };
 
+        let report_expected = crash_finalization.is_some();
         let report_path = crash_finalization.take().and_then(|finalization| {
             finalization
                 .complete(
@@ -466,7 +468,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
                 )
                 .and_then(|diagnostics| diagnostics.report_path)
         });
-        if report_path.is_none() {
+        if report_expected && report_path.is_none() {
             eprintln!("[monitor] Fatal report finalization did not produce an artifact");
         }
         outcome = outcome.with_crash_result(termination, report_path);

@@ -153,6 +153,8 @@ fn make_pipeline_with_collector(
     tempdir: &std::path::Path,
 ) -> Pipeline {
     Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![],
         collectors: vec![collector],
         pre_processors: vec![],
@@ -170,6 +172,8 @@ fn make_pipeline_with_filter(
     tempdir: &std::path::Path,
 ) -> Pipeline {
     Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![filter],
         collectors: vec![collector],
         pre_processors: vec![],
@@ -418,6 +422,8 @@ fn make_pipeline_with_tempdir(
     tempdir: &std::path::Path,
 ) -> Pipeline {
     Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![],
         collectors,
         pre_processors: vec![],
@@ -890,6 +896,8 @@ fn make_full_pipeline(
     tempdir: &std::path::Path,
 ) -> Pipeline {
     Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters,
         collectors,
         pre_processors,
@@ -1364,7 +1372,177 @@ fn test_full_pipeline_all_categories_run() {
     assert!(json_report_exists(tempdir.path()));
 }
 
+#[test]
+fn test_report_policy_maps_each_trigger_to_exactly_one_report_type() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let mut pipeline = make_full_pipeline(vec![], vec![], vec![], vec![], vec![], tempdir.path());
+    let report_types = [
+        ReportType::Crash,
+        ReportType::ExitFailure,
+        ReportType::SignalFailure,
+        ReportType::Oom,
+        ReportType::Anr,
+        ReportType::Snapshot,
+    ];
+
+    for expected in report_types {
+        pipeline.triggers = TriggerPolicy {
+            crash: expected == ReportType::Crash,
+            exit_failure: expected == ReportType::ExitFailure,
+            signal_failure: expected == ReportType::SignalFailure,
+            probable_oom: expected == ReportType::Oom,
+            anr: expected == ReportType::Anr,
+            snapshot: expected == ReportType::Snapshot,
+        };
+
+        for actual in report_types {
+            assert_eq!(
+                pipeline.report_enabled(actual),
+                actual == expected,
+                "policy for {expected:?} was applied to {actual:?}"
+            );
+        }
+    }
+
+    pipeline.enabled = false;
+    pipeline.triggers = TriggerPolicy::ALL_ENABLED;
+    for report_type in report_types {
+        assert!(!pipeline.report_enabled(report_type));
+    }
+}
+
+#[test]
+fn test_global_disable_skips_every_report_type_without_side_effects() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(MockPlatform::default());
+    let collector_called = Arc::new(AtomicBool::new(false));
+    let pre_called = Arc::new(AtomicBool::new(false));
+    let post_called = Arc::new(AtomicBool::new(false));
+    let notified = Arc::new(Mutex::new(None));
+    let pipeline = Pipeline {
+        enabled: false,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![Box::new(MockFilter { allow: true })],
+        collectors: vec![Box::new(CfgCollector {
+            name: "DisabledCollector",
+            called: collector_called.clone(),
+            available: true,
+            panic: false,
+        })],
+        pre_processors: vec![Box::new(CfgPreProcessor {
+            name: "DisabledPreProcessor",
+            called: pre_called.clone(),
+            available: true,
+            panic: false,
+            set_duplicate: false,
+        })],
+        post_processors: vec![Box::new(CfgPostProcessor {
+            name: "DisabledPostProcessor",
+            called: post_called.clone(),
+            available: true,
+            panic: false,
+        })],
+        notifiers: vec![Box::new(CfgNotifier {
+            name: "DisabledNotifier",
+            available: true,
+            captured: notified.clone(),
+        })],
+        shm: None,
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+
+    for report_type in [
+        ReportType::Crash,
+        ReportType::Snapshot,
+        ReportType::Anr,
+        ReportType::ExitFailure,
+        ReportType::SignalFailure,
+        ReportType::Oom,
+    ] {
+        let mut event = make_crash_event();
+        event.report_type = report_type;
+        event.termination = match report_type {
+            ReportType::ExitFailure => Some(TerminationReason::Exited {
+                exit_code: 7,
+                runtime_ms: 10,
+            }),
+            ReportType::SignalFailure | ReportType::Oom => Some(TerminationReason::Signaled {
+                signal: 9,
+                core_dumped: false,
+                runtime_ms: 10,
+            }),
+            _ => None,
+        };
+
+        let diagnostics = match report_type {
+            ReportType::ExitFailure | ReportType::SignalFailure | ReportType::Oom => {
+                pipeline.handle_termination_event(&event)
+            }
+            _ => pipeline.handle_event(&event, 123),
+        };
+        assert!(diagnostics.plugins.is_empty());
+        assert!(diagnostics.report_path.is_none());
+    }
+
+    assert_eq!(platform.suspend_count(), 0);
+    assert_eq!(platform.resume_count(), 0);
+    assert!(platform.deallocated_ports().is_empty());
+    assert!(!collector_called.load(Ordering::SeqCst));
+    assert!(!pre_called.load(Ordering::SeqCst));
+    assert!(!post_called.load(Ordering::SeqCst));
+    assert!(notified.lock().unwrap().is_none());
+    let artifacts: Vec<_> = std::fs::read_dir(tempdir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert!(artifacts.is_empty(), "global disable created {artifacts:?}");
+}
+
 // ── Real factory: builds and passes dependency-order validation ──
+
+#[test]
+fn test_macos_factory_preserves_validated_global_and_trigger_policy() {
+    let disabled =
+        serde_json::from_str::<crate::config::CrashReporterConfig>(r#"{ "enabled": false }"#)
+            .unwrap()
+            .validate();
+    let disabled_pipeline = default_macos_pipeline_from_config(None, &disabled);
+    assert!(!disabled_pipeline.enabled);
+    assert!(disabled_pipeline.collectors.is_empty());
+    assert!(disabled_pipeline.post_processors.is_empty());
+    for report_type in [
+        ReportType::Crash,
+        ReportType::ExitFailure,
+        ReportType::SignalFailure,
+        ReportType::Oom,
+        ReportType::Anr,
+        ReportType::Snapshot,
+    ] {
+        assert!(!disabled_pipeline.report_enabled(report_type));
+    }
+
+    let selective = serde_json::from_str::<crate::config::CrashReporterConfig>(
+        r#"{
+            "triggers": {
+                "crash": { "enabled": false },
+                "oom_detection": { "enabled": false },
+                "snapshot": { "enabled": false }
+            }
+        }"#,
+    )
+    .unwrap()
+    .validate();
+    let selective_pipeline = default_macos_pipeline_from_config(None, &selective);
+    assert!(selective_pipeline.enabled);
+    assert!(!selective_pipeline.report_enabled(ReportType::Crash));
+    assert!(selective_pipeline.report_enabled(ReportType::ExitFailure));
+    assert!(selective_pipeline.report_enabled(ReportType::SignalFailure));
+    assert!(!selective_pipeline.report_enabled(ReportType::Oom));
+    assert!(selective_pipeline.report_enabled(ReportType::Anr));
+    assert!(!selective_pipeline.report_enabled(ReportType::Snapshot));
+}
 
 #[test]
 fn test_default_macos_pipeline_builds_and_validates() {

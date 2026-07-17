@@ -85,6 +85,12 @@ impl CaptureWorker {
         task: mach_port_t,
         deadline: Instant,
     ) -> CaptureOutcome {
+        // This guard must precede deadline handling and task suspension. The
+        // worker is a public pipeline bypass used by the event loop, so relying
+        // on `Pipeline::handle_event` would leave the kill switch incomplete.
+        if !self.pipeline.report_enabled(event.report_type) {
+            return CaptureOutcome::Skipped(Diagnostics::new());
+        }
         if Instant::now() >= deadline {
             return timed_out_capture(event, "absolute capture deadline already elapsed");
         }
@@ -280,6 +286,9 @@ pub(crate) fn finalize_terminated_child(
     event: super::CrashEvent,
     timeout: Duration,
 ) -> Option<Diagnostics> {
+    if !pipeline.report_enabled(event.report_type) {
+        return Some(Diagnostics::new());
+    }
     let (result_tx, result_rx) = sync_channel(1);
     let spawn = thread::Builder::new()
         .name("crash-finalize-termination".into())
@@ -448,7 +457,7 @@ mod tests {
     use super::*;
     use crate::pipeline::{
         CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
-        ReportResult, ReportType,
+        ReportResult, ReportType, TriggerPolicy,
     };
     use crate::platform::mock::MockPlatform;
     use std::sync::Condvar;
@@ -506,16 +515,18 @@ mod tests {
         completed_rx: Receiver<()>,
         release: Arc<(Mutex<bool>, Condvar)>,
         calls: Arc<AtomicUsize>,
-        _tempdir: tempfile::TempDir,
+        tempdir: tempfile::TempDir,
     }
 
-    fn worker_fixture() -> WorkerFixture {
+    fn worker_fixture_with_enabled(enabled: bool) -> WorkerFixture {
         let tempdir = tempfile::tempdir().unwrap();
         let (entered_tx, entered_rx) = sync_channel(8);
         let (completed_tx, completed_rx) = sync_channel(8);
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let calls = Arc::new(AtomicUsize::new(0));
         let pipeline = Arc::new(Pipeline {
+            enabled,
+            triggers: TriggerPolicy::ALL_ENABLED,
             filters: vec![],
             collectors: vec![],
             pre_processors: vec![],
@@ -536,8 +547,12 @@ mod tests {
             completed_rx,
             release,
             calls,
-            _tempdir: tempdir,
+            tempdir,
         }
+    }
+
+    fn worker_fixture() -> WorkerFixture {
+        worker_fixture_with_enabled(true)
     }
 
     fn captured(pid: u32) -> CapturedEvent {
@@ -591,6 +606,65 @@ mod tests {
         assert!(matches!(status, Some(PluginStatus::TimedOut)));
 
         worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn disabled_capture_worker_returns_before_task_suspend() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(MockPlatform::default());
+        let pipeline = Arc::new(Pipeline {
+            enabled: false,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            filters: vec![],
+            collectors: vec![],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: None,
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+        let mut worker = CaptureWorker::start(pipeline);
+
+        let outcome = worker.capture(
+            captured(9).event,
+            123,
+            Instant::now() + Duration::from_secs(1),
+        );
+
+        assert!(matches!(outcome, CaptureOutcome::Skipped(_)));
+        assert_eq!(platform.suspend_count(), 0);
+        assert_eq!(platform.resume_count(), 0);
+        assert!(std::fs::read_dir(tempdir.path()).unwrap().next().is_none());
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn disabled_finalization_workers_accept_no_bypass_artifacts() {
+        let fixture = worker_fixture_with_enabled(false);
+        let mut termination_event = captured(8).event;
+        termination_event.report_type = ReportType::ExitFailure;
+        termination_event.termination = Some(TerminationReason::Exited {
+            exit_code: 8,
+            runtime_ms: 10,
+        });
+
+        let diagnostics = finalize_terminated_child(
+            fixture.pipeline.clone(),
+            termination_event,
+            Duration::from_secs(1),
+        )
+        .expect("disabled termination path returns an empty result");
+        assert!(diagnostics.plugins.is_empty());
+        assert!(diagnostics.report_path.is_none());
+
+        let background = BackgroundFinalizeWorker::start(fixture.pipeline.clone());
+        assert!(background.try_submit(captured(9)));
+        background.shutdown(Duration::from_secs(1));
+
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.entered_rx.try_recv().is_err());
+        assert!(fixture.tempdir.path().read_dir().unwrap().next().is_none());
     }
 
     #[test]

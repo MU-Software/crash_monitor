@@ -45,11 +45,11 @@
 
 ### P0-04. `enabled=false`를 실제 kill switch로 만든다
 
-- [ ] validated config와 `Pipeline`에 명시적 global enabled 상태를 둔다.
-- [ ] disabled이면 `handle_event` 입구에서 suspend, collector, raw/JSON write, postprocessor를 실행하지 않는다.
-- [ ] crash, exit, signal, probable OOM, ANR, snapshot trigger별 enable 의미를 분리한다.
-- [ ] 항상 남길 emergency evidence가 필요하다면 global disable의 예외가 아니라 별도 명시 정책으로 정의한다.
-- [ ] disabled 상태에서 합의된 동작 외에는 파일이 생성되지 않는 테스트를 추가한다.
+- [x] validated config와 `Pipeline`에 명시적 global enabled 상태를 둔다.
+- [x] disabled이면 `handle_event` 입구에서 suspend, collector, raw/JSON write, postprocessor를 실행하지 않는다.
+- [x] crash, exit, signal, probable OOM, ANR, snapshot trigger별 enable 의미를 분리한다.
+- [x] 항상 남길 emergency evidence가 필요하다면 global disable의 예외가 아니라 별도 명시 정책으로 정의한다.
+- [x] disabled 상태에서 합의된 동작 외에는 파일이 생성되지 않는 테스트를 추가한다.
 
 범위: `src/config.rs`, `src/main.rs`, `src/pipeline/mod.rs`.
 

@@ -161,39 +161,68 @@ impl EventLoopResult {
 /// Convert a terminal child status into a typed report (when abnormal) and a
 /// typed monitor outcome. This is shared by startup and steady-state paths.
 #[must_use]
+pub fn termination_report_type(
+    pipeline: &Pipeline,
+    reason: TerminationReason,
+) -> Option<ReportType> {
+    match reason {
+        TerminationReason::Exited { exit_code: 0, .. } => None,
+        TerminationReason::Exited { .. } if pipeline.report_enabled(ReportType::ExitFailure) => {
+            Some(ReportType::ExitFailure)
+        }
+        TerminationReason::Signaled { signal, .. }
+            if signal == SIGKILL_NUM && pipeline.report_enabled(ReportType::Oom) =>
+        {
+            Some(ReportType::Oom)
+        }
+        TerminationReason::Signaled { .. }
+            if pipeline.report_enabled(ReportType::SignalFailure) =>
+        {
+            Some(ReportType::SignalFailure)
+        }
+        TerminationReason::Exited { .. } | TerminationReason::Signaled { .. } => None,
+    }
+}
+
+/// Finalize the report selected by the primary child-termination trigger.
+/// Mach exceptions take their separate crash path and use termination only as
+/// metadata, so a single incident cannot produce both crash and signal/exit
+/// reports (or bypass a disabled crash policy through a fallback report).
+#[must_use]
+fn finalize_child_termination_report(
+    pipeline: &Arc<Pipeline>,
+    pid: u32,
+    process_name: &str,
+    reason: TerminationReason,
+) -> Option<crate::pipeline::Diagnostics> {
+    let report_type = termination_report_type(pipeline, reason)?;
+    let event = CrashEvent {
+        report_type,
+        exception_type: None,
+        exception_code: None,
+        exception_subcode: None,
+        crashed_thread: None,
+        // The child has already terminated, so the pipeline uses its
+        // task-independent termination finalization path.
+        bail_on_suspend_failure: false,
+        pid,
+        process_name: process_name.to_string(),
+        hang_duration_ms: None,
+        termination: Some(reason),
+    };
+    finalize_terminated_child(pipeline.clone(), event, CRASH_FINALIZE_WAIT)
+}
+
+/// Convert a terminal child status into a typed report (when abnormal) and a
+/// typed monitor outcome. This is shared by startup and steady-state paths.
+#[must_use]
 pub fn handle_child_termination(
     pipeline: &Arc<Pipeline>,
     pid: u32,
     process_name: &str,
     reason: TerminationReason,
-    oom_detection: bool,
 ) -> MonitorOutcome {
-    let report_type = match reason {
-        TerminationReason::Exited { exit_code: 0, .. } => None,
-        TerminationReason::Exited { .. } => Some(ReportType::ExitFailure),
-        TerminationReason::Signaled { signal, .. } if oom_detection && signal == SIGKILL_NUM => {
-            Some(ReportType::Oom)
-        }
-        TerminationReason::Signaled { .. } => Some(ReportType::SignalFailure),
-    };
-
-    if let Some(report_type) = report_type {
-        let event = CrashEvent {
-            report_type,
-            exception_type: None,
-            exception_code: None,
-            exception_subcode: None,
-            crashed_thread: None,
-            // The child has already terminated, so the pipeline uses its
-            // task-independent termination finalization path.
-            bail_on_suspend_failure: false,
-            pid,
-            process_name: process_name.to_string(),
-            hang_duration_ms: None,
-            termination: Some(reason),
-        };
-        let _diagnostics = finalize_terminated_child(pipeline.clone(), event, CRASH_FINALIZE_WAIT);
-    }
+    let _diagnostics = finalize_child_termination_report(pipeline, pid, process_name, reason);
 
     MonitorOutcome::ChildTerminated(reason)
 }
@@ -216,11 +245,10 @@ pub fn event_loop(
     reply_fn: &dyn Fn(&mach_msg_header_t),
     shm: Option<&Arc<SharedMemory>>,
     anr_config: Option<&AnrConfig>,
-    oom_detection: bool,
 ) -> EventLoopResult {
     // Initialize ANR state if both shm and config are available
-    let mut anr_state = match (&shm, &anr_config) {
-        (Some(s), Some(cfg)) => Some((
+    let mut anr_state = match (pipeline.report_enabled(ReportType::Anr), &shm, &anr_config) {
+        (true, Some(s), Some(cfg)) => Some((
             WatchdogState {
                 prev_heartbeat: s.read_heartbeat(),
                 hang_accumulated_ms: 0,
@@ -244,24 +272,28 @@ pub fn event_loop(
                 thread_port,
                 reply_header,
             }) => {
-                let event = CrashEvent {
-                    report_type: ReportType::Crash,
-                    exception_type: Some(exception_type),
-                    exception_code: Some(code),
-                    exception_subcode: Some(subcode),
-                    crashed_thread: Some(thread_port),
-                    bail_on_suspend_failure: false,
-                    pid,
-                    process_name: process_name.to_string(),
-                    hang_duration_ms: None,
-                    termination: None,
-                };
-                let deadline = received_at
-                    .checked_add(CAPTURE_DEADLINE)
-                    .unwrap_or(received_at);
-                let captured = match capture_worker.capture(event, task, deadline) {
-                    crate::pipeline::CaptureOutcome::Captured(captured) => Some(captured),
-                    crate::pipeline::CaptureOutcome::Skipped(_) => None,
+                let captured = if pipeline.report_enabled(ReportType::Crash) {
+                    let event = CrashEvent {
+                        report_type: ReportType::Crash,
+                        exception_type: Some(exception_type),
+                        exception_code: Some(code),
+                        exception_subcode: Some(subcode),
+                        crashed_thread: Some(thread_port),
+                        bail_on_suspend_failure: false,
+                        pid,
+                        process_name: process_name.to_string(),
+                        hang_duration_ms: None,
+                        termination: None,
+                    };
+                    let deadline = received_at
+                        .checked_add(CAPTURE_DEADLINE)
+                        .unwrap_or(received_at);
+                    match capture_worker.capture(event, task, deadline) {
+                        crate::pipeline::CaptureOutcome::Captured(captured) => Some(captured),
+                        crate::pipeline::CaptureOutcome::Skipped(_) => None,
+                    }
+                } else {
+                    None
                 };
 
                 if let Some(ref header) = reply_header {
@@ -284,6 +316,9 @@ pub fn event_loop(
             }
 
             Some(MonitorEvent::Snapshot) => {
+                if !pipeline.report_enabled(ReportType::Snapshot) {
+                    continue;
+                }
                 let event = CrashEvent {
                     report_type: ReportType::Snapshot,
                     exception_type: None,
@@ -304,8 +339,7 @@ pub fn event_loop(
             }
 
             Some(MonitorEvent::ChildTerminated(reason)) => {
-                let outcome =
-                    handle_child_termination(pipeline, pid, process_name, reason, oom_detection);
+                let outcome = handle_child_termination(pipeline, pid, process_name, reason);
                 capture_worker.shutdown(Duration::from_millis(100));
                 background_worker.shutdown(BACKGROUND_DRAIN_DEADLINE);
                 return EventLoopResult {

@@ -5,7 +5,12 @@ fn test_default_config_all_enabled() {
     let config = CrashReporterConfig::default();
     assert!(config.enabled);
     assert!(config.triggers.enabled);
+    assert!(config.triggers.crash.enabled);
+    assert!(config.triggers.exit_failure.enabled);
+    assert!(config.triggers.signal_failure.enabled);
     assert!(config.triggers.oom_detection.enabled);
+    assert!(config.triggers.anr.enabled);
+    assert!(config.triggers.snapshot.enabled);
     assert!(config.filters.enabled);
     assert!(config.filters.disk_space.enabled);
     assert!(config.filters.rate_limiter.enabled);
@@ -118,6 +123,77 @@ fn test_global_disabled_overrides_all() {
         config.collectors.enabled,
         config.collectors.thread.enabled
     ));
+}
+
+#[test]
+fn test_validation_keeps_global_kill_switch_explicit() {
+    let config: CrashReporterConfig = serde_json::from_str(r#"{ "enabled": false }"#).unwrap();
+    let validated = config.validate();
+
+    assert!(!validated.enabled);
+    // Per-trigger values retain their independently configured meaning. The
+    // Pipeline combines them with the authoritative global switch.
+    assert!(validated.triggers.crash);
+    assert!(validated.triggers.exit_failure);
+    assert!(validated.triggers.signal_failure);
+    assert!(validated.triggers.probable_oom);
+    assert!(validated.triggers.anr);
+    assert!(validated.triggers.snapshot);
+}
+
+#[test]
+fn test_trigger_category_disables_every_report_source() {
+    let config: CrashReporterConfig =
+        serde_json::from_str(r#"{ "triggers": { "enabled": false } }"#).unwrap();
+    let validated = config.validate();
+
+    assert!(validated.enabled);
+    assert!(!validated.triggers.crash);
+    assert!(!validated.triggers.exit_failure);
+    assert!(!validated.triggers.signal_failure);
+    assert!(!validated.triggers.probable_oom);
+    assert!(!validated.triggers.anr);
+    assert!(!validated.triggers.snapshot);
+}
+
+#[test]
+fn test_each_trigger_is_resolved_independently() {
+    let config: CrashReporterConfig = serde_json::from_str(
+        r#"{
+            "triggers": {
+                "crash": { "enabled": false },
+                "exit_failure": { "enabled": true },
+                "signal_failure": { "enabled": false },
+                "oom_detection": { "enabled": true },
+                "anr": { "enabled": false },
+                "snapshot": { "enabled": true }
+            }
+        }"#,
+    )
+    .unwrap();
+    let validated = config.validate();
+
+    assert!(!validated.triggers.crash);
+    assert!(validated.triggers.exit_failure);
+    assert!(!validated.triggers.signal_failure);
+    assert!(validated.triggers.probable_oom);
+    assert!(!validated.triggers.anr);
+    assert!(validated.triggers.snapshot);
+}
+
+#[test]
+fn test_legacy_partial_trigger_config_defaults_new_triggers_on() {
+    let config: CrashReporterConfig =
+        serde_json::from_str(r#"{ "triggers": { "oom_detection": { "enabled": false } } }"#)
+            .unwrap();
+    let validated = config.validate();
+
+    assert!(validated.triggers.crash);
+    assert!(validated.triggers.exit_failure);
+    assert!(validated.triggers.signal_failure);
+    assert!(!validated.triggers.probable_oom);
+    assert!(validated.triggers.anr);
+    assert!(validated.triggers.snapshot);
 }
 
 #[test]

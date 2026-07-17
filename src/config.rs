@@ -1,8 +1,9 @@
 //! Configuration system for crash reporter plugins (opt-out design).
 //!
-//! All plugins are enabled by default. The config file (`crash_reporter.json`)
-//! is only needed to disable specific plugins or adjust parameters.
-//! Missing file or parse errors silently fall back to defaults.
+//! Report triggers and most plugins are enabled by default. The config file
+//! (`crash_reporter.json`) is only needed to disable specific behavior, enable
+//! an opt-in plugin, or adjust parameters. Missing files or parse errors
+//! silently fall back to defaults.
 
 use serde::Deserialize;
 use std::fs;
@@ -27,6 +28,66 @@ pub struct CrashReporterConfig {
     pub notifiers: NotifierConfig,
 }
 
+/// Configuration after global/category/plugin enablement has been resolved.
+///
+/// This normalization step gives the pipeline one immutable global kill switch
+/// and one explicit policy bit per report-producing trigger. More extensive
+/// plugin dependency and value validation is intentionally handled separately.
+#[derive(Debug)]
+pub struct ValidatedConfig {
+    /// Global report-generation kill switch.
+    pub enabled: bool,
+    /// Trigger policy with the `triggers.enabled` category switch resolved.
+    pub triggers: ValidatedTriggersConfig,
+    config: CrashReporterConfig,
+}
+
+impl ValidatedConfig {
+    /// The normalized source configuration used to construct plugin lists.
+    #[must_use]
+    pub fn config(&self) -> &CrashReporterConfig {
+        &self.config
+    }
+}
+
+/// Explicit enablement for each event that can produce a report.
+///
+/// These values already include the `triggers.enabled` category switch, but
+/// deliberately do not absorb the global switch. Keeping the global state
+/// separate makes it impossible to mistake a per-trigger option for the
+/// process-wide kill switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // one explicit switch per external trigger
+pub struct ValidatedTriggersConfig {
+    pub crash: bool,
+    pub exit_failure: bool,
+    pub signal_failure: bool,
+    pub probable_oom: bool,
+    pub anr: bool,
+    pub snapshot: bool,
+}
+
+impl CrashReporterConfig {
+    /// Resolve hierarchical enablement into a validated runtime configuration.
+    #[must_use]
+    pub fn validate(self) -> ValidatedConfig {
+        let trigger_category_enabled = self.triggers.enabled;
+        let triggers = ValidatedTriggersConfig {
+            crash: trigger_category_enabled && self.triggers.crash.enabled,
+            exit_failure: trigger_category_enabled && self.triggers.exit_failure.enabled,
+            signal_failure: trigger_category_enabled && self.triggers.signal_failure.enabled,
+            probable_oom: trigger_category_enabled && self.triggers.oom_detection.enabled,
+            anr: trigger_category_enabled && self.triggers.anr.enabled,
+            snapshot: trigger_category_enabled && self.triggers.snapshot.enabled,
+        };
+        ValidatedConfig {
+            enabled: self.enabled,
+            triggers,
+            config: self,
+        }
+    }
+}
+
 impl Default for CrashReporterConfig {
     fn default() -> Self {
         Self {
@@ -46,22 +107,45 @@ impl Default for CrashReporterConfig {
 //  Triggers config
 // ═══════════════════════════════════════════════════
 
-/// Toggles for inline triggers. Mach exception and SIGUSR1 snapshot are
-/// always-on (they have no opt-out). ANR is configured via its own
-/// `AnrConfig` passed to `event_loop`. Only OOM detection is toggleable here.
-/// When Phase 8 extracts triggers into proper plugins this section will grow.
+/// Toggles for every event source that can create a report.
+///
+/// Semantics are intentionally independent:
+/// - `crash`: fatal Mach exception capture; this primary trigger owns the
+///   incident even after the child is reaped, so its termination metadata does
+///   not fire a second exit/signal report;
+/// - `exit_failure`: non-zero process exit observed without a prior Mach crash;
+/// - `signal_failure`: signal termination observed without a prior Mach crash
+///   and not classified as probable OOM;
+/// - `oom_detection`: classify a primary SIGKILL child-termination event as
+///   probable OOM instead of signal failure;
+/// - `anr`: watchdog-generated unresponsive report;
+/// - `snapshot`: manual SIGUSR1 snapshot.
+///
+/// `enabled=false` disables the whole trigger category. The top-level global
+/// switch remains authoritative and has no implicit emergency-evidence
+/// exception.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct TriggersConfig {
     pub enabled: bool,
+    pub crash: PluginToggle,
+    pub exit_failure: PluginToggle,
+    pub signal_failure: PluginToggle,
     pub oom_detection: PluginToggle,
+    pub anr: PluginToggle,
+    pub snapshot: PluginToggle,
 }
 
 impl Default for TriggersConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            crash: PluginToggle::default(),
+            exit_failure: PluginToggle::default(),
+            signal_failure: PluginToggle::default(),
             oom_detection: PluginToggle::default(),
+            anr: PluginToggle::default(),
+            snapshot: PluginToggle::default(),
         }
     }
 }
@@ -355,6 +439,12 @@ const CONFIG_FILENAME: &str = "crash_reporter.json";
 #[must_use]
 pub fn load_config() -> CrashReporterConfig {
     load_config_from_data_dir().unwrap_or_default()
+}
+
+/// Load and normalize the runtime configuration exactly once.
+#[must_use]
+pub fn load_validated_config() -> ValidatedConfig {
+    load_config().validate()
 }
 
 fn load_config_from_data_dir() -> Option<CrashReporterConfig> {

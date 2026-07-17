@@ -74,6 +74,11 @@ the environment (used mainly by tests to shorten them):
 
 ## Configuration file
 
-An optional `crash_reporter.json` in the data directory disables specific plugins
-or tunes parameters (all plugins are on by default). A missing or invalid file
-falls back to defaults; configuration can never suppress a report.
+An optional `crash_reporter.json` in the data directory disables report
+triggers or specific plugins and tunes parameters. Report triggers and most
+plugins are on by default; a few plugins remain explicitly opt-in.
+Top-level `"enabled": false` is a report-generation kill switch: child
+supervision and Mach replies continue, but capture, plugins, and artifact
+writes do not run. Per-trigger controls live under `triggers`; see
+[pipeline.md](pipeline.md#configuration) for their precedence and exact
+semantics. A missing or invalid file currently falls back to defaults.

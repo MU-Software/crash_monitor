@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -16,7 +17,7 @@ use crash_monitor::event_loop::{
 };
 use crash_monitor::pipeline::{
     CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PluginContext,
-    PluginExecution, PostProcessor, Priority, ReportResult, TerminationReason,
+    PluginExecution, PostProcessor, Priority, ReportResult, TerminationReason, TriggerPolicy,
 };
 use crash_monitor::platform::mock::MockPlatform;
 use crash_monitor::postprocessors::ZIPArchiver;
@@ -50,7 +51,16 @@ impl EventSource for TestEventSource {
 // ═══════════════════════════════════════════════════
 
 fn make_test_pipeline(tempdir: &std::path::Path) -> Arc<Pipeline> {
+    make_test_pipeline_with_triggers(tempdir, TriggerPolicy::ALL_ENABLED)
+}
+
+fn make_test_pipeline_with_triggers(
+    tempdir: &std::path::Path,
+    triggers: TriggerPolicy,
+) -> Arc<Pipeline> {
     Arc::new(Pipeline {
+        enabled: true,
+        triggers,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -68,6 +78,18 @@ fn count_json_files(dir: &std::path::Path) -> usize {
         .filter_map(Result::ok)
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .count()
+}
+
+fn assert_no_artifacts(dir: &std::path::Path) {
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "expected no artifacts, found {entries:?}"
+    );
 }
 
 fn read_only_report(dir: &std::path::Path) -> serde_json::Value {
@@ -93,6 +115,55 @@ fn signaled(signal: i32, core_dumped: bool, runtime_ms: u64) -> MonitorEvent {
         core_dumped,
         runtime_ms,
     })
+}
+
+fn report_event(report_type: crash_monitor::pipeline::ReportType) -> CrashEvent {
+    use crash_monitor::pipeline::ReportType;
+
+    let termination = match report_type {
+        ReportType::ExitFailure => Some(TerminationReason::Exited {
+            exit_code: 23,
+            runtime_ms: 10,
+        }),
+        ReportType::SignalFailure => Some(TerminationReason::Signaled {
+            signal: 15,
+            core_dumped: false,
+            runtime_ms: 10,
+        }),
+        ReportType::Oom => Some(TerminationReason::Signaled {
+            signal: 9,
+            core_dumped: false,
+            runtime_ms: 10,
+        }),
+        ReportType::Crash | ReportType::Snapshot | ReportType::Anr => None,
+    };
+    CrashEvent {
+        report_type,
+        exception_type: (report_type == ReportType::Crash).then_some(1),
+        exception_code: (report_type == ReportType::Crash).then_some(0xDEAD),
+        exception_subcode: (report_type == ReportType::Crash).then_some(0xBEEF),
+        crashed_thread: (report_type == ReportType::Crash).then_some(42),
+        bail_on_suspend_failure: matches!(report_type, ReportType::Snapshot | ReportType::Anr),
+        pid: 9999,
+        process_name: "test_app".to_string(),
+        hang_duration_ms: (report_type == ReportType::Anr).then_some(5_000),
+        termination,
+    }
+}
+
+fn policy_with_disabled(report_type: crash_monitor::pipeline::ReportType) -> TriggerPolicy {
+    use crash_monitor::pipeline::ReportType;
+
+    let mut policy = TriggerPolicy::ALL_ENABLED;
+    match report_type {
+        ReportType::Crash => policy.crash = false,
+        ReportType::Snapshot => policy.snapshot = false,
+        ReportType::Anr => policy.anr = false,
+        ReportType::Oom => policy.probable_oom = false,
+        ReportType::ExitFailure => policy.exit_failure = false,
+        ReportType::SignalFailure => policy.signal_failure = false,
+    }
+    policy
 }
 
 fn noop_reply(_header: &mach2::message::mach_msg_header_t) {}
@@ -123,6 +194,97 @@ impl BlockingGate {
 struct BlockingPostProcessor {
     name: &'static str,
     gate: BlockingGate,
+}
+
+struct CountingCollector {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Plugin for CountingCollector {
+    fn name(&self) -> &'static str {
+        "CountingCollector"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Critical
+    }
+}
+
+impl Collector for CountingCollector {
+    fn collect(
+        &self,
+        _event: &CrashEvent,
+        _task: mach2::port::mach_port_t,
+        _data: &mut CollectedData,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct CountingPostProcessor {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Plugin for CountingPostProcessor {
+    fn name(&self) -> &'static str {
+        "CountingPostProcessor"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Low
+    }
+}
+
+impl PostProcessor for CountingPostProcessor {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn disabled_pipeline(
+    tempdir: &std::path::Path,
+) -> (
+    Arc<Pipeline>,
+    Arc<MockPlatform>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let platform = Arc::new(MockPlatform::default());
+    let collector_calls = Arc::new(AtomicUsize::new(0));
+    let post_processor_calls = Arc::new(AtomicUsize::new(0));
+    let pipeline = Arc::new(Pipeline {
+        enabled: false,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![Box::new(CountingCollector {
+            calls: collector_calls.clone(),
+        })],
+        pre_processors: vec![],
+        post_processors: vec![Box::new(CountingPostProcessor {
+            calls: post_processor_calls.clone(),
+        })],
+        notifiers: vec![],
+        shm: None,
+        platform: platform.clone(),
+        output_dir: Some(tempdir.to_path_buf()),
+    });
+    (pipeline, platform, collector_calls, post_processor_calls)
 }
 
 struct BlockingCollector {
@@ -266,6 +428,8 @@ fn assert_blocking_finalizer_does_not_delay_reply(
     let tempdir = tempfile::tempdir().unwrap();
     let platform = Arc::new(MockPlatform::default());
     let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -302,7 +466,6 @@ fn assert_blocking_finalizer_does_not_delay_reply(
         },
         None,
         None,
-        false,
     );
 
     reply_rx
@@ -346,6 +509,171 @@ fn assert_blocking_finalizer_does_not_delay_reply(
 //  Tests
 // ═══════════════════════════════════════════════════
 
+fn assert_pipeline_rejects_without_work(
+    enabled: bool,
+    triggers: TriggerPolicy,
+    report_type: crash_monitor::pipeline::ReportType,
+) {
+    let tempdir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(MockPlatform::default());
+    let collector_calls = Arc::new(AtomicUsize::new(0));
+    let postprocessor_calls = Arc::new(AtomicUsize::new(0));
+    let pipeline = Pipeline {
+        enabled,
+        triggers,
+        filters: vec![],
+        collectors: vec![Box::new(CountingCollector {
+            calls: collector_calls.clone(),
+        })],
+        pre_processors: vec![],
+        post_processors: vec![Box::new(CountingPostProcessor {
+            calls: postprocessor_calls.clone(),
+        })],
+        notifiers: vec![],
+        shm: None,
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+    let event = report_event(report_type);
+
+    let diagnostics = if event.termination.is_some() {
+        pipeline.handle_termination_event(&event)
+    } else {
+        pipeline.handle_event(&event, 123)
+    };
+
+    assert!(diagnostics.plugins.is_empty());
+    assert!(diagnostics.report_path.is_none());
+    assert_eq!(platform.suspend_count(), 0, "{report_type:?}");
+    assert_eq!(platform.resume_count(), 0, "{report_type:?}");
+    assert_eq!(collector_calls.load(Ordering::SeqCst), 0, "{report_type:?}");
+    assert_eq!(
+        postprocessor_calls.load(Ordering::SeqCst),
+        0,
+        "{report_type:?}"
+    );
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
+fn test_global_disabled_is_a_no_work_no_artifact_kill_switch_for_every_trigger() {
+    use crash_monitor::pipeline::ReportType;
+
+    for report_type in [
+        ReportType::Crash,
+        ReportType::ExitFailure,
+        ReportType::SignalFailure,
+        ReportType::Oom,
+        ReportType::Anr,
+        ReportType::Snapshot,
+    ] {
+        assert_pipeline_rejects_without_work(false, TriggerPolicy::ALL_ENABLED, report_type);
+    }
+}
+
+#[test]
+fn test_each_disabled_trigger_rejects_only_its_report_path_before_work() {
+    use crash_monitor::pipeline::ReportType;
+
+    for report_type in [
+        ReportType::Crash,
+        ReportType::ExitFailure,
+        ReportType::SignalFailure,
+        ReportType::Oom,
+        ReportType::Anr,
+        ReportType::Snapshot,
+    ] {
+        assert_pipeline_rejects_without_work(true, policy_with_disabled(report_type), report_type);
+    }
+}
+
+#[test]
+fn test_disabled_crash_trigger_replies_without_worker_capture_or_artifacts() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(MockPlatform::default());
+    let collector_calls = Arc::new(AtomicUsize::new(0));
+    let postprocessor_calls = Arc::new(AtomicUsize::new(0));
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy {
+            crash: false,
+            ..TriggerPolicy::ALL_ENABLED
+        },
+        filters: vec![],
+        collectors: vec![Box::new(CountingCollector {
+            calls: collector_calls.clone(),
+        })],
+        pre_processors: vec![],
+        post_processors: vec![Box::new(CountingPostProcessor {
+            calls: postprocessor_calls.clone(),
+        })],
+        notifiers: vec![],
+        shm: None,
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let mut source = TestEventSource::new(vec![MonitorEvent::Crash {
+        received_at: std::time::Instant::now(),
+        exception_type: 1,
+        code: 0xDEAD,
+        subcode: 0xBEEF,
+        thread_port: 42,
+        reply_header: Some(mach2::message::mach_msg_header_t::default()),
+    }]);
+    let replies = AtomicUsize::new(0);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &|_| {
+            replies.fetch_add(1, Ordering::SeqCst);
+        },
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        result.outcome,
+        MonitorOutcome::DetectedCrash { .. }
+    ));
+    assert!(result.crash_finalization.is_none());
+    assert_eq!(replies.load(Ordering::SeqCst), 1);
+    assert_eq!(platform.suspend_count(), 0);
+    assert_eq!(platform.resume_count(), 0);
+    assert_eq!(collector_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(postprocessor_calls.load(Ordering::SeqCst), 0);
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
+fn test_disabled_event_loop_ignores_snapshot_and_abnormal_exit_without_artifacts() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let (pipeline, platform, collector_calls, post_processor_calls) =
+        disabled_pipeline(tempdir.path());
+    let mut source = TestEventSource::new(vec![MonitorEvent::Snapshot, exited(23, 15)]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert_eq!(result.exit_code(), EXIT_CHILD_FAILURE);
+    assert_eq!(platform.suspend_count(), 0);
+    assert_eq!(platform.resume_count(), 0);
+    assert_eq!(collector_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(post_processor_calls.load(Ordering::SeqCst), 0);
+    assert_no_artifacts(tempdir.path());
+}
+
 #[test]
 fn test_crash_event_produces_report_and_exits() {
     let tempdir = tempfile::tempdir().unwrap();
@@ -372,7 +700,6 @@ fn test_crash_event_produces_report_and_exits() {
         &noop_reply,
         None,
         None,
-        false,
     );
     assert_eq!(count_json_files(tempdir.path()), 0);
     let expected_termination = TerminationReason::Signaled {
@@ -459,6 +786,8 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
     let platform = Arc::new(MockPlatform::default());
     let (gate, entered_rx, release) = blocking_gate();
     let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![],
         collectors: vec![Box::new(BlockingCollector { gate })],
         pre_processors: vec![],
@@ -493,7 +822,6 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
         },
         None,
         None,
-        false,
     );
 
     assert!(
@@ -531,6 +859,8 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
 fn test_fatal_zip_is_created_with_termination_before_archiving() {
     let tempdir = tempfile::tempdir().unwrap();
     let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -557,7 +887,6 @@ fn test_fatal_zip_is_created_with_termination_before_archiving() {
         &noop_reply,
         None,
         None,
-        false,
     );
     let expected = TerminationReason::Signaled {
         signal: 11,
@@ -593,7 +922,6 @@ fn test_snapshot_event_continues() {
         &noop_reply,
         None,
         None,
-        false,
     );
     assert_eq!(outcome.exit_code(), 0, "Snapshot should not terminate");
 
@@ -602,6 +930,37 @@ fn test_snapshot_event_continues() {
         json_count >= 1,
         "Should produce a snapshot report, got {json_count}"
     );
+}
+
+#[test]
+fn test_disabled_snapshot_trigger_does_not_suspend_or_create_artifacts() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(MockPlatform::default());
+    let mut pipeline = make_test_pipeline_with_triggers(
+        tempdir.path(),
+        TriggerPolicy {
+            snapshot: false,
+            ..TriggerPolicy::ALL_ENABLED
+        },
+    );
+    Arc::get_mut(&mut pipeline).unwrap().platform = platform.clone();
+    let mut source = TestEventSource::new(vec![MonitorEvent::Snapshot, exited(0, 25)]);
+
+    let outcome = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert_eq!(outcome.exit_code(), 0);
+    assert_eq!(platform.suspend_count(), 0);
+    assert_eq!(platform.resume_count(), 0);
+    assert_no_artifacts(tempdir.path());
 }
 
 #[test]
@@ -620,7 +979,6 @@ fn test_clean_exit_no_reports() {
         &noop_reply,
         None,
         None,
-        false,
     );
     assert_eq!(outcome.exit_code(), 0);
 
@@ -629,9 +987,70 @@ fn test_clean_exit_no_reports() {
 }
 
 #[test]
+fn test_disabled_exit_failure_trigger_preserves_outcome_without_report() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline_with_triggers(
+        tempdir.path(),
+        TriggerPolicy {
+            exit_failure: false,
+            ..TriggerPolicy::ALL_ENABLED
+        },
+    );
+    let mut source = TestEventSource::new(vec![exited(23, 7)]);
+
+    let outcome = event_loop(
+        &mut source,
+        &pipeline,
+        0,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert_eq!(outcome.exit_code(), EXIT_CHILD_FAILURE);
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
+fn test_disabled_signal_failure_trigger_preserves_outcome_without_report() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline_with_triggers(
+        tempdir.path(),
+        TriggerPolicy {
+            signal_failure: false,
+            probable_oom: false,
+            ..TriggerPolicy::ALL_ENABLED
+        },
+    );
+    let mut source = TestEventSource::new(vec![signaled(15, false, 7)]);
+
+    let outcome = event_loop(
+        &mut source,
+        &pipeline,
+        0,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert_eq!(outcome.exit_code(), 143);
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
 fn test_sigkill_without_oom_detection_produces_signal_failure() {
     let tempdir = tempfile::tempdir().unwrap();
-    let pipeline = make_test_pipeline(tempdir.path());
+    let pipeline = make_test_pipeline_with_triggers(
+        tempdir.path(),
+        TriggerPolicy {
+            probable_oom: false,
+            ..TriggerPolicy::ALL_ENABLED
+        },
+    );
 
     let mut source = TestEventSource::new(vec![signaled(9, false, 123)]);
 
@@ -644,7 +1063,6 @@ fn test_sigkill_without_oom_detection_produces_signal_failure() {
         &noop_reply,
         None,
         None,
-        false,
     );
     assert_eq!(outcome.exit_code(), 137, "128 + 9 = 137");
     let report = read_only_report(tempdir.path());
@@ -658,7 +1076,14 @@ fn test_sigkill_without_oom_detection_produces_signal_failure() {
 #[test]
 fn test_sigkill_produces_oom_report_when_enabled() {
     let tempdir = tempfile::tempdir().unwrap();
-    let pipeline = make_test_pipeline(tempdir.path());
+    let pipeline = make_test_pipeline_with_triggers(
+        tempdir.path(),
+        TriggerPolicy {
+            // OOM classification is independent of the generic signal trigger.
+            signal_failure: false,
+            ..TriggerPolicy::ALL_ENABLED
+        },
+    );
 
     let mut source = TestEventSource::new(vec![signaled(9, false, 321)]);
 
@@ -671,7 +1096,6 @@ fn test_sigkill_produces_oom_report_when_enabled() {
         &noop_reply,
         None,
         None,
-        true, // oom_detection enabled
     );
     assert_eq!(outcome.exit_code(), 137, "Exit code still 128 + 9");
     assert_eq!(
@@ -712,7 +1136,6 @@ fn test_non_sigkill_signal_produces_signal_failure_report() {
         &noop_reply,
         None,
         None,
-        true,
     );
     assert_eq!(outcome.exit_code(), 143, "128 + 15 = 143");
     let report = read_only_report(tempdir.path());
@@ -736,7 +1159,6 @@ fn test_nonzero_exit_produces_exit_failure_and_preserves_code() {
         &noop_reply,
         None,
         None,
-        false,
     );
 
     assert_eq!(outcome.exit_code(), EXIT_CHILD_FAILURE);
@@ -752,6 +1174,8 @@ fn test_child_termination_finalization_runs_off_event_loop_thread() {
     let tempdir = tempfile::tempdir().unwrap();
     let (thread_tx, thread_rx) = mpsc::sync_channel(1);
     let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -773,7 +1197,6 @@ fn test_child_termination_finalization_runs_off_event_loop_thread() {
         &noop_reply,
         None,
         None,
-        false,
     );
 
     assert_eq!(outcome.exit_code(), EXIT_CHILD_FAILURE);
@@ -788,6 +1211,8 @@ fn test_termination_report_never_touches_dead_task_port() {
     let tempdir = tempfile::tempdir().unwrap();
     let platform = Arc::new(MockPlatform::default());
     let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -808,7 +1233,6 @@ fn test_termination_report_never_touches_dead_task_port() {
         &noop_reply,
         None,
         None,
-        false,
     );
 
     assert_eq!(outcome.exit_code(), EXIT_CHILD_FAILURE);
@@ -832,7 +1256,6 @@ fn test_core_dump_flag_is_preserved() {
         &noop_reply,
         None,
         None,
-        false,
     );
 
     assert_eq!(outcome.exit_code(), 134);
@@ -856,7 +1279,6 @@ fn test_child_exit_137_does_not_collide_with_sigkill_outcome() {
         &noop_reply,
         None,
         None,
-        false,
     );
 
     assert_eq!(outcome.exit_code(), EXIT_CHILD_FAILURE);
@@ -884,7 +1306,6 @@ fn test_monitor_failure_has_separate_exit_namespace() {
         &noop_reply,
         None,
         None,
-        false,
     );
 
     assert_eq!(outcome.exit_code(), EXIT_MONITOR_INTERNAL);
@@ -911,7 +1332,6 @@ fn test_multiple_snapshots_before_exit() {
         &noop_reply,
         None,
         None,
-        false,
     );
     assert_eq!(outcome.exit_code(), 0);
 

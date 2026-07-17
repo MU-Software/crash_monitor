@@ -204,8 +204,26 @@ outcome**, worse than a degraded report. The design rules:
 
 ## Configuration
 
-All plugins are enabled by default (opt-out design). An optional
-`crash_reporter.json` in the data directory disables specific plugins or adjusts
-parameters (rate-limit window, retention limits, fingerprint frame count, …). A
-missing or malformed file falls back to defaults silently — configuration can
-never prevent a report from being written.
+Report triggers and most plugins are enabled by default (primarily opt-out
+design). An optional `crash_reporter.json` in the data directory can disable
+behavior, enable an opt-in plugin, or adjust parameters (rate-limit window,
+retention limits, fingerprint frame count, …).
+
+The top-level `enabled: false` is an absolute report-generation kill switch.
+The monitor still supervises the child, replies to a Mach exception, and reaps
+the child, but it does not suspend for capture, run collectors or finalization
+plugins, read SHM evidence, or create raw/JSON/post-processed artifacts. There
+is no implicit emergency-evidence exception to this switch.
+
+`triggers.enabled` disables the whole trigger category. Each primary event can
+also be controlled independently with `triggers.crash`, `exit_failure`,
+`signal_failure`, `oom_detection`, `anr`, and `snapshot` (each is an object with
+an `enabled` boolean). A probable OOM is a primary SIGKILL termination when
+`oom_detection` is enabled; otherwise the same event may use `signal_failure`.
+A received Mach exception is always the primary crash incident: its later wait
+status enriches that incident and does not fire a second exit/signal/OOM report,
+including when the crash trigger itself is disabled.
+
+The configuration is loaded and normalized once per monitor run so startup and
+the pipeline share one immutable policy snapshot. A missing or malformed file
+currently falls back to the built-in defaults silently.

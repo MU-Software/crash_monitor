@@ -36,8 +36,13 @@ All sources feed a single event loop as a `MonitorEvent`:
 | Mach exception port | `Crash` (SIGSEGV/SIGBUS/SIGABRT/SIGFPE …) | `crash` |
 | `SIGUSR1` (self-pipe) | `Snapshot` | `snapshot` |
 | ANR watchdog (inline) | fired when the heartbeat counter stalls | `anr` |
-| OOM trigger (opt-in) | child killed under memory pressure | `oom` |
-| `waitpid` | `ChildExited` / `ChildSignaled` / `ChildGone` | — (loop exit) |
+| `waitpid` | non-zero child exit | `exit_failure` |
+| `waitpid` | primary SIGKILL termination with OOM detection enabled | `oom` (probable OOM) |
+| `waitpid` | other primary signal termination | `signal_failure` |
+
+A clean child exit ends the loop without a report. A Mach exception remains
+the primary `crash` incident; the later wait status is attached as termination
+metadata rather than firing a second waitpid-based report.
 
 The **ANR watchdog** is a pure state machine polled from the event loop: it
 reads the heartbeat counter from shared memory every *check interval*; if the
