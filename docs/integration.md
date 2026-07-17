@@ -114,10 +114,12 @@ excluded.
 ## Configuration file
 
 An optional `crash_reporter.json` in the data directory disables report
-triggers or specific plugins and tunes parameters. Report triggers and most
-plugins are on by default; a few plugins remain explicitly opt-in.
+triggers or specific plugins and tunes parameters. Report triggers and
+non-sensitive plugins are on by default. Environment, memory, screenshot, and
+attachment collection requires an explicit privacy profile, consent assertion,
+and per-collector opt-in; see [privacy.md](privacy.md).
 Top-level `"enabled": false` is a report-generation kill switch: child
 supervision and Mach replies continue, but capture, plugins, and artifact
 writes do not run. Per-trigger controls live under `triggers`; see
 [pipeline.md](pipeline.md#configuration) for their precedence and exact
-semantics. A missing or invalid file currently falls back to defaults.
+semantics. A missing or invalid file falls back to the minimal privacy profile.

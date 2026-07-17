@@ -1,9 +1,12 @@
 use crate::config::*;
 
 #[test]
-fn test_default_config_all_enabled() {
+fn test_default_config_enables_only_non_sensitive_plugins() {
     let config = CrashReporterConfig::default();
     assert!(config.enabled);
+    assert_eq!(config.privacy.level, PrivacyLevel::Minimal);
+    assert_eq!(config.privacy.consent, ConsentState::NotGranted);
+    assert_eq!(config.privacy.encryption, EncryptionPolicy::None);
     assert!(config.triggers.enabled);
     assert!(config.triggers.crash.enabled);
     assert!(config.triggers.exit_failure.enabled);
@@ -16,7 +19,10 @@ fn test_default_config_all_enabled() {
     assert!(config.filters.rate_limiter.enabled);
     assert!(config.collectors.enabled);
     assert!(config.collectors.thread.enabled);
-    assert!(config.collectors.environment.enabled);
+    assert!(!config.collectors.memory.enabled);
+    assert!(!config.collectors.screenshot.enabled);
+    assert!(!config.collectors.attachment.enabled);
+    assert!(!config.collectors.environment.enabled);
     assert!(config.pre_processors.enabled);
     assert!(config.pre_processors.fingerprint.enabled);
     assert!(config.pre_processors.duplicate.enabled);
@@ -37,6 +43,174 @@ fn test_system_notification_default_disabled() {
 }
 
 #[test]
+fn test_default_validation_collects_no_sensitive_data() {
+    let validated = CrashReporterConfig::default().validate().unwrap();
+
+    for plugin_id in [
+        "MemoryCollector",
+        "ScreenshotCollector",
+        "AttachmentCollector",
+        "EnvironmentCollector",
+    ] {
+        assert!(!validated.plugin_enabled(plugin_id));
+    }
+    assert!(validated.diagnostics().is_empty());
+}
+
+#[test]
+fn test_legacy_sensitive_toggles_do_not_bypass_missing_privacy_consent() {
+    let config: CrashReporterConfig = serde_json::from_str(
+        r#"{
+            "collectors": {
+                "memory": { "enabled": true },
+                "screenshot": { "enabled": true },
+                "attachment": { "enabled": true },
+                "environment": { "enabled": true }
+            }
+        }"#,
+    )
+    .unwrap();
+    let validated = config.validate().unwrap();
+
+    for plugin_id in [
+        "MemoryCollector",
+        "ScreenshotCollector",
+        "AttachmentCollector",
+        "EnvironmentCollector",
+    ] {
+        assert!(!validated.plugin_enabled(plugin_id));
+        assert!(validated.diagnostics().iter().any(|diagnostic| matches!(
+            diagnostic,
+            ConfigValidationDiagnostic::SensitiveCollectorDisabled {
+                plugin_id: disabled,
+                level: PrivacyLevel::Minimal,
+                consent: ConsentState::NotGranted,
+            } if disabled == plugin_id
+        )));
+    }
+    assert_eq!(validated.diagnostics().len(), 4);
+}
+
+#[test]
+fn property_privacy_profile_and_consent_gate_sensitive_collectors() {
+    let cases = [
+        ("minimal", "not_granted", &[][..]),
+        ("minimal", "granted", &[][..]),
+        ("diagnostic", "not_granted", &[][..]),
+        ("diagnostic", "granted", &["MemoryCollector"][..]),
+        ("full", "not_granted", &[][..]),
+        (
+            "full",
+            "granted",
+            &[
+                "MemoryCollector",
+                "ScreenshotCollector",
+                "AttachmentCollector",
+                "EnvironmentCollector",
+            ][..],
+        ),
+    ];
+
+    for (level, consent, expected) in cases {
+        let json = format!(
+            r#"{{
+                "privacy": {{ "level": "{level}", "consent": "{consent}" }},
+                "collectors": {{
+                    "memory": {{ "enabled": true }},
+                    "screenshot": {{ "enabled": true }},
+                    "attachment": {{ "enabled": true }},
+                    "environment": {{ "enabled": true }}
+                }}
+            }}"#
+        );
+        let validated = serde_json::from_str::<CrashReporterConfig>(&json)
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        for plugin_id in [
+            "MemoryCollector",
+            "ScreenshotCollector",
+            "AttachmentCollector",
+            "EnvironmentCollector",
+        ] {
+            assert_eq!(
+                validated.plugin_enabled(plugin_id),
+                expected.contains(&plugin_id),
+                "level={level}, consent={consent}, plugin={plugin_id}"
+            );
+        }
+        assert_eq!(validated.diagnostics().len(), 4 - expected.len());
+    }
+}
+
+#[test]
+fn test_profile_and_consent_do_not_auto_enable_sensitive_collectors() {
+    let profile_only = serde_json::from_str::<CrashReporterConfig>(
+        r#"{ "privacy": { "level": "full", "consent": "granted" } }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    for plugin_id in [
+        "MemoryCollector",
+        "ScreenshotCollector",
+        "AttachmentCollector",
+        "EnvironmentCollector",
+    ] {
+        assert!(!profile_only.plugin_enabled(plugin_id));
+    }
+
+    let memory_opt_in = serde_json::from_str::<CrashReporterConfig>(
+        r#"{
+            "privacy": { "level": "full", "consent": "granted" },
+            "collectors": { "memory": { "enabled": true } }
+        }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+
+    assert!(memory_opt_in.plugin_enabled("MemoryCollector"));
+    assert!(!memory_opt_in.plugin_enabled("ScreenshotCollector"));
+    assert!(!memory_opt_in.plugin_enabled("AttachmentCollector"));
+    assert!(!memory_opt_in.plugin_enabled("EnvironmentCollector"));
+    assert!(memory_opt_in.diagnostics().is_empty());
+}
+
+#[test]
+fn test_required_application_encryption_fails_closed() {
+    let error = serde_json::from_str::<CrashReporterConfig>(
+        r#"{ "privacy": { "encryption": "required" } }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        ConfigValidationError::ApplicationEncryptionUnavailable
+    );
+    assert!(error.to_string().contains("not implemented"));
+}
+
+#[test]
+fn test_global_kill_switch_makes_encryption_requirement_vacuous() {
+    let validated = serde_json::from_str::<CrashReporterConfig>(
+        r#"{
+            "enabled": false,
+            "privacy": { "encryption": "required" }
+        }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+
+    assert!(!validated.enabled);
+    assert!(validated.enabled_plugins.is_empty());
+}
+
+#[test]
 fn test_default_parameter_values() {
     let config = CrashReporterConfig::default();
     assert_eq!(config.filters.disk_space.min_free_mb, 100);
@@ -45,9 +219,9 @@ fn test_default_parameter_values() {
     assert_eq!(config.pre_processors.fingerprint.top_frames, 8);
     assert_eq!(config.pre_processors.duplicate.window_secs, 60);
     assert_eq!(config.post_processors.log_rotator.max_size_mb, 1);
-    assert_eq!(config.post_processors.retention.max_reports, 64);
-    assert_eq!(config.post_processors.retention.max_size_mb, 256);
-    assert_eq!(config.post_processors.retention.max_age_days, 15);
+    assert_eq!(config.post_processors.retention.max_reports, 16);
+    assert_eq!(config.post_processors.retention.max_size_mb, 64);
+    assert_eq!(config.post_processors.retention.max_age_days, 7);
 }
 
 #[test]
@@ -214,8 +388,8 @@ fn test_partial_config_merges_with_defaults() {
     // Specified field changed
     assert_eq!(config.post_processors.retention.max_reports, 32);
     // Unspecified fields in same struct keep defaults
-    assert_eq!(config.post_processors.retention.max_size_mb, 256);
-    assert_eq!(config.post_processors.retention.max_age_days, 15);
+    assert_eq!(config.post_processors.retention.max_size_mb, 64);
+    assert_eq!(config.post_processors.retention.max_age_days, 7);
     assert!(config.post_processors.retention.enabled);
     // Other categories untouched
     assert!(config.filters.enabled);
@@ -463,6 +637,10 @@ fn config_with_category_plugin_mask(
         );
     }
     let mut root = serde_json::Map::new();
+    root.insert(
+        "privacy".to_string(),
+        serde_json::json!({ "level": "full", "consent": "granted" }),
+    );
     root.insert(
         category.to_string(),
         serde_json::Value::Object(category_config),

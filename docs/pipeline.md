@@ -234,10 +234,12 @@ outcome**, worse than a degraded report. The design rules:
 
 ## Configuration
 
-Report triggers and most plugins are enabled by default (primarily opt-out
-design). An optional `crash_reporter.json` in the data directory can disable
-behavior, enable an opt-in plugin, or adjust parameters (rate-limit window,
-retention limits, fingerprint frame count, …).
+Report triggers and non-sensitive plugins are enabled by default. An optional
+`crash_reporter.json` in the data directory can disable behavior, opt in to a
+sensitive collector, or adjust parameters (rate-limit window, retention limits,
+fingerprint frame count, …). Environment, memory, screenshot, and attachment
+collectors are resolved through the fail-closed profile and consent gates in
+[privacy.md](privacy.md) before plugin dependency closure.
 
 The top-level `enabled: false` is an absolute report-generation kill switch.
 The monitor still supervises the child, replies to a Mach exception, and reaps
@@ -269,5 +271,7 @@ category. Both the configuration registry and the assembled runtime pipeline
 are validated before the child process is spawned. Duplicate IDs, missing
 dependency declarations, dependency cycles, and invalid registration order return a
 structured `Result<_, ConfigValidationError>` to startup rather than panicking.
-A missing or malformed configuration file currently falls back to the built-in
-defaults silently.
+A missing or malformed configuration file falls back silently to the built-in
+minimal privacy defaults. Legacy sensitive collector toggles still parse but do
+not bypass a missing profile or consent assertion; normalization emits a startup
+diagnostic when such a collector was requested and denied.

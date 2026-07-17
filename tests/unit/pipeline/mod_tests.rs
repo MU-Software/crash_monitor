@@ -2721,7 +2721,7 @@ fn test_macos_factory_preserves_validated_global_and_trigger_policy() {
 
 #[test]
 fn test_default_macos_pipeline_builds_and_validates() {
-    // Exercises the full plugin-registration factory with default (all-enabled)
+    // Exercises the full plugin-registration factory with private-by-default
     // config. Structured validation catches registration drift without a
     // startup panic.
     let pipeline = default_macos_pipeline(None).unwrap();
@@ -2739,6 +2739,31 @@ fn test_default_macos_pipeline_builds_and_validates() {
     );
     assert!(!pipeline.filters.is_empty(), "no filters registered");
     assert!(!pipeline.notifiers.is_empty(), "no notifiers registered");
+}
+
+#[test]
+fn test_macos_factory_registers_explicitly_consented_sensitive_collectors() {
+    let validated = serde_json::from_str::<crate::config::CrashReporterConfig>(
+        r#"{
+            "privacy": { "level": "full", "consent": "granted" },
+            "collectors": {
+                "memory": { "enabled": true },
+                "environment": { "enabled": true }
+            }
+        }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    let pipeline = default_macos_pipeline_from_config(None, &validated).unwrap();
+    let collector_ids: BTreeSet<&str> = pipeline
+        .collectors
+        .iter()
+        .map(|collector| collector.name())
+        .collect();
+
+    assert!(collector_ids.contains("MemoryCollector"));
+    assert!(collector_ids.contains("EnvironmentCollector"));
 }
 
 #[test]
@@ -2796,16 +2821,14 @@ fn test_factory_runtime_metadata_matches_static_config_registry() {
         }
     }
 
-    // Exact reverse roster for a default factory without SHM. Breadcrumb,
-    // context, screenshot, attachment, and the derived AttachmentCopier are
-    // intentionally absent; FeedbackDialog is availability-dependent.
+    // Exact reverse roster for a default factory without SHM. Sensitive
+    // collectors are private-by-default; breadcrumb/context require SHM, and
+    // FeedbackDialog is availability-dependent.
     let unconditional: BTreeSet<String> = [
         "DiskSpaceFilter",
         "RateLimiter",
         "ThreadCollector",
-        "MemoryCollector",
         "DylibCollector",
-        "EnvironmentCollector",
         "SessionEnricher",
         "SymbolResolver",
         "Fingerprinter",
@@ -2829,6 +2852,8 @@ fn test_factory_runtime_metadata_matches_static_config_registry() {
         "factory omitted default plugins: {:?}",
         unconditional.difference(&runtime_ids).collect::<Vec<_>>()
     );
+    assert!(!runtime_ids.contains("MemoryCollector"));
+    assert!(!runtime_ids.contains("EnvironmentCollector"));
     let conditional_or_unexpected: Vec<&String> = runtime_ids.difference(&unconditional).collect();
     assert!(
         conditional_or_unexpected

@@ -1,9 +1,9 @@
-//! Configuration system for crash reporter plugins (opt-out design).
+//! Configuration system for crash reporter plugins.
 //!
-//! Report triggers and most plugins are enabled by default. The config file
-//! (`crash_reporter.json`) is only needed to disable specific behavior, enable
-//! an opt-in plugin, or adjust parameters. Missing files or parse errors
-//! silently fall back to defaults.
+//! Report triggers and non-sensitive plugins are enabled by default. Collection
+//! of environment, memory, screenshot, and attachment data is fail-closed behind
+//! an explicit privacy profile and consent declaration. Missing files or parse
+//! errors silently fall back to the minimal profile.
 
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -22,12 +22,73 @@ use crate::utils::paths;
 pub struct CrashReporterConfig {
     pub enabled: bool,
     pub report_dir: Option<String>,
+    pub privacy: PrivacyConfig,
     pub triggers: TriggersConfig,
     pub filters: FilterConfig,
     pub collectors: CollectorConfig,
     pub pre_processors: PreProcessorConfig,
     pub post_processors: PostProcessorConfig,
     pub notifiers: NotifierConfig,
+}
+
+/// Privacy boundary applied before sensitive collector toggles are resolved.
+///
+/// `level` is an upper bound, `consent` is a separate mandatory gate, and an
+/// individual collector toggle can only narrow the resulting set. The config
+/// file is a deployment-time consent declaration; it does not display or
+/// substitute for an application UI.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PrivacyConfig {
+    pub level: PrivacyLevel,
+    pub consent: ConsentState,
+    pub encryption: EncryptionPolicy,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            level: PrivacyLevel::Minimal,
+            consent: ConsentState::NotGranted,
+            encryption: EncryptionPolicy::None,
+        }
+    }
+}
+
+/// Maximum class of sensitive evidence that may be collected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyLevel {
+    /// Do not collect environment, memory, screenshots, or attachments.
+    #[default]
+    Minimal,
+    /// Permit memory diagnostics only, when consent is also granted.
+    Diagnostic,
+    /// Permit all sensitive collectors, when consent is also granted.
+    Full,
+}
+
+/// Deployment-time assertion that sensitive collection has been authorized.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentState {
+    #[default]
+    NotGranted,
+    Granted,
+}
+
+/// Application-layer encryption requirement for report artifacts.
+///
+/// The current writer does not implement application-layer encryption. `None`
+/// states that honestly; `Required` makes startup fail closed instead of
+/// silently writing plaintext. Filesystem permissions and external encrypted
+/// volumes are separate controls and are not reported as encryption here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptionPolicy {
+    #[default]
+    None,
+    Required,
 }
 
 /// Configuration after global/category/plugin enablement has been resolved.
@@ -78,6 +139,13 @@ pub enum ConfigValidationDiagnostic {
         plugin_id: String,
         dependency: String,
     },
+    /// A sensitive collector was requested, but the privacy profile or consent
+    /// declaration did not authorize it.
+    SensitiveCollectorDisabled {
+        plugin_id: String,
+        level: PrivacyLevel,
+        consent: ConsentState,
+    },
 }
 
 impl std::fmt::Display for ConfigValidationDiagnostic {
@@ -91,14 +159,26 @@ impl std::fmt::Display for ConfigValidationDiagnostic {
                 f,
                 "{category} plugin '{plugin_id}' disabled because hard dependency '{dependency}' is disabled"
             ),
+            Self::SensitiveCollectorDisabled {
+                plugin_id,
+                level,
+                consent,
+            } => write!(
+                f,
+                "sensitive collector '{plugin_id}' disabled by privacy level {level:?} with consent {consent:?}"
+            ),
         }
     }
 }
 
-/// Fatal plugin graph validation failures. These are returned to startup;
-/// invalid plugin combinations never use `panic!` as control flow.
+/// Fatal privacy or plugin-graph validation failures. These are returned to
+/// startup; invalid policy and plugin combinations never use `panic!` as
+/// control flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigValidationError {
+    /// Application-layer artifact encryption was required, but this build has
+    /// no encryption writer. Startup fails before any report is captured.
+    ApplicationEncryptionUnavailable,
     DuplicatePluginId {
         plugin_id: String,
         first_category: PluginCategory,
@@ -125,6 +205,9 @@ pub enum ConfigValidationError {
 impl std::fmt::Display for ConfigValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ApplicationEncryptionUnavailable => f.write_str(
+                "privacy.encryption='required' cannot be satisfied: application-layer report encryption is not implemented",
+            ),
             Self::DuplicatePluginId {
                 plugin_id,
                 first_category,
@@ -183,10 +266,16 @@ impl CrashReporterConfig {
     /// Resolve hierarchical enablement into a validated runtime configuration.
     ///
     /// # Errors
-    /// Returns a structured error when the built-in plugin registry contains
-    /// duplicate IDs, a missing dependency declaration, or a dependency cycle/order
+    /// Returns a structured error when required application-layer encryption
+    /// is unavailable, or when the built-in plugin registry contains duplicate
+    /// IDs, a missing dependency declaration, or a dependency cycle/order
     /// violation.
     pub fn validate(self) -> Result<ValidatedConfig, ConfigValidationError> {
+        // The global kill switch produces no artifacts, so an unavailable
+        // encryption requirement is irrelevant while reporting is disabled.
+        if self.enabled && self.privacy.encryption == EncryptionPolicy::Required {
+            return Err(ConfigValidationError::ApplicationEncryptionUnavailable);
+        }
         let trigger_category_enabled = self.triggers.enabled;
         let triggers = ValidatedTriggersConfig {
             crash: trigger_category_enabled && self.triggers.crash.enabled,
@@ -212,6 +301,7 @@ impl Default for CrashReporterConfig {
         Self {
             enabled: true,
             report_dir: None,
+            privacy: PrivacyConfig::default(),
             triggers: TriggersConfig::default(),
             filters: FilterConfig::default(),
             collectors: CollectorConfig::default(),
@@ -350,11 +440,11 @@ impl Default for CollectorConfig {
             thread: PluginToggle::default(),
             breadcrumb: PluginToggle::default(),
             context: PluginToggle::default(),
-            memory: PluginToggle::default(),
+            memory: PluginToggle::disabled(),
             dylib: PluginToggle::default(),
-            screenshot: PluginToggle::default(),
-            attachment: PluginToggle::default(),
-            environment: PluginToggle::default(),
+            screenshot: PluginToggle::disabled(),
+            attachment: PluginToggle::disabled(),
+            environment: PluginToggle::disabled(),
         }
     }
 }
@@ -484,9 +574,9 @@ impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_reports: 64,
-            max_size_mb: 256,
-            max_age_days: 15,
+            max_reports: 16,
+            max_size_mb: 64,
+            max_age_days: 7,
         }
     }
 }
@@ -528,6 +618,12 @@ pub struct SystemNotificationConfig {
 #[serde(default)]
 pub struct PluginToggle {
     pub enabled: bool,
+}
+
+impl PluginToggle {
+    const fn disabled() -> Self {
+        Self { enabled: false }
+    }
 }
 
 impl Default for PluginToggle {
@@ -999,12 +1095,73 @@ fn resolve_plugin_enablement(
         return Ok((BTreeSet::new(), Vec::new()));
     }
 
+    let mut diagnostics = sensitive_collector_diagnostics(config);
     let requested = configured_plugin_toggles(config);
     let enabled: BTreeSet<&'static str> = requested
         .into_iter()
         .filter_map(|(id, requested)| requested.then_some(id))
         .collect();
-    Ok(close_plugin_enablement(PLUGIN_SPECS, enabled))
+    let (enabled, mut dependency_diagnostics) = close_plugin_enablement(PLUGIN_SPECS, enabled);
+    diagnostics.append(&mut dependency_diagnostics);
+    Ok((enabled, diagnostics))
+}
+
+const SENSITIVE_COLLECTORS: [&str; 4] = [
+    "MemoryCollector",
+    "ScreenshotCollector",
+    "AttachmentCollector",
+    "EnvironmentCollector",
+];
+
+fn sensitive_collector_toggle(collectors: &CollectorConfig, plugin_id: &str) -> bool {
+    match plugin_id {
+        "MemoryCollector" => collectors.memory.enabled,
+        "ScreenshotCollector" => collectors.screenshot.enabled,
+        "AttachmentCollector" => collectors.attachment.enabled,
+        "EnvironmentCollector" => collectors.environment.enabled,
+        _ => false,
+    }
+}
+
+fn privacy_allows_collector(privacy: &PrivacyConfig, plugin_id: &str) -> bool {
+    if privacy.consent != ConsentState::Granted {
+        return false;
+    }
+    match privacy.level {
+        PrivacyLevel::Minimal => false,
+        PrivacyLevel::Diagnostic => plugin_id == "MemoryCollector",
+        PrivacyLevel::Full => SENSITIVE_COLLECTORS.contains(&plugin_id),
+    }
+}
+
+fn sensitive_collector_enabled(
+    config: &CrashReporterConfig,
+    plugin_id: &str,
+    toggle: bool,
+) -> bool {
+    config.collectors.enabled && toggle && privacy_allows_collector(&config.privacy, plugin_id)
+}
+
+fn sensitive_collector_diagnostics(
+    config: &CrashReporterConfig,
+) -> Vec<ConfigValidationDiagnostic> {
+    if !config.collectors.enabled {
+        return Vec::new();
+    }
+    SENSITIVE_COLLECTORS
+        .iter()
+        .filter(|plugin_id| {
+            sensitive_collector_toggle(&config.collectors, plugin_id)
+                && !privacy_allows_collector(&config.privacy, plugin_id)
+        })
+        .map(
+            |plugin_id| ConfigValidationDiagnostic::SensitiveCollectorDisabled {
+                plugin_id: (*plugin_id).to_string(),
+                level: config.privacy.level,
+                consent: config.privacy.consent,
+            },
+        )
+        .collect()
 }
 
 fn close_plugin_enablement(
@@ -1069,7 +1226,11 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
         ),
         (
             "MemoryCollector",
-            config.collectors.enabled && config.collectors.memory.enabled,
+            sensitive_collector_enabled(
+                config,
+                "MemoryCollector",
+                config.collectors.memory.enabled,
+            ),
         ),
         (
             "DylibCollector",
@@ -1077,15 +1238,27 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
         ),
         (
             "ScreenshotCollector",
-            config.collectors.enabled && config.collectors.screenshot.enabled,
+            sensitive_collector_enabled(
+                config,
+                "ScreenshotCollector",
+                config.collectors.screenshot.enabled,
+            ),
         ),
         (
             "AttachmentCollector",
-            config.collectors.enabled && config.collectors.attachment.enabled,
+            sensitive_collector_enabled(
+                config,
+                "AttachmentCollector",
+                config.collectors.attachment.enabled,
+            ),
         ),
         (
             "EnvironmentCollector",
-            config.collectors.enabled && config.collectors.environment.enabled,
+            sensitive_collector_enabled(
+                config,
+                "EnvironmentCollector",
+                config.collectors.environment.enabled,
+            ),
         ),
         (
             "SessionEnricher",

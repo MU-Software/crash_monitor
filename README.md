@@ -3,7 +3,7 @@
 Out-of-process crash monitor for native macOS applications. It launches a target
 program as a child, watches it over a Mach exception port and an explicitly
 enabled shared-memory heartbeat, and on a crash, hang, or manual snapshot
-captures full per-thread diagnostic state into a JSON report — then provides
+captures bounded per-thread diagnostic state into a JSON report — then provides
 offline CLI tools to inspect it. Running out-of-process means the reporter still
 works when the target's own address space is corrupt.
 
@@ -18,8 +18,10 @@ crash_monitor (parent)  ──fork+exec──▶  target app (child)
 ```
 
 On a crash, hang, or snapshot the monitor suspends the child, walks every thread
-(registers, stack, backtrace), reads loaded images and the memory map, merges the
-shared-memory breadcrumbs and context, and writes a report.
+(registers, stack, backtrace), reads loaded images, merges shared-memory
+breadcrumbs and context, and writes a report. Memory maps, environment data,
+screenshots, and attachments are sensitive opt-ins controlled by the privacy
+policy.
 
 ## Build
 
@@ -66,3 +68,4 @@ make coverage    # HTML coverage report
 - [docs/pipeline.md](docs/pipeline.md) — plugin pipeline and stability invariants
 - [docs/reports.md](docs/reports.md) — report JSON format and CLI analysis tools
 - [docs/integration.md](docs/integration.md) — integrating a host application as the child
+- [docs/privacy.md](docs/privacy.md) — consent gates, retention, and encryption limitations

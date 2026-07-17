@@ -153,7 +153,7 @@
 - [ ] data/report directory를 명시적으로 `0700`, JSON/raw/RGBA/PNG/ZIP/temp를 `0600`으로 생성한다.
 - [ ] 기존 directory의 owner, mode, symlink/ACL 정책을 검증하고 안전하지 않으면 실패하거나 교정한다.
 - [ ] create에는 `O_EXCL`/`O_NOFOLLOW`를 적용하고 final path는 atomic rename으로 publish한다.
-- [ ] environment, memory, screenshot, attachment의 기본 수집을 최소화하고 privacy level/consent/retention/encryption 정책을 정의한다.
+- [x] environment, memory, screenshot, attachment의 기본 수집을 최소화하고 privacy level/consent/retention/encryption 정책을 정의한다.
 - [ ] 일반 umask와 제한적 umask 모두에서 최종 mode를 검증한다.
 
 범위: `src/utils/paths.rs`, artifact writers, config/docs. 주의: 현재 mode가 항상 0755/0644라는 단정이 아니라 private mode를 강제하지 않는 것이 문제다.
