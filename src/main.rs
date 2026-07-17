@@ -437,12 +437,21 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         anr_config.as_ref(),
     );
 
+    let task_control_health = pl.platform.supervisor_health();
+    let task_control_containment = task_control_health
+        .task_control_failures
+        .iter()
+        .any(platform::TaskControlFailure::prevents_continued_monitoring);
+    let task_control_escalation = task_control_health.requires_escalation();
+    let detected_crash = matches!(outcome, event_loop::MonitorOutcome::DetectedCrash { .. });
+    let must_reap_child = detected_crash || task_control_containment;
+
     // After a crash, destroy the exception port so that if the child re-faults
     // (e.g. kernel re-executes faulting instruction after KERN_FAILURE reply),
     // there is no Mach exception handler and the kernel falls back to delivering
     // a Unix signal (SIG_DFL → terminate). Without this, the child gets stuck
     // in an uninterruptible Mach exception wait, immune to even SIGKILL.
-    if matches!(outcome, event_loop::MonitorOutcome::DetectedCrash { .. }) {
+    if must_reap_child {
         // SAFETY: mach_port_destroy removes all rights (receive + send) from
         // this task. The listener thread's mach_msg will return an error and exit.
         unsafe {
@@ -451,13 +460,24 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Wait for child to exit after a detected crash and retain its raw status.
-    // Fatal report finalization starts only after this handoff, so JSON and ZIP
-    // contain the terminal status from their first write.
-    if matches!(outcome, event_loop::MonitorOutcome::DetectedCrash { .. }) {
+    // `task_terminate` is the first containment boundary for a task that
+    // could not be resumed. If that Mach operation also failed, escalate once
+    // through the process supervisor. Do not block indefinitely waiting for a
+    // process whose task-control state is already unreliable.
+    if task_control_escalation {
+        eprintln!("[monitor] task-control recovery exhausted; sending SIGKILL to child");
+        if let Err(error) = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL) {
+            eprintln!("[monitor] supervisor SIGKILL escalation failed: {error}");
+        }
+    }
+
+    // Wait for a crashed or task-control-contained child and retain its raw
+    // status. Fatal report finalization starts only after this handoff, so JSON
+    // and ZIP contain the terminal status from their first write.
+    if must_reap_child {
         let termination = match reap_after_detected_crash(child_pid, child_started_at) {
             Ok(reason) => {
-                eprintln!("[monitor] Crashed child terminated: {reason:?}");
+                eprintln!("[monitor] Contained child terminated: {reason:?}");
                 Some(reason)
             }
             Err(e) => {
@@ -479,7 +499,9 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         if report_expected && report_path.is_none() {
             eprintln!("[monitor] Fatal report finalization did not produce an artifact");
         }
-        outcome = outcome.with_crash_result(termination, report_path);
+        if detected_crash {
+            outcome = outcome.with_crash_result(termination, report_path);
+        }
     }
 
     outcome.exit_code()

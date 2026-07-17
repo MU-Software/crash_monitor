@@ -227,6 +227,17 @@ pub fn handle_child_termination(
     MonitorOutcome::ChildTerminated(reason)
 }
 
+fn task_control_monitor_failure(pipeline: &Pipeline) -> Option<String> {
+    pipeline
+        .platform
+        .supervisor_health()
+        .task_control_failures
+        .into_iter()
+        .rev()
+        .find(crate::platform::TaskControlFailure::prevents_continued_monitoring)
+        .map(|failure| format!("task-control containment activated: {failure}"))
+}
+
 /// The extracted event loop. Returns a typed monitor outcome.
 ///
 /// ANR detection is integrated directly: if `shm` and `anr_config` are provided,
@@ -299,6 +310,19 @@ pub fn event_loop(
                 if let Some(ref header) = reply_header {
                     reply_fn(header);
                 }
+                if let Some(message) = task_control_monitor_failure(pipeline) {
+                    // The Mach reply is never withheld because recovery failed.
+                    // The outer process supervisor consumes MonitorFailure;
+                    // if task_terminate failed it escalates once with SIGKILL.
+                    capture_worker.detach();
+                    background_worker.detach();
+                    let crash_finalization = captured
+                        .map(|captured| CrashFinalization::start(pipeline.clone(), captured));
+                    return EventLoopResult {
+                        outcome: MonitorOutcome::MonitorFailure(message),
+                        crash_finalization,
+                    };
+                }
                 // No drain or join is allowed between reply and returning to
                 // the supervisor, which must destroy the exception port and
                 // begin reaping immediately.
@@ -331,9 +355,17 @@ pub fn event_loop(
                     hang_duration_ms: None,
                     termination: None,
                 };
-                if let crate::pipeline::CaptureOutcome::Captured(captured) =
-                    capture_worker.capture(event, task, Instant::now() + CAPTURE_DEADLINE)
-                {
+                let capture =
+                    capture_worker.capture(event, task, Instant::now() + CAPTURE_DEADLINE);
+                if let Some(message) = task_control_monitor_failure(pipeline) {
+                    capture_worker.detach();
+                    background_worker.detach();
+                    return EventLoopResult {
+                        outcome: MonitorOutcome::MonitorFailure(message),
+                        crash_finalization: None,
+                    };
+                }
+                if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {
                     let _ = background_worker.try_submit(captured);
                 }
             }
@@ -395,12 +427,20 @@ pub fn event_loop(
                                     hang_duration_ms: Some(hang_duration_ms),
                                     termination: None,
                                 };
-                                if let crate::pipeline::CaptureOutcome::Captured(captured) =
-                                    capture_worker.capture(
-                                        event,
-                                        task,
-                                        Instant::now() + CAPTURE_DEADLINE,
-                                    )
+                                let capture = capture_worker.capture(
+                                    event,
+                                    task,
+                                    Instant::now() + CAPTURE_DEADLINE,
+                                );
+                                if let Some(message) = task_control_monitor_failure(pipeline) {
+                                    capture_worker.detach();
+                                    background_worker.detach();
+                                    return EventLoopResult {
+                                        outcome: MonitorOutcome::MonitorFailure(message),
+                                        crash_finalization: None,
+                                    };
+                                }
+                                if let crate::pipeline::CaptureOutcome::Captured(captured) = capture
                                 {
                                     let _ = background_worker.try_submit(captured);
                                 }

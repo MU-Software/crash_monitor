@@ -2,7 +2,7 @@
 
 use mach2::kern_return::KERN_SUCCESS;
 use mach2::port::mach_port_t;
-use mach2::task::{task_resume, task_suspend, task_threads};
+use mach2::task::{task_resume, task_suspend, task_terminate, task_threads};
 use mach2::vm::mach_vm_deallocate;
 
 use crate::platform::macos::types::{MachError, mach_result};
@@ -39,6 +39,16 @@ pub fn resume_task(task: mach_port_t) -> Result<(), MachError> {
     // SAFETY: task_resume is a kernel syscall on a valid task port.
     let kr = unsafe { task_resume(task) };
     mach_result("task_resume", kr)
+}
+
+/// Terminate a task that could not be resumed safely.
+///
+/// # Errors
+/// Returns `MachError` if the `task_terminate` kernel call fails.
+pub fn terminate_task(task: mach_port_t) -> Result<(), MachError> {
+    // SAFETY: task_terminate is a kernel syscall on a valid task port.
+    let kr = unsafe { task_terminate(task) };
+    mach_result("task_terminate", kr)
 }
 
 /// Get thread ports for all threads in the target task.

@@ -367,6 +367,33 @@ impl Plugin for FailingCollector {
     }
 }
 
+/// Collector whose implementation panics inside the plugin boundary.
+struct PanickingCollector;
+
+impl Plugin for PanickingCollector {
+    fn name(&self) -> &'static str {
+        "PanickingCollector"
+    }
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+    fn priority(&self) -> Priority {
+        Priority::Medium
+    }
+}
+
+impl Collector for PanickingCollector {
+    fn collect(
+        &self,
+        _event: &CrashEvent,
+        _task: mach_port_t,
+        _data: &mut CollectedData,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        panic!("intentional collector panic");
+    }
+}
+
 impl Collector for FailingCollector {
     fn collect(
         &self,
@@ -510,11 +537,11 @@ fn test_bail_on_suspend_failure_true() {
 
     let diag = pipeline.handle_event(&event, 0);
 
-    // Pipeline bailed — no collectors should have run
-    assert!(
-        diag.plugins.is_empty(),
-        "No plugins should run when bail=true and suspend fails"
-    );
+    // Pipeline bailed — only the explicit suspension diagnostic is present.
+    assert_eq!(diag.plugins.len(), 1);
+    assert_eq!(diag.plugins[0].name, "CaptureSuspend");
+    assert!(matches!(&diag.plugins[0].status, PluginStatus::Error(_)));
+    assert_eq!(platform.resume_count(), 0);
 
     // No files written
     let files: Vec<_> = std::fs::read_dir(tempdir.path())
@@ -583,7 +610,7 @@ fn test_dependency_skip_on_failure() {
             Box::new(FailingCollector),
             Box::new(DependentOnFailCollector),
         ],
-        platform,
+        platform.clone(),
         tempdir.path(),
     );
 
@@ -592,6 +619,8 @@ fn test_dependency_skip_on_failure() {
 
     // FailingCollector should have error status
     assert!(!diag.succeeded("FailingCollector"));
+    assert_eq!(platform.suspend_count(), 1);
+    assert_eq!(platform.resume_count(), 1);
     // DependentOnFailCollector should be skipped due to dependency not met
     let dep_status = diag
         .plugins
@@ -608,6 +637,49 @@ fn test_dependency_skip_on_failure() {
         ),
         other => panic!("Expected Skipped, got: {other:?}"),
     }
+}
+
+#[test]
+fn test_panicking_collector_keeps_suspend_resume_balanced() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = make_pipeline_with_tempdir(
+        vec![Box::new(PanickingCollector)],
+        platform.clone(),
+        tempdir.path(),
+    );
+
+    let diagnostics = pipeline.handle_event(&make_crash_event(), 123);
+
+    assert!(diagnostics.plugins.iter().any(|entry| {
+        entry.name == "PanickingCollector"
+            && matches!(&entry.status, PluginStatus::Error(error) if error == "panicked")
+    }));
+    assert_eq!(platform.suspend_count(), 1);
+    assert_eq!(platform.resume_count(), 1);
+    assert_eq!(platform.terminate_count(), 0);
+}
+
+#[test]
+fn test_resume_failure_is_diagnosed_and_terminates_after_bounded_retry() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let mut platform = MockPlatform::default();
+    platform.resume_fails = true;
+    let platform = Arc::new(platform);
+    let pipeline = make_pipeline_with_tempdir(vec![], platform.clone(), tempdir.path());
+
+    let diagnostics = pipeline.handle_event(&make_crash_event(), 123);
+
+    assert!(diagnostics.plugins.iter().any(|entry| {
+        entry.name == "TaskResume" && matches!(&entry.status, PluginStatus::Error(_))
+    }));
+    assert_eq!(platform.suspend_count(), 1);
+    assert_eq!(
+        platform.resume_count(),
+        crate::platform::RESUME_ATTEMPT_LIMIT
+    );
+    assert_eq!(platform.terminate_count(), 1);
+    assert_eq!(platform.supervisor_health().task_control_failures.len(), 1);
 }
 
 #[test]

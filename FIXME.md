@@ -65,11 +65,11 @@
 
 ### P0-06. task suspend/resume 소유권을 RAII로 보장한다
 
-- [ ] 성공한 suspend에서만 생성되는 `TaskSuspendGuard`를 도입한다.
-- [ ] explicit finish와 `Drop` 어느 경로에서도 resume가 정확히 한 번 실행되게 한다.
-- [ ] suspend 실패 시 소유하지 않은 suspension count를 변경하지 않고 capture 정책을 명시한다.
-- [ ] resume 실패를 diagnostics와 supervisor health에 기록하고 bounded retry 후 terminate/escalate 정책을 적용한다.
-- [ ] panic, early return, plugin failure, timeout별 suspend/resume 균형 테스트를 추가한다.
+- [x] 성공한 suspend에서만 생성되는 `TaskSuspendGuard`를 도입한다.
+- [x] explicit finish와 `Drop` 어느 경로에서도 resume가 정확히 한 번 실행되게 한다.
+- [x] suspend 실패 시 소유하지 않은 suspension count를 변경하지 않고 capture 정책을 명시한다.
+- [x] resume 실패를 diagnostics와 supervisor health에 기록하고 bounded retry 후 terminate/escalate 정책을 적용한다.
+- [x] panic, early return, plugin failure, timeout별 suspend/resume 균형 테스트를 추가한다.
 
 범위: `src/pipeline/mod.rs`, platform task API.
 

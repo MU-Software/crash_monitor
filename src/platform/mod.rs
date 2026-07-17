@@ -7,7 +7,16 @@ pub use macos::*;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 
+mod task_control;
+
+#[allow(unused_imports)] // public API is also compiled into the binary crate
+pub use task_control::{
+    RESUME_ATTEMPT_LIMIT, SupervisorHealth, SuspendFailurePolicy, TaskControlFailure,
+    TaskControlFailureSink, TaskRecoveryAction, TaskSuspendGuard,
+};
+
 use mach2::port::mach_port_t;
+use std::sync::Mutex;
 
 use crate::pipeline::PluginContext;
 
@@ -27,6 +36,22 @@ pub trait PlatformOps: Send + Sync {
     /// # Errors
     /// Returns an error string if the platform call fails.
     fn resume_task(&self, task: mach_port_t) -> Result<(), String>;
+
+    /// Terminate a task that could not be resumed after the bounded retry
+    /// policy. This is a containment action: leaving a child permanently
+    /// suspended is never considered a recoverable capture outcome.
+    ///
+    /// # Errors
+    /// Returns an error string if the platform cannot terminate the task.
+    fn terminate_task(&self, task: mach_port_t) -> Result<(), String>;
+
+    /// Record a task-control failure in supervisor-visible health state.
+    ///
+    fn record_task_control_failure(&self, failure: TaskControlFailure);
+
+    /// Return the supervisor-visible task-control health snapshot.
+    #[must_use]
+    fn supervisor_health(&self) -> SupervisorHealth;
 
     // ── Thread inspection ──
 
@@ -96,7 +121,10 @@ pub trait PlatformOps: Send + Sync {
 
 /// Real macOS implementation — delegates to the free functions in `macos::*`.
 #[cfg(target_os = "macos")]
-pub struct MacOsPlatform;
+#[derive(Default)]
+pub struct MacOsPlatform {
+    supervisor_health: Mutex<SupervisorHealth>,
+}
 
 #[cfg(target_os = "macos")]
 impl PlatformOps for MacOsPlatform {
@@ -106,6 +134,24 @@ impl PlatformOps for MacOsPlatform {
 
     fn resume_task(&self, task: mach_port_t) -> Result<(), String> {
         macos::resume_task(task).map_err(|e| e.to_string())
+    }
+
+    fn terminate_task(&self, task: mach_port_t) -> Result<(), String> {
+        macos::terminate_task(task).map_err(|e| e.to_string())
+    }
+
+    fn record_task_control_failure(&self, failure: TaskControlFailure) {
+        match self.supervisor_health.lock() {
+            Ok(mut health) => health.record(failure),
+            Err(poisoned) => poisoned.into_inner().record(failure),
+        }
+    }
+
+    fn supervisor_health(&self) -> SupervisorHealth {
+        match self.supervisor_health.lock() {
+            Ok(health) => health.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     fn get_task_threads(&self, task: mach_port_t) -> Result<Vec<mach_port_t>, String> {

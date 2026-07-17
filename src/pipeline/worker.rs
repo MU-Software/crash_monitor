@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use super::{
     CaptureOutcome, CapturePayload, CapturedEvent, Diagnostics, Pipeline, PluginStatus,
-    TerminationReason,
+    TerminationReason, suspend_failure_policy,
 };
+use crate::platform::{TaskControlFailureSink, TaskSuspendGuard};
 
 /// One absolute capture budget, measured from Mach request receipt for crashes.
 pub const CAPTURE_DEADLINE: Duration = Duration::from_secs(5);
@@ -99,23 +100,38 @@ impl CaptureWorker {
             return failed_capture(event, reason);
         }
 
-        let suspended = match self.pipeline.platform.suspend_task(task) {
-            Ok(()) => true,
-            Err(error) if event.bail_on_suspend_failure => {
-                eprintln!("[monitor] {error}");
-                let mut diagnostics = Diagnostics::new();
-                diagnostics.record_immediate("CaptureSuspend", PluginStatus::Error(error.clone()));
-                return CaptureOutcome::Skipped(diagnostics);
-            }
-            Err(error) => {
-                eprintln!("[monitor] suspend_task failed (proceeding with best-effort): {error}");
-                false
-            }
+        let failure_sink = TaskControlFailureSink::new();
+        let mut suspend_error = None;
+        let mut suspend_guard = match TaskSuspendGuard::acquire(
+            self.pipeline.platform.clone(),
+            task,
+            failure_sink.clone(),
+        ) {
+            Ok(guard) => Some(guard),
+            Err(error) => match suspend_failure_policy(&event) {
+                super::SuspendFailurePolicy::SkipCapture => {
+                    eprintln!("[monitor] suspend_task failed; capture skipped: {error}");
+                    let mut diagnostics = Diagnostics::new();
+                    diagnostics.record_immediate("CaptureSuspend", PluginStatus::Error(error));
+                    return CaptureOutcome::Skipped(diagnostics);
+                }
+                super::SuspendFailurePolicy::BestEffort => {
+                    eprintln!(
+                        "[monitor] suspend_task failed (proceeding with best-effort): {error}"
+                    );
+                    suspend_error = Some(error);
+                    None
+                }
+            },
         };
 
         if Instant::now() >= deadline {
-            self.resume_if_needed(task, suspended);
-            return timed_out_capture(event, "absolute capture deadline elapsed during suspend");
+            finish_suspend(&mut suspend_guard);
+            return with_task_control_diagnostics(
+                timed_out_capture(event, "absolute capture deadline elapsed during suspend"),
+                suspend_error,
+                &failure_sink,
+            );
         }
 
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -129,17 +145,25 @@ impl CaptureWorker {
         };
 
         let Some(sender) = &self.sender else {
-            self.resume_if_needed(task, suspended);
-            return failed_capture(job.event, "capture worker is unavailable");
+            finish_suspend(&mut suspend_guard);
+            return with_task_control_diagnostics(
+                failed_capture(job.event, "capture worker is unavailable"),
+                suspend_error,
+                &failure_sink,
+            );
         };
 
         if let Err(error) = sender.try_send(job) {
             let event = match error {
                 TrySendError::Full(job) | TrySendError::Disconnected(job) => job.event,
             };
-            self.resume_if_needed(task, suspended);
+            finish_suspend(&mut suspend_guard);
             self.retire("capture worker queue unavailable");
-            return failed_capture(event, "capture worker queue unavailable");
+            return with_task_control_diagnostics(
+                failed_capture(event, "capture worker queue unavailable"),
+                suspend_error,
+                &failure_sink,
+            );
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -149,9 +173,9 @@ impl CaptureWorker {
             // at the deadline cannot start another task-facing collector.
             cancelled.store(true, Ordering::Release);
         }
-        self.resume_if_needed(task, suspended);
+        finish_suspend(&mut suspend_guard);
 
-        match result {
+        let outcome = match result {
             Ok(payload) => CaptureOutcome::Captured(CapturedEvent::new(event_for_result, payload)),
             Err(RecvTimeoutError::Timeout) => {
                 self.retire("capture worker exceeded absolute deadline");
@@ -164,13 +188,8 @@ impl CaptureWorker {
                 self.retire("capture worker disconnected");
                 failed_capture(event_for_result, "capture worker disconnected")
             }
-        }
-    }
-
-    fn resume_if_needed(&self, task: mach_port_t, suspended: bool) {
-        if suspended && let Err(error) = self.pipeline.platform.resume_task(task) {
-            eprintln!("[monitor] resume_task failed: {error}");
-        }
+        };
+        with_task_control_diagnostics(outcome, suspend_error, &failure_sink)
     }
 
     fn retire(&mut self, reason: &str) {
@@ -187,6 +206,28 @@ impl CaptureWorker {
         self.sender.take();
         self.handle.take();
     }
+}
+
+fn finish_suspend(guard: &mut Option<TaskSuspendGuard>) {
+    if let Some(guard) = guard.take() {
+        guard.finish();
+    }
+}
+
+fn with_task_control_diagnostics(
+    mut outcome: CaptureOutcome,
+    suspend_error: Option<String>,
+    failure_sink: &TaskControlFailureSink,
+) -> CaptureOutcome {
+    let diagnostics = match &mut outcome {
+        CaptureOutcome::Captured(captured) => &mut captured.diagnostics,
+        CaptureOutcome::Skipped(diagnostics) => diagnostics,
+    };
+    if let Some(error) = suspend_error {
+        diagnostics.record_immediate("CaptureSuspend", PluginStatus::Error(error));
+    }
+    failure_sink.drain_into(diagnostics);
+    outcome
 }
 
 fn timed_out_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {

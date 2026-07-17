@@ -17,9 +17,11 @@ use crash_monitor::event_loop::{
 };
 use crash_monitor::pipeline::{
     CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PluginContext,
-    PluginExecution, PostProcessor, Priority, ReportResult, TerminationReason, TriggerPolicy,
+    PluginExecution, PluginStatus, PostProcessor, Priority, ReportResult, TerminationReason,
+    TriggerPolicy,
 };
 use crash_monitor::platform::mock::MockPlatform;
+use crash_monitor::platform::{PlatformOps, RESUME_ATTEMPT_LIMIT};
 use crash_monitor::postprocessors::ZIPArchiver;
 
 type ReleaseGate = Arc<(Mutex<bool>, Condvar)>;
@@ -930,6 +932,158 @@ fn test_snapshot_event_continues() {
         json_count >= 1,
         "Should produce a snapshot report, got {json_count}"
     );
+}
+
+#[test]
+fn test_resume_and_terminate_failure_becomes_monitor_failure() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let mut platform = MockPlatform::default();
+    platform.resume_fails = true;
+    platform.terminate_fails = true;
+    let platform = Arc::new(platform);
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: None,
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let mut source = TestEventSource::new(vec![MonitorEvent::Snapshot, exited(0, 25)]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        result.outcome,
+        MonitorOutcome::MonitorFailure(ref message)
+            if message.contains("task-control containment activated")
+    ));
+    assert_eq!(result.exit_code(), EXIT_MONITOR_INTERNAL);
+    assert_eq!(platform.suspend_count(), 1);
+    assert_eq!(platform.resume_count(), RESUME_ATTEMPT_LIMIT);
+    assert_eq!(platform.terminate_count(), 1);
+    assert!(platform.supervisor_health().requires_escalation());
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
+fn test_bounded_resume_failure_and_task_termination_stops_monitoring() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let mut platform = MockPlatform::default();
+    platform.resume_fails = true;
+    let platform = Arc::new(platform);
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: None,
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let mut source = TestEventSource::new(vec![MonitorEvent::Snapshot, exited(0, 25)]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        result.outcome,
+        MonitorOutcome::MonitorFailure(ref message)
+            if message.contains("recovery=Terminated")
+    ));
+    assert_eq!(platform.resume_count(), RESUME_ATTEMPT_LIMIT);
+    assert_eq!(platform.terminate_count(), 1);
+    assert!(!platform.supervisor_health().requires_escalation());
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
+fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let mut platform = MockPlatform::default();
+    platform.resume_fails = true;
+    platform.terminate_fails = true;
+    let platform = Arc::new(platform);
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: None,
+        platform: platform.clone(),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    });
+    let mut source = TestEventSource::new(vec![MonitorEvent::Crash {
+        received_at: std::time::Instant::now(),
+        exception_type: 1,
+        code: 0xDEAD,
+        subcode: 0xBEEF,
+        thread_port: 42,
+        reply_header: Some(mach2::message::mach_msg_header_t::default()),
+    }]);
+    let reply_count = AtomicUsize::new(0);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &|_| {
+            assert_eq!(platform.resume_count(), RESUME_ATTEMPT_LIMIT);
+            assert_eq!(platform.terminate_count(), 1);
+            reply_count.fetch_add(1, Ordering::SeqCst);
+        },
+        None,
+        None,
+    );
+
+    assert_eq!(reply_count.load(Ordering::SeqCst), 1);
+    assert!(matches!(&result.outcome, MonitorOutcome::MonitorFailure(_)));
+    let diagnostics = result
+        .crash_finalization
+        .expect("fatal containment preserves captured diagnostics")
+        .complete(
+            pipeline,
+            Some(TerminationReason::Signaled {
+                signal: 9,
+                core_dumped: false,
+                runtime_ms: 25,
+            }),
+            Duration::from_secs(2),
+        )
+        .expect("fatal containment finalization result");
+    assert!(diagnostics.plugins.iter().any(|entry| {
+        entry.name == "TaskResume" && matches!(entry.status, PluginStatus::Error(_))
+    }));
+    assert!(diagnostics.report_path.is_some());
 }
 
 #[test]

@@ -8,7 +8,7 @@ use mach2::port::mach_port_t;
 
 use crate::pipeline::PluginContext;
 
-use super::{PlatformOps, TaskVmSummary, VmRegionInfo};
+use super::{PlatformOps, SupervisorHealth, TaskControlFailure, TaskVmSummary, VmRegionInfo};
 
 /// Mock thread data: port, optional name, register state [u32; 68].
 pub struct MockThread {
@@ -33,10 +33,15 @@ pub struct MockPlatform {
     pub suspend_fails: bool,
     /// If true, `resume_task` returns Err.
     pub resume_fails: bool,
+    /// If true, `terminate_task` returns Err.
+    pub terminate_fails: bool,
 
     // ── Invocation tracking ──
     suspend_count: AtomicUsize,
     resume_count: AtomicUsize,
+    resume_failures_remaining: AtomicUsize,
+    terminate_count: AtomicUsize,
+    supervisor_health: Mutex<SupervisorHealth>,
     deallocated_ports: Mutex<Vec<mach_port_t>>,
 }
 
@@ -49,6 +54,17 @@ impl MockPlatform {
     /// Number of times `resume_task` was called.
     pub fn resume_count(&self) -> usize {
         self.resume_count.load(Ordering::SeqCst)
+    }
+
+    /// Number of times `terminate_task` was called.
+    pub fn terminate_count(&self) -> usize {
+        self.terminate_count.load(Ordering::SeqCst)
+    }
+
+    /// Fail exactly the next `attempts` resume calls, then allow success.
+    pub fn fail_next_resume_attempts(&self, attempts: usize) {
+        self.resume_failures_remaining
+            .store(attempts, Ordering::SeqCst);
     }
 
     /// Thread ports that were passed to `deallocate_thread_port`.
@@ -70,8 +86,12 @@ impl Default for MockPlatform {
             task_info_responses: BTreeMap::new(),
             suspend_fails: false,
             resume_fails: false,
+            terminate_fails: false,
             suspend_count: AtomicUsize::new(0),
             resume_count: AtomicUsize::new(0),
+            resume_failures_remaining: AtomicUsize::new(0),
+            terminate_count: AtomicUsize::new(0),
+            supervisor_health: Mutex::new(SupervisorHealth::default()),
             deallocated_ports: Mutex::new(Vec::new()),
         }
     }
@@ -89,10 +109,39 @@ impl PlatformOps for MockPlatform {
 
     fn resume_task(&self, _task: mach_port_t) -> Result<(), String> {
         self.resume_count.fetch_add(1, Ordering::SeqCst);
-        if self.resume_fails {
+        let configured_failure = self
+            .resume_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if self.resume_fails || configured_failure {
             Err("mock: resume_task failed".into())
         } else {
             Ok(())
+        }
+    }
+
+    fn terminate_task(&self, _task: mach_port_t) -> Result<(), String> {
+        self.terminate_count.fetch_add(1, Ordering::SeqCst);
+        if self.terminate_fails {
+            Err("mock: terminate_task failed".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn record_task_control_failure(&self, failure: TaskControlFailure) {
+        match self.supervisor_health.lock() {
+            Ok(mut health) => health.record(failure),
+            Err(poisoned) => poisoned.into_inner().record(failure),
+        }
+    }
+
+    fn supervisor_health(&self) -> SupervisorHealth {
+        match self.supervisor_health.lock() {
+            Ok(health) => health.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         }
     }
 

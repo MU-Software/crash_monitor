@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::platform::PlatformOps;
+use crate::platform::{
+    PlatformOps, SuspendFailurePolicy, TaskControlFailureSink, TaskSuspendGuard,
+};
 
 pub use safety::{
     CancellationToken, PluginContext, PluginRunResult, SubprocessOutput,
@@ -183,6 +185,17 @@ fn plugin_status<T>(result: &PluginRunResult<T>) -> PluginStatus {
     }
 }
 
+/// Stable capture contract for a failed suspend. Snapshot-like triggers need
+/// a coherent view and skip capture; fatal crashes retain best-effort evidence
+/// while owning no suspension count.
+fn suspend_failure_policy(event: &CrashEvent) -> SuspendFailurePolicy {
+    if event.bail_on_suspend_failure {
+        SuspendFailurePolicy::SkipCapture
+    } else {
+        SuspendFailurePolicy::BestEffort
+    }
+}
+
 impl Pipeline {
     /// Return whether this pipeline may process the given report type.
     ///
@@ -214,26 +227,39 @@ impl Pipeline {
             return CaptureOutcome::Skipped(Diagnostics::new());
         }
         let mut diagnostics = Diagnostics::new();
-
-        let suspended = if let Err(e) = self.platform.suspend_task(task) {
-            if event.bail_on_suspend_failure {
-                eprintln!("[monitor] {e}");
-                return CaptureOutcome::Skipped(diagnostics);
+        let failure_sink = TaskControlFailureSink::new();
+        let suspend_guard = match TaskSuspendGuard::acquire(
+            self.platform.clone(),
+            task,
+            failure_sink.clone(),
+        ) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                diagnostics.record_immediate("CaptureSuspend", PluginStatus::Error(error.clone()));
+                match suspend_failure_policy(event) {
+                    SuspendFailurePolicy::SkipCapture => {
+                        eprintln!("[monitor] suspend_task failed; capture skipped: {error}");
+                        return CaptureOutcome::Skipped(diagnostics);
+                    }
+                    SuspendFailurePolicy::BestEffort => {
+                        eprintln!(
+                            "[monitor] suspend_task failed (proceeding with best-effort): {error}"
+                        );
+                        None
+                    }
+                }
             }
-            eprintln!("[monitor] suspend_task failed (proceeding with best-effort): {e}");
-            false
-        } else {
-            true
         };
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        let payload = self.collect_snapshot(event, task, &cancelled);
+        let mut payload = self.collect_snapshot(event, task, &cancelled);
 
-        if suspended && let Err(e) = self.platform.resume_task(task) {
-            eprintln!("[monitor] resume_task failed: {e}");
+        if let Some(guard) = suspend_guard {
+            guard.finish();
         }
+        failure_sink.drain_into(&mut payload.diagnostics);
 
-        diagnostics = payload.diagnostics;
+        diagnostics.plugins.append(&mut payload.diagnostics.plugins);
         CaptureOutcome::Captured(CapturedEvent::new(
             event.clone(),
             CapturePayload {
@@ -785,7 +811,7 @@ pub fn default_macos_pipeline_from_config(
 
     // ── Early out: global kill switch ──
     if !validated.enabled {
-        let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform);
+        let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform::default());
         return Ok(Pipeline {
             enabled: false,
             triggers,
@@ -800,7 +826,7 @@ pub fn default_macos_pipeline_from_config(
         });
     }
 
-    let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform);
+    let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform::default());
 
     // Dependency closure and category switches were resolved at config load.
     let on = |plugin_id: &str| validated.plugin_enabled(plugin_id);

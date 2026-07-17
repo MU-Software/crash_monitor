@@ -98,6 +98,20 @@ and timeout) is cached, constant-time state; metadata access performs no I/O.
 
 ## Failure policy
 
+- A successful `task_suspend` immediately creates the unique
+  `TaskSuspendGuard` owner. Explicit capture completion and unwinding `Drop`
+  share one terminal state, so a normal path calls `task_resume` once and a
+  failed suspend never decrements a suspension count owned by somebody else.
+  Snapshot and ANR capture use `SkipCapture`; fatal crash capture uses
+  `BestEffort` and records the unstable-view failure in diagnostics.
+- A failed `task_resume` is retried at most three times total (the initial call
+  plus two retries). The first success consumes the guard. If all three fail,
+  the platform attempts `task_terminate` once. Both the capture diagnostics and
+  supervisor health retain the structured failure. Containment terminates the
+  event loop with a monitor failure. The macOS process supervisor closes the
+  exception port for every containment outcome and, if task termination also
+  fails, escalates once with `SIGKILL` rather than continuing with an
+  unresponsive child.
 - If capture reaches its outer absolute deadline, or the capture thread panics
   or disconnects, the monitor discards its unfinished mutable worker state,
   creates an immutable minimum crash payload, and immediately proceeds to
