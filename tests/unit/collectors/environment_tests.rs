@@ -56,7 +56,10 @@ fn test_filters_sensitive_env_vars() {
         .env_vars
         .iter()
         .any(|(k, _)| k == "CRASH_TEST_SECRET_VALUE");
-    let has_token = env.env_vars.iter().any(|(k, _)| k == "CRASH_TEST_API_TOKEN");
+    let has_token = env
+        .env_vars
+        .iter()
+        .any(|(k, _)| k == "CRASH_TEST_API_TOKEN");
 
     assert!(has_normal, "normal env var should be captured");
     assert!(!has_secret, "SECRET env var should be filtered");
