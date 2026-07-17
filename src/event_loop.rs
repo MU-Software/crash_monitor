@@ -14,7 +14,7 @@ use crate::pipeline::worker::{
     BACKGROUND_DRAIN_DEADLINE, BackgroundFinalizeWorker, CAPTURE_DEADLINE, CRASH_FINALIZE_WAIT,
     CaptureWorker, CrashFinalization, finalize_terminated_child,
 };
-use crate::pipeline::{CrashEvent, Pipeline, ReportType, TerminationReason};
+use crate::pipeline::{CaptureOutcome, CrashEvent, Pipeline, ReportType, TerminationReason};
 use crate::shm::SharedMemory;
 use crate::watchdog::{WatchdogState, update_watchdog_state};
 
@@ -238,6 +238,28 @@ fn task_control_monitor_failure(pipeline: &Pipeline) -> Option<String> {
         .map(|failure| format!("task-control containment activated: {failure}"))
 }
 
+/// Persist the current snapshot/ANR after its task suspension has already been
+/// released or contained. A dedicated ticket avoids losing the `TaskResume`
+/// diagnostic when the event loop must stop, while keeping finalization off the
+/// task-facing capture path and bounding the wait.
+fn finalize_contained_capture(pipeline: &Arc<Pipeline>, capture: CaptureOutcome) {
+    let CaptureOutcome::Captured(captured) = capture else {
+        return;
+    };
+    let diagnostics = CrashFinalization::start(pipeline.clone(), captured).complete(
+        pipeline.clone(),
+        None,
+        BACKGROUND_DRAIN_DEADLINE,
+    );
+    if diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.report_path.as_ref())
+        .is_none()
+    {
+        eprintln!("[monitor] contained capture finalization did not produce an artifact");
+    }
+}
+
 /// The extracted event loop. Returns a typed monitor outcome.
 ///
 /// ANR detection is integrated directly: if `shm` and `anr_config` are provided,
@@ -314,10 +336,10 @@ pub fn event_loop(
                     // The Mach reply is never withheld because recovery failed.
                     // The outer process supervisor consumes MonitorFailure;
                     // if task_terminate failed it escalates once with SIGKILL.
-                    capture_worker.detach();
-                    background_worker.detach();
                     let crash_finalization = captured
                         .map(|captured| CrashFinalization::start(pipeline.clone(), captured));
+                    capture_worker.detach();
+                    background_worker.detach();
                     return EventLoopResult {
                         outcome: MonitorOutcome::MonitorFailure(message),
                         crash_finalization,
@@ -359,6 +381,7 @@ pub fn event_loop(
                     capture_worker.capture(event, task, Instant::now() + CAPTURE_DEADLINE);
                 if let Some(message) = task_control_monitor_failure(pipeline) {
                     capture_worker.detach();
+                    finalize_contained_capture(pipeline, capture);
                     background_worker.detach();
                     return EventLoopResult {
                         outcome: MonitorOutcome::MonitorFailure(message),
@@ -434,6 +457,7 @@ pub fn event_loop(
                                 );
                                 if let Some(message) = task_control_monitor_failure(pipeline) {
                                     capture_worker.detach();
+                                    finalize_contained_capture(pipeline, capture);
                                     background_worker.detach();
                                     return EventLoopResult {
                                         outcome: MonitorOutcome::MonitorFailure(message),

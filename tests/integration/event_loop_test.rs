@@ -104,6 +104,20 @@ fn read_only_report(dir: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(report.path()).unwrap()).unwrap()
 }
 
+fn assert_task_resume_diagnostic(dir: &std::path::Path) {
+    let report = read_only_report(dir);
+    let task_resume = report
+        .pointer("/_diagnostics/plugins/TaskResume")
+        .expect("TaskResume diagnostic in persisted report");
+    assert_eq!(task_resume["status"], "error");
+    assert!(
+        task_resume["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("resume attempted")),
+        "unexpected TaskResume diagnostic: {task_resume}"
+    );
+}
+
 fn exited(exit_code: i32, runtime_ms: u64) -> MonitorEvent {
     MonitorEvent::ChildTerminated(TerminationReason::Exited {
         exit_code,
@@ -976,7 +990,7 @@ fn test_resume_and_terminate_failure_becomes_monitor_failure() {
     assert_eq!(platform.resume_count(), RESUME_ATTEMPT_LIMIT);
     assert_eq!(platform.terminate_count(), 1);
     assert!(platform.supervisor_health().requires_escalation());
-    assert_no_artifacts(tempdir.path());
+    assert_task_resume_diagnostic(tempdir.path());
 }
 
 #[test]
@@ -1018,7 +1032,7 @@ fn test_bounded_resume_failure_and_task_termination_stops_monitoring() {
     assert_eq!(platform.resume_count(), RESUME_ATTEMPT_LIMIT);
     assert_eq!(platform.terminate_count(), 1);
     assert!(!platform.supervisor_health().requires_escalation());
-    assert_no_artifacts(tempdir.path());
+    assert_task_resume_diagnostic(tempdir.path());
 }
 
 #[test]
@@ -1050,7 +1064,7 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
     }]);
     let reply_count = AtomicUsize::new(0);
 
-    let result = event_loop(
+    let mut result = event_loop(
         &mut source,
         &pipeline,
         123,
@@ -1069,9 +1083,10 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
     assert!(matches!(&result.outcome, MonitorOutcome::MonitorFailure(_)));
     let diagnostics = result
         .crash_finalization
+        .take()
         .expect("fatal containment preserves captured diagnostics")
         .complete(
-            pipeline,
+            pipeline.clone(),
             Some(TerminationReason::Signaled {
                 signal: 9,
                 core_dumped: false,
@@ -1084,6 +1099,12 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
         entry.name == "TaskResume" && matches!(entry.status, PluginStatus::Error(_))
     }));
     assert!(diagnostics.report_path.is_some());
+    result.outcome = result
+        .outcome
+        .with_crash_result(None, diagnostics.report_path.clone());
+    assert!(matches!(result.outcome, MonitorOutcome::MonitorFailure(_)));
+    assert_eq!(result.exit_code(), EXIT_MONITOR_INTERNAL);
+    assert_task_resume_diagnostic(tempdir.path());
 }
 
 #[test]

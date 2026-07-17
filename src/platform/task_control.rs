@@ -35,6 +35,7 @@ pub enum TaskRecoveryAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskControlFailure {
     pub task: mach_port_t,
+    /// Total `resume_task` calls, including the call that eventually succeeded.
     pub resume_attempts: usize,
     pub resume_errors: Vec<String>,
     pub recovery: TaskRecoveryAction,
@@ -61,7 +62,7 @@ impl fmt::Display for TaskControlFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "task {} resume failed {} time(s); recovery={:?}",
+            "task {} resume attempted {} time(s); recovery={:?}",
             self.task, self.resume_attempts, self.recovery
         )?;
         if let Some(error) = self.resume_errors.last() {
@@ -172,11 +173,18 @@ impl TaskSuspendGuard {
         self.active = false;
 
         let mut resume_errors = Vec::with_capacity(RESUME_ATTEMPT_LIMIT);
+        let mut resume_attempts = 0;
         for _ in 0..RESUME_ATTEMPT_LIMIT {
+            resume_attempts += 1;
             match self.platform.resume_task(self.task) {
                 Ok(()) => {
                     if !resume_errors.is_empty() {
-                        self.record_failure(resume_errors, TaskRecoveryAction::Resumed, None);
+                        self.record_failure(
+                            resume_attempts,
+                            resume_errors,
+                            TaskRecoveryAction::Resumed,
+                            None,
+                        );
                     }
                     return;
                 }
@@ -185,8 +193,14 @@ impl TaskSuspendGuard {
         }
 
         match self.platform.terminate_task(self.task) {
-            Ok(()) => self.record_failure(resume_errors, TaskRecoveryAction::Terminated, None),
+            Ok(()) => self.record_failure(
+                resume_attempts,
+                resume_errors,
+                TaskRecoveryAction::Terminated,
+                None,
+            ),
             Err(error) => self.record_failure(
+                resume_attempts,
                 resume_errors,
                 TaskRecoveryAction::EscalationRequired,
                 Some(error),
@@ -196,13 +210,14 @@ impl TaskSuspendGuard {
 
     fn record_failure(
         &self,
+        resume_attempts: usize,
         resume_errors: Vec<String>,
         recovery: TaskRecoveryAction,
         termination_error: Option<String>,
     ) {
         let failure = TaskControlFailure {
             task: self.task,
-            resume_attempts: resume_errors.len(),
+            resume_attempts,
             resume_errors,
             recovery,
             termination_error,
@@ -346,6 +361,7 @@ mod tests {
         assert_eq!(diagnostics.plugins.len(), 1);
         let health = platform.supervisor_health();
         assert_eq!(health.task_control_failures.len(), 1);
+        assert_eq!(health.task_control_failures[0].resume_attempts, 2);
         assert_eq!(
             health.task_control_failures[0].recovery,
             TaskRecoveryAction::Resumed

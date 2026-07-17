@@ -176,6 +176,98 @@ fn wait_for_child_termination(
     }
 }
 
+const CRASH_REAP_GRACE_DEADLINE: Duration = Duration::from_secs(3);
+const CRASH_REAP_AFTER_KILL_DEADLINE: Duration = Duration::from_secs(1);
+const CRASH_REAP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+struct CrashReapDeadlines {
+    before_sigkill: Duration,
+    after_sigkill: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildPoll {
+    Running,
+    Interrupted,
+    Terminated(pipeline::TerminationReason),
+}
+
+fn poll_child_after_crash_once(
+    child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
+) -> Result<ChildPoll, String> {
+    match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+        Ok(status) => Ok(event_source::termination_from_wait_status(
+            status,
+            child_started_at.elapsed(),
+        )
+        .map_or(ChildPoll::Running, ChildPoll::Terminated)),
+        Err(nix::errno::Errno::EINTR) => Ok(ChildPoll::Interrupted),
+        Err(error) => Err(format!("waitpid after crash failed: {error}")),
+    }
+}
+
+fn poll_until_deadline<P, N, S>(
+    poll: &mut P,
+    deadline: Instant,
+    now: &mut N,
+    sleep: &mut S,
+) -> Result<Option<pipeline::TerminationReason>, String>
+where
+    P: FnMut() -> Result<ChildPoll, String>,
+    N: FnMut() -> Instant,
+    S: FnMut(Duration),
+{
+    loop {
+        match poll()? {
+            ChildPoll::Terminated(reason) => return Ok(Some(reason)),
+            ChildPoll::Running | ChildPoll::Interrupted => {}
+        }
+
+        let current = now();
+        if current >= deadline {
+            return Ok(None);
+        }
+        sleep(CRASH_REAP_POLL_INTERVAL.min(deadline.saturating_duration_since(current)));
+    }
+}
+
+fn reap_after_detected_crash_with<P, K, N, S>(
+    sigkill_already_sent: bool,
+    deadlines: CrashReapDeadlines,
+    mut poll: P,
+    mut send_sigkill: K,
+    mut now: N,
+    mut sleep: S,
+) -> Result<pipeline::TerminationReason, String>
+where
+    P: FnMut() -> Result<ChildPoll, String>,
+    K: FnMut() -> Result<(), String>,
+    N: FnMut() -> Instant,
+    S: FnMut(Duration),
+{
+    if !sigkill_already_sent {
+        let deadline = now() + deadlines.before_sigkill;
+        if let Some(reason) = poll_until_deadline(&mut poll, deadline, &mut now, &mut sleep)? {
+            return Ok(reason);
+        }
+
+        eprintln!("[monitor] Child still alive after crash grace period, sending SIGKILL");
+        send_sigkill()?;
+    }
+
+    let deadline = now() + deadlines.after_sigkill;
+    if let Some(reason) = poll_until_deadline(&mut poll, deadline, &mut now, &mut sleep)? {
+        return Ok(reason);
+    }
+
+    Err(format!(
+        "child did not terminate within {}ms after SIGKILL",
+        deadlines.after_sigkill.as_millis()
+    ))
+}
+
 /// Obtain the child's task port while also observing child termination during
 /// startup. This replaces the old 50ms heuristic: `posix_spawn` errors are exec
 /// setup failures, while every successfully spawned fast exit is a real child
@@ -211,30 +303,22 @@ fn acquire_task_port_or_termination(
 fn reap_after_detected_crash(
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
+    sigkill_already_sent: bool,
 ) -> Result<pipeline::TerminationReason, String> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
-            Ok(status) => {
-                if let Some(reason) =
-                    event_source::termination_from_wait_status(status, child_started_at.elapsed())
-                {
-                    return Ok(reason);
-                }
-            }
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => return Err(format!("waitpid after crash failed: {e}")),
-        }
-
-        if Instant::now() >= deadline {
-            eprintln!("[monitor] Child still alive after 3s, sending SIGKILL");
+    reap_after_detected_crash_with(
+        sigkill_already_sent,
+        CrashReapDeadlines {
+            before_sigkill: CRASH_REAP_GRACE_DEADLINE,
+            after_sigkill: CRASH_REAP_AFTER_KILL_DEADLINE,
+        },
+        || poll_child_after_crash_once(child_pid, child_started_at),
+        || {
             nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL)
-                .map_err(|e| format!("failed to kill child after crash: {e}"))?;
-            return wait_for_child_termination(child_pid, child_started_at)
-                .map_err(|e| format!("waitpid after SIGKILL failed: {e}"));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+                .map_err(|error| format!("failed to kill child after crash: {error}"))
+        },
+        Instant::now,
+        std::thread::sleep,
+    )
 }
 
 // ═══════════════════════════════════════════════════
@@ -464,27 +548,35 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // could not be resumed. If that Mach operation also failed, escalate once
     // through the process supervisor. Do not block indefinitely waiting for a
     // process whose task-control state is already unreliable.
-    if task_control_escalation {
+    let supervisor_sigkill_sent = if task_control_escalation {
         eprintln!("[monitor] task-control recovery exhausted; sending SIGKILL to child");
-        if let Err(error) = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL) {
-            eprintln!("[monitor] supervisor SIGKILL escalation failed: {error}");
+        match nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[monitor] supervisor SIGKILL escalation failed: {error}");
+                false
+            }
         }
-    }
+    } else {
+        false
+    };
 
-    // Wait for a crashed or task-control-contained child and retain its raw
-    // status. Fatal report finalization starts only after this handoff, so JSON
-    // and ZIP contain the terminal status from their first write.
+    // Wait for every crashed or task-control-contained child with finite
+    // pre/post-SIGKILL deadlines. A fatal ticket is consumed even when the
+    // public outcome remains MonitorFailure, preserving captured evidence and
+    // TaskResume diagnostics without allowing reaping to block forever.
     if must_reap_child {
-        let termination = match reap_after_detected_crash(child_pid, child_started_at) {
-            Ok(reason) => {
-                eprintln!("[monitor] Contained child terminated: {reason:?}");
-                Some(reason)
-            }
-            Err(e) => {
-                eprintln!("[monitor] {e}");
-                None
-            }
-        };
+        let termination =
+            match reap_after_detected_crash(child_pid, child_started_at, supervisor_sigkill_sent) {
+                Ok(reason) => {
+                    eprintln!("[monitor] Contained child terminated: {reason:?}");
+                    Some(reason)
+                }
+                Err(e) => {
+                    eprintln!("[monitor] {e}");
+                    None
+                }
+            };
 
         let report_expected = crash_finalization.is_some();
         let report_path = crash_finalization.take().and_then(|finalization| {
@@ -499,9 +591,9 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         if report_expected && report_path.is_none() {
             eprintln!("[monitor] Fatal report finalization did not produce an artifact");
         }
-        if detected_crash {
-            outcome = outcome.with_crash_result(termination, report_path);
-        }
+        // This enriches DetectedCrash but deliberately leaves MonitorFailure
+        // unchanged, preserving the supervisor-facing containment exit code.
+        outcome = outcome.with_crash_result(termination, report_path);
     }
 
     outcome.exit_code()
@@ -539,4 +631,120 @@ fn main() {
     };
 
     std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::collections::VecDeque;
+
+    const TEST_REAP_DEADLINE: Duration = Duration::from_millis(10);
+
+    fn exited_reason() -> pipeline::TerminationReason {
+        pipeline::TerminationReason::Exited {
+            exit_code: 23,
+            runtime_ms: 17,
+        }
+    }
+
+    fn signaled_reason() -> pipeline::TerminationReason {
+        pipeline::TerminationReason::Signaled {
+            signal: 9,
+            core_dumped: false,
+            runtime_ms: 29,
+        }
+    }
+
+    #[test]
+    fn crash_reap_returns_pre_kill_termination_without_sigkill() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut polls =
+            VecDeque::from([ChildPoll::Running, ChildPoll::Terminated(exited_reason())]);
+        let mut sigkill_count = 0;
+
+        let reason = reap_after_detected_crash_with(
+            false,
+            CrashReapDeadlines {
+                before_sigkill: TEST_REAP_DEADLINE,
+                after_sigkill: TEST_REAP_DEADLINE,
+            },
+            || Ok(polls.pop_front().unwrap_or(ChildPoll::Running)),
+            || {
+                sigkill_count += 1;
+                Ok(())
+            },
+            || base + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .expect("child should be reaped during the pre-kill grace period");
+
+        assert_eq!(reason, exited_reason());
+        assert_eq!(sigkill_count, 0);
+    }
+
+    #[test]
+    fn crash_reap_returns_post_kill_termination() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut polls = VecDeque::from([
+            ChildPoll::Running,
+            ChildPoll::Running,
+            ChildPoll::Interrupted,
+            ChildPoll::Terminated(signaled_reason()),
+        ]);
+        let mut sigkill_count = 0;
+
+        let reason = reap_after_detected_crash_with(
+            false,
+            CrashReapDeadlines {
+                before_sigkill: TEST_REAP_DEADLINE,
+                after_sigkill: TEST_REAP_DEADLINE,
+            },
+            || Ok(polls.pop_front().unwrap_or(ChildPoll::Running)),
+            || {
+                sigkill_count += 1;
+                Ok(())
+            },
+            || base + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .expect("child should be reaped during the post-kill deadline");
+
+        assert_eq!(reason, signaled_reason());
+        assert_eq!(sigkill_count, 1);
+    }
+
+    #[test]
+    fn crash_reap_bounds_repeated_eintr_after_an_existing_sigkill() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut poll_count = 0;
+        let mut sigkill_count = 0;
+
+        let error = reap_after_detected_crash_with(
+            true,
+            CrashReapDeadlines {
+                before_sigkill: Duration::from_secs(30),
+                after_sigkill: TEST_REAP_DEADLINE,
+            },
+            || {
+                poll_count += 1;
+                Ok(ChildPoll::Interrupted)
+            },
+            || {
+                sigkill_count += 1;
+                Ok(())
+            },
+            || base + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .expect_err("post-kill EINTR must time out instead of blocking");
+
+        assert!(error.contains("after SIGKILL"));
+        assert_eq!(elapsed.get(), TEST_REAP_DEADLINE);
+        assert_eq!(poll_count, 2);
+        assert_eq!(sigkill_count, 0);
+    }
 }
