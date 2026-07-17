@@ -32,7 +32,7 @@ const DEFAULT_DATA_DIR_NAME: &str = match option_env!("CRASH_MONITOR_DATA_DIR_NA
 
 /// Base directory for crash reporter data: `$CRASH_MONITOR_DATA_DIR` if set,
 /// else `~/.crash_monitor/`.
-pub fn data_dir() -> Result<PathBuf, String> {
+pub fn data_dir_path() -> Result<PathBuf, String> {
     let dir = if let Ok(override_path) = std::env::var(DATA_DIR_OVERRIDE_ENV) {
         if override_path.is_empty() {
             return Err(format!("{DATA_DIR_OVERRIDE_ENV} is set but empty"));
@@ -42,8 +42,20 @@ pub fn data_dir() -> Result<PathBuf, String> {
         let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
         PathBuf::from(home).join(DEFAULT_DATA_DIR_NAME)
     };
+    Ok(dir)
+}
+
+pub fn data_dir() -> Result<PathBuf, String> {
+    let dir = data_dir_path()?;
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create data dir: {e}"))?;
     Ok(dir)
+}
+
+/// Resolve the pending report root without touching the filesystem. Capture
+/// paths use this pure helper so directory I/O cannot extend task suspension
+/// or the Mach exception reply deadline.
+pub fn pending_dir_path() -> Result<PathBuf, String> {
+    Ok(data_dir_path()?.join("crashes").join("pending"))
 }
 
 /// Working directory for in-flight reports: `<data_dir>/crashes/pending/`.
@@ -51,7 +63,7 @@ pub fn data_dir() -> Result<PathBuf, String> {
 /// files here. The `MoveToSent` post-processor relocates finished reports
 /// to `sent_dir()`.
 pub fn pending_dir() -> Result<PathBuf, String> {
-    let dir = data_dir()?.join("crashes").join("pending");
+    let dir = pending_dir_path()?;
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create pending dir: {e}"))?;
     Ok(dir)
 }

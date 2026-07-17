@@ -31,8 +31,18 @@ impl PostProcessor for RawCleanup {
             && let Some(raw) = result.raw_path.clone()
         {
             match fs::remove_file(&raw) {
-                Ok(()) => result.raw_path = None,
+                Ok(()) => {
+                    if let Some(transaction) = context.artifact_transaction() {
+                        transaction.unregister_file(&raw)?;
+                    }
+                    result.artifact_paths.retain(|path| path != &raw);
+                    result.raw_path = None;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(transaction) = context.artifact_transaction() {
+                        transaction.unregister_file(&raw)?;
+                    }
+                    result.artifact_paths.retain(|path| path != &raw);
                     result.raw_path = None;
                 }
                 Err(error) => {

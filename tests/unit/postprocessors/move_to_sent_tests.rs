@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 fn make_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,
@@ -22,6 +23,7 @@ fn make_event() -> CrashEvent {
 
 fn make_result(json_path: PathBuf, raw_path: Option<PathBuf>) -> ReportResult {
     ReportResult {
+        artifact_paths: Vec::new(),
         raw_path,
         json_path: Some(json_path),
         session: None,
@@ -44,7 +46,7 @@ fn write_report_family(pending: &std::path::Path, stem: &str) -> Vec<PathBuf> {
 }
 
 #[test]
-fn test_moves_all_basename_prefixed_files() {
+fn test_moves_only_exact_registered_artifacts() {
     let tmp = tempfile::tempdir().unwrap();
     let pending = tmp.path().join("pending");
     let sent = tmp.path().join("sent");
@@ -52,6 +54,7 @@ fn test_moves_all_basename_prefixed_files() {
     let paths = write_report_family(&pending, "crash_20260524_1234");
     let mover = MoveToSent::with_dir(sent.clone());
     let mut result = make_result(paths[0].clone(), Some(paths[1].clone()));
+    result.artifact_paths = paths.clone();
     mover
         .process(
             &make_event(),
@@ -148,6 +151,7 @@ fn test_avoids_partial_prefix_collision() {
 fn test_no_json_path_is_noop() {
     let mover = MoveToSent::with_dir(std::env::temp_dir().join("never"));
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: None,
         session: None,

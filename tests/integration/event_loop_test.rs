@@ -5,7 +5,7 @@
 //! `cargo llvm-cov` to instrument all code paths.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -121,12 +121,52 @@ fn publish_anr_readiness(shm: &SharedMemory, heartbeat_value: u64) {
     ready.store(SHM_PRODUCER_READY, Ordering::Release);
 }
 
-fn count_json_files(dir: &std::path::Path) -> usize {
-    std::fs::read_dir(dir)
+fn committed_report_dirs(dir: &Path) -> Vec<PathBuf> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+
+    let mut reports = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .count()
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !file_type.is_dir() || name.starts_with('.') {
+                return None;
+            }
+
+            let report_dir = entry.path();
+            let manifest_path = report_dir.join("manifest.json");
+            let manifest = crash_monitor::pipeline::load_manifest(&manifest_path).ok()?;
+            (manifest.report_id.as_str() == name).then_some(report_dir)
+        })
+        .collect::<Vec<_>>();
+    reports.sort();
+    reports
+}
+
+fn committed_report_json_paths(dir: &Path) -> Vec<PathBuf> {
+    let mut reports = committed_report_dirs(dir)
+        .into_iter()
+        .filter_map(|report_dir| {
+            let manifest =
+                crash_monitor::pipeline::load_manifest(&report_dir.join("manifest.json")).ok()?;
+            let artifact = manifest.artifacts.into_iter().find(|artifact| {
+                artifact.kind == crash_monitor::pipeline::ArtifactKind::Report
+                    && artifact.path == "report.json"
+            })?;
+            let report_path = report_dir.join(artifact.path);
+            report_path.is_file().then_some(report_path)
+        })
+        .collect::<Vec<_>>();
+    reports.sort();
+    reports
+}
+
+fn count_json_files(dir: &Path) -> usize {
+    committed_report_json_paths(dir).len()
 }
 
 fn assert_no_artifacts(dir: &std::path::Path) {
@@ -141,22 +181,16 @@ fn assert_no_artifacts(dir: &std::path::Path) {
     );
 }
 
-fn read_only_report(dir: &std::path::Path) -> serde_json::Value {
-    let mut reports = std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"));
-    let report = reports.next().expect("one JSON report");
-    assert!(reports.next().is_none(), "expected exactly one JSON report");
-    serde_json::from_slice(&std::fs::read(report.path()).unwrap()).unwrap()
+fn read_only_report(dir: &Path) -> serde_json::Value {
+    let reports = committed_report_json_paths(dir);
+    assert_eq!(reports.len(), 1, "expected exactly one committed report");
+    serde_json::from_slice(&std::fs::read(&reports[0]).unwrap()).unwrap()
 }
 
 fn read_all_reports(dir: &std::path::Path) -> Vec<serde_json::Value> {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
+    committed_report_json_paths(dir)
+        .into_iter()
+        .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .collect()
 }
 
@@ -210,6 +244,7 @@ fn report_event(report_type: crash_monitor::pipeline::ReportType) -> CrashEvent 
         ReportType::Crash | ReportType::Snapshot | ReportType::Anr => None,
     };
     CrashEvent {
+        report_id: Default::default(),
         report_type,
         exception_type: (report_type == ReportType::Crash).then_some(1),
         exception_code: (report_type == ReportType::Crash).then_some(0xDEAD),
@@ -1736,14 +1771,8 @@ fn test_sigkill_produces_oom_report_when_enabled() {
         "OOM detection on: SIGKILL should produce one report"
     );
 
-    // Verify the report is tagged as OOM with sigkill trigger.
-    let json_path = std::fs::read_dir(tempdir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .expect("OOM report file");
-    let bytes = std::fs::read(json_path.path()).unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // Verify the committed report is tagged as OOM with sigkill trigger.
+    let v = read_only_report(tempdir.path());
     assert_eq!(v["header"]["type"], "oom");
     assert_eq!(v["header"]["trigger"], "sigkill");
     assert_eq!(v["termination"]["signal"], 9);
@@ -1945,6 +1974,70 @@ fn test_monitor_failure_has_separate_exit_namespace() {
 }
 
 #[test]
+fn test_startup_recovers_valid_prepared_sent_report_without_exposing_partial_entries() {
+    use crash_monitor::pipeline::{ArtifactKind, ArtifactTransaction, ReportContext, ReportType};
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let pending = tempdir.path().join("pending");
+    let sent = tempdir.path().join("sent");
+    let event = report_event(ReportType::Snapshot);
+    let report_id = event.report_id.clone();
+
+    // Build a fully valid transaction, then move it back to its prepared name
+    // to simulate termination after manifest fsync but before final publish.
+    let transaction = ArtifactTransaction::begin(ReportContext::new(&event, &pending)).unwrap();
+    transaction.set_destination_root(&sent).unwrap();
+    transaction
+        .write_bytes("report.json", ArtifactKind::Report, b"{}")
+        .unwrap();
+    let committed = transaction.commit().unwrap();
+    let prepared = pending.join(format!(".report-{report_id}.pending"));
+    std::fs::rename(&committed.report_dir, &prepared).unwrap();
+    drop(transaction);
+
+    let malformed = pending.join(format!(".report-{}.pending", "0".repeat(32)));
+    std::fs::create_dir(&malformed).unwrap();
+    std::fs::write(malformed.join("manifest.json"), b"not-json").unwrap();
+    let partial = pending.join(format!(".report-{}.pending", "1".repeat(32)));
+    std::fs::create_dir(&partial).unwrap();
+    std::fs::write(partial.join("report.json"), b"partial").unwrap();
+
+    let pipeline = make_test_pipeline(&pending);
+    assert_eq!(
+        pipeline.recover_prepared_artifacts().unwrap(),
+        1,
+        "monitor startup must recover the one manifest-complete transaction"
+    );
+    let mut source = TestEventSource::new(vec![exited(0, 1)]);
+    let outcome = event_loop(
+        &mut source,
+        &pipeline,
+        0,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert_eq!(
+        outcome.exit_code(),
+        0,
+        "malformed recovery entry must not stop the loop"
+    );
+    let recovered = sent.join(report_id.as_str());
+    assert!(recovered.join("manifest.json").is_file());
+    assert!(recovered.join("report.json").is_file());
+    assert_eq!(committed_report_dirs(&sent), vec![recovered]);
+    assert!(
+        committed_report_dirs(&pending).is_empty(),
+        "hidden malformed or partial entries must never be visible as reports"
+    );
+    assert!(malformed.exists());
+    assert!(partial.exists());
+}
+
+#[test]
 fn test_multiple_snapshots_before_exit() {
     let tempdir = tempfile::tempdir().unwrap();
     let pipeline = make_test_pipeline(tempdir.path());
@@ -1967,9 +2060,32 @@ fn test_multiple_snapshots_before_exit() {
     );
     assert_eq!(outcome.exit_code(), 0);
 
-    let json_count = count_json_files(tempdir.path());
-    assert!(
-        json_count >= 1,
-        "Should produce at least 1 snapshot report, got {json_count}"
+    let report_dirs = committed_report_dirs(tempdir.path());
+    assert_eq!(
+        report_dirs.len(),
+        2,
+        "each trigger must publish its own committed report directory"
+    );
+    assert_eq!(count_json_files(tempdir.path()), 2);
+
+    let mut report_ids = report_dirs
+        .iter()
+        .map(|report_dir| {
+            let manifest =
+                crash_monitor::pipeline::load_manifest(&report_dir.join("manifest.json")).unwrap();
+            assert_eq!(
+                manifest.report_type,
+                crash_monitor::pipeline::ReportType::Snapshot
+            );
+            assert!(report_dir.join("report.json").is_file());
+            manifest.report_id.to_string()
+        })
+        .collect::<Vec<_>>();
+    report_ids.sort();
+    report_ids.dedup();
+    assert_eq!(
+        report_ids.len(),
+        2,
+        "each trigger must retain a distinct ReportId"
     );
 }

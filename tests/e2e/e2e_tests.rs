@@ -14,6 +14,7 @@
 //! Each test uses its own temporary directory via `CRASH_MONITOR_DATA_DIR` so that
 //! tests can run in parallel without interfering with each other.
 
+use crash_monitor::pipeline::{ArtifactKind, load_manifest};
 use crash_monitor::shm::{SHM_TOTAL_SIZE, SHM_VERSION, SharedMemory, ShmHeader};
 use std::io::Read;
 use std::mem::{offset_of, size_of};
@@ -86,8 +87,9 @@ fn archive_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("crashes/sent")
 }
 
-/// List report files in the sent directory matching a prefix.
-/// Accepts both `.json` (raw) and `.zip` (archived by `ZIPArchiver`).
+/// List committed reports in the sent directory matching the legacy type
+/// prefix used by these assertions. Each transaction contributes at most one
+/// path, preferring its manifest-registered ZIP over its report JSON.
 fn find_reports(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     if !dir.exists() {
         return vec![];
@@ -95,13 +97,34 @@ fn find_reports(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     let mut reports: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|ext| ext == "json" || ext == "zip")
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(prefix))
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            let directory_name = entry.file_name();
+            let directory_name = directory_name.to_str()?;
+            if !file_type.is_dir() || directory_name.starts_with('.') {
+                return None;
+            }
+
+            let report_dir = entry.path();
+            let manifest = load_manifest(&report_dir.join("manifest.json")).ok()?;
+            if manifest.report_id.as_str() != directory_name {
+                return None;
+            }
+            let type_prefix = format!("{}_", manifest.report_type.as_str());
+            if !prefix.is_empty() && prefix != type_prefix {
+                return None;
+            }
+
+            let artifact_path = |kind, expected_name: &str| {
+                manifest
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == kind && artifact.path == expected_name)
+                    .map(|artifact| report_dir.join(&artifact.path))
+                    .filter(|path| path.is_file())
+            };
+            artifact_path(ArtifactKind::Archive, "report.zip")
+                .or_else(|| artifact_path(ArtifactKind::Report, "report.json"))
         })
         .collect();
     reports.sort();

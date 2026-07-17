@@ -16,13 +16,30 @@
 Finished reports are written under the data directory:
 
 ```
-<data-dir>/crashes/pending/<type>_<timestamp>_<pid>.json   # freshly written
-<data-dir>/crashes/sent/                                    # after post-processing
+<data-dir>/crashes/pending/.report-<report-id>.pending/  # hidden transaction
+<data-dir>/crashes/pending/<report-id>/                  # committed if move is disabled
+<data-dir>/crashes/sent/<report-id>/                     # normal final location
+  manifest.json
+  report.json or report.zip
 ```
 
 The default data directory is `~/.crash_monitor`; see
 [integration.md](integration.md) for overriding it. Post-processors may archive
-finished reports to `sent/` and prune it by count / size / age.
+the exact registered artifact set into `report.zip`. Retention counts, sizes,
+and deletes whole committed report directories rather than filename families.
+
+The trigger allocates one UUID `ReportId`, preserved through capture,
+finalization, the report header, manifest, session record, and notifier. Files
+are written through same-directory temporary files and synced. `manifest.json`
+is written and synced last, then the complete hidden directory is published by
+one atomic rename. Readers treat only a non-hidden `<report-id>/` directory
+with a valid exact manifest as committed.
+
+At monitor startup, a hidden transaction that already has a complete synced
+manifest is recovered to the destination recorded in that manifest. A partial
+transaction without a manifest remains hidden and is never returned as a
+report. This also makes same-PID, same-type events in the same second distinct;
+timestamps are metadata, not artifact identity.
 
 ## JSON shape
 
@@ -31,7 +48,7 @@ ran, but the top-level shape is:
 
 ```jsonc
 {
-  "header":        { "version", "timestamp", "pid", "process", "type", "collector" },
+  "header":        { "version", "report_id", "timestamp", "pid", "process", "type", "collector" },
   "termination":   { "kind": "exited", "exit_code", "runtime_ms" },
   "exception":     { "type", "code", "subcode", "raw_codes": ["0x…", …], "signal", "fault_address" },
   "crash_context": { "annotations": { "<key>": "<value>", … } },   // app state, generic KV

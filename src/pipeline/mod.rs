@@ -2,6 +2,7 @@
 //!
 //! Design: `docs/plans/crash_reporter.md` L1493-1867
 
+pub mod artifact;
 pub mod report;
 pub mod safety;
 pub mod traits;
@@ -18,12 +19,17 @@ use crate::platform::{
     PlatformOps, SuspendFailurePolicy, TaskControlFailureSink, TaskSuspendGuard,
 };
 
+pub use artifact::{
+    ArtifactKind, ArtifactTransaction, CommittedReport, ReportContext, ReportId, ReportManifest,
+    load_manifest, recover_prepared_reports,
+};
 pub use safety::{
     CancellationToken, PluginContext, PluginRunResult, SubprocessOutput,
     run_plugin_catching_panics, run_plugin_cooperative, run_plugin_subprocess,
 };
 pub use traits::{
-    Collector, Filter, Notifier, Plugin, PluginExecution, PostProcessor, PreProcessor,
+    Collector, Filter, Notifier, Plugin, PluginExecution, PostProcessor, PostProcessorPhase,
+    PreProcessor,
 };
 pub use types::{
     CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, DependencyKind,
@@ -122,6 +128,7 @@ const POSTPROC_TIMEOUT: u32 = 30;
 const NOTIFIER_TIMEOUT: u32 = 5;
 const STAGE_TIMEOUT: u32 = 5;
 
+#[cfg(test)]
 fn run_stage<T>(
     name: &str,
     execution: PluginExecution,
@@ -138,17 +145,37 @@ fn run_stage<T>(
     )
 }
 
+fn run_transaction_stage<T>(
+    transaction: &Arc<ArtifactTransaction>,
+    name: &str,
+    execution: PluginExecution,
+    timeout_secs: u32,
+    f: impl FnOnce(&PluginContext) -> Result<T, String>,
+) -> PluginRunResult<T> {
+    let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
+    let context =
+        PluginContext::from_timeout(timeout).with_artifact_transaction(transaction.clone());
+    enforce_execution_boundary(
+        name,
+        execution,
+        &context,
+        run_plugin_cooperative(name, &context, f),
+    )
+}
+
 fn run_cancellable_stage<T>(
     name: &str,
     execution: PluginExecution,
     timeout_secs: u32,
     cancellation: CancellationToken,
     shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
+    report_context: Arc<ReportContext>,
     f: impl FnOnce(&PluginContext) -> Result<T, String>,
 ) -> PluginRunResult<T> {
     let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
     let context = PluginContext::from_timeout_and_cancellation(timeout, cancellation)
-        .with_shm_snapshot(shm_snapshot);
+        .with_shm_snapshot(shm_snapshot)
+        .with_report_context(report_context);
     enforce_execution_boundary(
         name,
         execution,
@@ -200,6 +227,37 @@ fn suspend_failure_policy(event: &CrashEvent) -> SuspendFailurePolicy {
 }
 
 impl Pipeline {
+    fn resolved_output_root(&self) -> Result<PathBuf, String> {
+        self.output_dir
+            .clone()
+            .map_or_else(crate::utils::paths::pending_dir_path, Ok)
+    }
+
+    /// Recover manifest-complete transactions once during monitor startup.
+    /// This must not run from per-event finalizers because doing so could race
+    /// another live transaction between manifest prepare and directory publish.
+    ///
+    /// # Errors
+    /// Returns an error if the output root cannot be resolved or safely
+    /// scanned for prepared transactions.
+    pub fn recover_prepared_artifacts(&self) -> Result<usize, String> {
+        if !self.enabled {
+            return Ok(0);
+        }
+        let output_root = self.resolved_output_root()?;
+        recover_prepared_reports(&output_root)
+    }
+
+    pub(super) fn create_report_context(
+        &self,
+        event: &CrashEvent,
+    ) -> Result<Arc<ReportContext>, String> {
+        Ok(Arc::new(ReportContext::new(
+            event,
+            &self.resolved_output_root()?,
+        )))
+    }
+
     /// Return whether this pipeline may process the given report type.
     ///
     /// The global switch is always checked first and has no exception path.
@@ -249,7 +307,7 @@ impl Pipeline {
             return Diagnostics::new();
         }
         match self.capture_event(event, task) {
-            CaptureOutcome::Captured(captured) => self.finalize_captured(captured),
+            CaptureOutcome::Captured(captured) => self.finalize_captured(*captured),
             CaptureOutcome::Skipped(diagnostics) => diagnostics,
         }
     }
@@ -259,6 +317,14 @@ impl Pipeline {
         if !self.report_enabled(event.report_type) {
             return CaptureOutcome::Skipped(Diagnostics::new());
         }
+        let report_context = match self.create_report_context(event) {
+            Ok(context) => context,
+            Err(error) => {
+                let mut diagnostics = Diagnostics::new();
+                diagnostics.record_immediate("ReportContext", PluginStatus::Error(error));
+                return CaptureOutcome::Skipped(diagnostics);
+            }
+        };
         let mut diagnostics = Diagnostics::new();
         let failure_sink = TaskControlFailureSink::new();
         let suspend_guard = match TaskSuspendGuard::acquire(
@@ -302,7 +368,13 @@ impl Pipeline {
         };
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        let mut payload = self.collect_snapshot(event, task, &cancelled, shm_snapshot.as_ref());
+        let mut payload = self.collect_snapshot(
+            event,
+            task,
+            &cancelled,
+            shm_snapshot.as_ref(),
+            &report_context,
+        );
 
         if let Some(guard) = suspend_guard {
             guard.finish();
@@ -310,14 +382,15 @@ impl Pipeline {
         failure_sink.drain_into(&mut payload.diagnostics);
 
         diagnostics.plugins.append(&mut payload.diagnostics.plugins);
-        CaptureOutcome::Captured(CapturedEvent::new(
+        CaptureOutcome::Captured(Box::new(CapturedEvent::with_report_context(
             event.clone(),
+            report_context,
             CapturePayload {
                 data: payload.data,
                 raw_shm: payload.raw_shm,
                 diagnostics,
             },
-        ))
+        )))
     }
 
     /// Collect only data that requires access to the live task.
@@ -330,6 +403,7 @@ impl Pipeline {
         task: mach_port_t,
         cancelled: &Arc<AtomicBool>,
         shm_snapshot: Option<&Arc<crate::shm::OwnedShmSnapshot>>,
+        report_context: &Arc<ReportContext>,
     ) -> CapturePayload {
         if !self.report_enabled(event.report_type) {
             return CapturePayload {
@@ -366,6 +440,7 @@ impl Pipeline {
                 timeout,
                 cancellation,
                 shm_snapshot.cloned(),
+                report_context.clone(),
                 |context| c.collect(event, task, &mut data, context),
             );
             let status = plugin_status(&outcome);
@@ -398,8 +473,9 @@ impl Pipeline {
         task: mach_port_t,
         cancelled: &Arc<AtomicBool>,
         shm_snapshot: Option<&Arc<crate::shm::OwnedShmSnapshot>>,
+        report_context: &Arc<ReportContext>,
     ) -> CapturePayload {
-        self.collect_snapshot(event, task, cancelled, shm_snapshot)
+        self.collect_snapshot(event, task, cancelled, shm_snapshot, report_context)
     }
 
     pub(super) fn finalize_captured_for_worker(&self, captured: CapturedEvent) -> Diagnostics {
@@ -412,19 +488,32 @@ impl Pipeline {
         if !self.report_enabled(captured.event.report_type) {
             return Diagnostics::new();
         }
+        let report_context = captured.report_context.take();
         let event = &captured.event;
         let data = &mut captured.data;
         let diagnostics = &mut captured.diagnostics;
 
-        let pending = match &self.output_dir {
-            Some(dir) => dir.clone(),
-            None => match crate::utils::paths::pending_dir() {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("[monitor] Failed to get pending dir: {e}");
-                    return std::mem::take(diagnostics);
-                }
-            },
+        let report_context = if let Some(report_context) = report_context {
+            report_context
+        } else {
+            let pending = match &self.output_dir {
+                Some(dir) => dir.clone(),
+                None => match crate::utils::paths::pending_dir() {
+                    Ok(dir) => dir,
+                    Err(error) => {
+                        eprintln!("[monitor] Failed to get pending dir: {error}");
+                        return std::mem::take(diagnostics);
+                    }
+                },
+            };
+            Arc::new(ReportContext::new(event, &pending))
+        };
+        let transaction = match ArtifactTransaction::begin_shared(report_context) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                diagnostics.record_immediate("ArtifactBegin", PluginStatus::Error(error));
+                return std::mem::take(diagnostics);
+            }
         };
 
         // Filters run after resume so filesystem and lock contention cannot
@@ -444,9 +533,13 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
-            let outcome = run_stage(filter.name(), filter.execution(), timeout, |context| {
-                filter.should_process(event, context)
-            });
+            let outcome = run_transaction_stage(
+                &transaction,
+                filter.name(),
+                filter.execution(),
+                timeout,
+                |context| filter.should_process(event, context),
+            );
             let status = plugin_status(&outcome);
             let pass = outcome.into_option().unwrap_or(true);
             diagnostics.record(filter.name(), status, start.elapsed());
@@ -471,9 +564,13 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(pp.timeout_secs(), PREPROC_TIMEOUT);
-            let outcome = run_stage(pp.name(), pp.execution(), timeout, |context| {
-                pp.process(event, data, context)
-            });
+            let outcome = run_transaction_stage(
+                &transaction,
+                pp.name(),
+                pp.execution(),
+                timeout,
+                |context| pp.process(event, data, context),
+            );
             let status = plugin_status(&outcome);
             diagnostics.record(pp.name(), status, start.elapsed());
         }
@@ -485,38 +582,42 @@ impl Pipeline {
         }
 
         // ── Stage 1: Raw data (fail-safe) ──
-        let raw_path: Option<PathBuf> = run_stage(
+        let raw_path: Option<PathBuf> = run_transaction_stage(
+            &transaction,
             "Stage1Raw",
             PluginExecution::Cooperative,
             STAGE_TIMEOUT,
-            |_| safety::write_raw_stage1(&pending, event.report_type, event.pid, &data.raw.threads),
+            |_| safety::write_raw_stage1(&transaction, &data.raw.threads),
         )
         .into_option();
 
         // Stage 1 shm dump (breadcrumbs + context raw bytes)
         if let Some(raw_shm) = &captured.raw_shm {
-            let _ = run_stage(
+            let _ = run_transaction_stage(
+                &transaction,
                 "Stage1Shm",
                 PluginExecution::Cooperative,
                 STAGE_TIMEOUT,
-                |_| safety::write_raw_shm_stage1(&pending, event.report_type, event.pid, raw_shm),
+                |_| safety::write_raw_shm_stage1(&transaction, raw_shm),
             );
         }
 
         // ── Stage 2: Full JSON report + screenshot PNGs ──
         let screenshots = std::mem::take(&mut data.raw.screenshots);
-        let json_path: Option<PathBuf> = run_stage(
+        let json_path: Option<PathBuf> = run_transaction_stage(
+            &transaction,
             "Stage2Json",
             PluginExecution::Cooperative,
             STAGE_TIMEOUT,
             |_| {
                 let mut crash_report = report::build_report(event, data, diagnostics);
-                report::write_report(&pending, &mut crash_report, &screenshots)
+                report::write_report(&transaction, &mut crash_report, &screenshots)
             },
         )
         .into_option();
 
         let result = ReportResult {
+            artifact_paths: transaction.artifact_paths(),
             raw_path,
             json_path,
             session: data.session.clone(),
@@ -525,6 +626,9 @@ impl Pipeline {
         // ── Post-processors ──
         let mut result = result;
         for pp in &self.post_processors {
+            if pp.phase() != PostProcessorPhase::BeforeCommit {
+                continue;
+            }
             if !pp.is_available() {
                 diagnostics
                     .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
@@ -539,11 +643,68 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
-            let outcome = run_stage(pp.name(), pp.execution(), timeout, |context| {
-                pp.process(event, &mut result, context)
-            });
+            let outcome = run_transaction_stage(
+                &transaction,
+                pp.name(),
+                pp.execution(),
+                timeout,
+                |context| pp.process(event, &mut result, context),
+            );
             let status = plugin_status(&outcome);
             diagnostics.record(pp.name(), status, start.elapsed());
+        }
+
+        let committed = match transaction.commit() {
+            Ok(committed) => committed,
+            Err(error) => {
+                diagnostics.record_immediate("ArtifactCommit", PluginStatus::Error(error));
+                return std::mem::take(diagnostics);
+            }
+        };
+        for warning in &committed.durability_warnings {
+            diagnostics
+                .record_immediate("ArtifactDurability", PluginStatus::Error(warning.clone()));
+        }
+        result.raw_path = result.raw_path.as_deref().and_then(|path| {
+            remap_committed_path(path, transaction.staging_dir(), &committed.report_dir)
+        });
+        result.json_path = result.json_path.as_deref().and_then(|path| {
+            remap_committed_path(path, transaction.staging_dir(), &committed.report_dir)
+        });
+        result.artifact_paths = result
+            .artifact_paths
+            .iter()
+            .filter_map(|path| {
+                remap_committed_path(path, transaction.staging_dir(), &committed.report_dir)
+            })
+            .collect();
+
+        for pp in &self.post_processors {
+            if pp.phase() != PostProcessorPhase::AfterCommit {
+                continue;
+            }
+            if !pp.is_available() {
+                diagnostics
+                    .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
+                continue;
+            }
+            if !deps_satisfied(pp.hard_dependencies(), diagnostics) {
+                diagnostics.record_immediate(
+                    pp.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
+            let start = Instant::now();
+            let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
+            let outcome = run_transaction_stage(
+                &transaction,
+                pp.name(),
+                pp.execution(),
+                timeout,
+                |context| pp.process(event, &mut result, context),
+            );
+            diagnostics.record(pp.name(), plugin_status(&outcome), start.elapsed());
         }
 
         // ── Notifiers (fire-and-forget) ──
@@ -563,13 +724,74 @@ impl Pipeline {
                 }
                 let start = Instant::now();
                 let timeout = plugin_timeout(n.timeout_secs(), NOTIFIER_TIMEOUT);
-                let outcome = run_stage(n.name(), n.execution(), timeout, |context| {
-                    n.notify(path, context)
-                });
+                let outcome = run_transaction_stage(
+                    &transaction,
+                    n.name(),
+                    n.execution(),
+                    timeout,
+                    |context| n.notify(path, context),
+                );
                 let status = plugin_status(&outcome);
                 diagnostics.record(n.name(), status, start.elapsed());
             }
         }
+
+        for pp in &self.post_processors {
+            if pp.phase() != PostProcessorPhase::AfterNotify {
+                continue;
+            }
+            if !pp.is_available() {
+                diagnostics
+                    .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
+                continue;
+            }
+            if !deps_satisfied(pp.hard_dependencies(), diagnostics) {
+                diagnostics.record_immediate(
+                    pp.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
+            let start = Instant::now();
+            let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
+            let outcome = run_transaction_stage(
+                &transaction,
+                pp.name(),
+                pp.execution(),
+                timeout,
+                |context| pp.process(event, &mut result, context),
+            );
+            diagnostics.record(pp.name(), plugin_status(&outcome), start.elapsed());
+        }
+
+        for pp in &self.post_processors {
+            if pp.phase() != PostProcessorPhase::FinalCleanup {
+                continue;
+            }
+            if !pp.is_available() {
+                diagnostics
+                    .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
+                continue;
+            }
+            if !deps_satisfied(pp.hard_dependencies(), diagnostics) {
+                diagnostics.record_immediate(
+                    pp.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
+            let start = Instant::now();
+            let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
+            let outcome = run_transaction_stage(
+                &transaction,
+                pp.name(),
+                pp.execution(),
+                timeout,
+                |context| pp.process(event, &mut result, context),
+            );
+            diagnostics.record(pp.name(), plugin_status(&outcome), start.elapsed());
+        }
+        transaction.release_publication_lease();
 
         diagnostics.report_path = result.json_path;
 
@@ -613,6 +835,13 @@ impl Pipeline {
                 }
             },
         };
+        let transaction = match ArtifactTransaction::begin(ReportContext::new(event, &pending)) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                diagnostics.record_immediate("ArtifactBegin", PluginStatus::Error(error));
+                return diagnostics;
+            }
+        };
 
         for filter in &self.filters {
             if !filter.is_available() {
@@ -629,9 +858,13 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
-            let outcome = run_stage(filter.name(), filter.execution(), timeout, |context| {
-                filter.should_process(event, context)
-            });
+            let outcome = run_transaction_stage(
+                &transaction,
+                filter.name(),
+                filter.execution(),
+                timeout,
+                |context| filter.should_process(event, context),
+            );
             let status = plugin_status(&outcome);
             let pass = outcome.into_option().unwrap_or(true);
             diagnostics.record(filter.name(), status, start.elapsed());
@@ -654,23 +887,28 @@ impl Pipeline {
         }
 
         let data = CollectedData::default();
-        let json_path: Option<PathBuf> = run_stage(
+        let json_path: Option<PathBuf> = run_transaction_stage(
+            &transaction,
             "Stage2Json",
             PluginExecution::Cooperative,
             STAGE_TIMEOUT,
             |_| {
                 let mut crash_report = report::build_report(event, &data, &diagnostics);
-                report::write_report(&pending, &mut crash_report, &[])
+                report::write_report(&transaction, &mut crash_report, &[])
             },
         )
         .into_option();
         let mut result = ReportResult {
+            artifact_paths: transaction.artifact_paths(),
             raw_path: None,
             json_path,
             session: None,
         };
 
         for post_processor in &self.post_processors {
+            if post_processor.phase() != PostProcessorPhase::BeforeCommit {
+                continue;
+            }
             if !post_processor.is_available() {
                 diagnostics.record_immediate(
                     post_processor.name(),
@@ -687,7 +925,8 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
-            let outcome = run_stage(
+            let outcome = run_transaction_stage(
+                &transaction,
                 post_processor.name(),
                 post_processor.execution(),
                 timeout,
@@ -695,6 +934,65 @@ impl Pipeline {
             );
             let status = plugin_status(&outcome);
             diagnostics.record(post_processor.name(), status, start.elapsed());
+        }
+
+        let committed = match transaction.commit() {
+            Ok(committed) => committed,
+            Err(error) => {
+                diagnostics.record_immediate("ArtifactCommit", PluginStatus::Error(error));
+                return diagnostics;
+            }
+        };
+        for warning in &committed.durability_warnings {
+            diagnostics
+                .record_immediate("ArtifactDurability", PluginStatus::Error(warning.clone()));
+        }
+        result.raw_path = result.raw_path.as_deref().and_then(|path| {
+            remap_committed_path(path, transaction.staging_dir(), &committed.report_dir)
+        });
+        result.json_path = result.json_path.as_deref().and_then(|path| {
+            remap_committed_path(path, transaction.staging_dir(), &committed.report_dir)
+        });
+        result.artifact_paths = result
+            .artifact_paths
+            .iter()
+            .filter_map(|path| {
+                remap_committed_path(path, transaction.staging_dir(), &committed.report_dir)
+            })
+            .collect();
+
+        for post_processor in &self.post_processors {
+            if post_processor.phase() != PostProcessorPhase::AfterCommit {
+                continue;
+            }
+            if !post_processor.is_available() {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("not available".into()),
+                );
+                continue;
+            }
+            if !deps_satisfied(post_processor.hard_dependencies(), &diagnostics) {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
+            let start = Instant::now();
+            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let outcome = run_transaction_stage(
+                &transaction,
+                post_processor.name(),
+                post_processor.execution(),
+                timeout,
+                |context| post_processor.process(event, &mut result, context),
+            );
+            diagnostics.record(
+                post_processor.name(),
+                plugin_status(&outcome),
+                start.elapsed(),
+            );
         }
 
         if let Some(ref path) = result.json_path {
@@ -715,14 +1013,86 @@ impl Pipeline {
                 }
                 let start = Instant::now();
                 let timeout = plugin_timeout(notifier.timeout_secs(), NOTIFIER_TIMEOUT);
-                let outcome =
-                    run_stage(notifier.name(), notifier.execution(), timeout, |context| {
-                        notifier.notify(path, context)
-                    });
+                let outcome = run_transaction_stage(
+                    &transaction,
+                    notifier.name(),
+                    notifier.execution(),
+                    timeout,
+                    |context| notifier.notify(path, context),
+                );
                 let status = plugin_status(&outcome);
                 diagnostics.record(notifier.name(), status, start.elapsed());
             }
         }
+
+        for post_processor in &self.post_processors {
+            if post_processor.phase() != PostProcessorPhase::AfterNotify {
+                continue;
+            }
+            if !post_processor.is_available() {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("not available".into()),
+                );
+                continue;
+            }
+            if !deps_satisfied(post_processor.hard_dependencies(), &diagnostics) {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
+            let start = Instant::now();
+            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let outcome = run_transaction_stage(
+                &transaction,
+                post_processor.name(),
+                post_processor.execution(),
+                timeout,
+                |context| post_processor.process(event, &mut result, context),
+            );
+            diagnostics.record(
+                post_processor.name(),
+                plugin_status(&outcome),
+                start.elapsed(),
+            );
+        }
+
+        for post_processor in &self.post_processors {
+            if post_processor.phase() != PostProcessorPhase::FinalCleanup {
+                continue;
+            }
+            if !post_processor.is_available() {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("not available".into()),
+                );
+                continue;
+            }
+            if !deps_satisfied(post_processor.hard_dependencies(), &diagnostics) {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("hard dependency not met".into()),
+                );
+                continue;
+            }
+            let start = Instant::now();
+            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let outcome = run_transaction_stage(
+                &transaction,
+                post_processor.name(),
+                post_processor.execution(),
+                timeout,
+                |context| post_processor.process(event, &mut result, context),
+            );
+            diagnostics.record(
+                post_processor.name(),
+                plugin_status(&outcome),
+                start.elapsed(),
+            );
+        }
+        transaction.release_publication_lease();
 
         diagnostics.report_path = result.json_path;
 
@@ -754,7 +1124,45 @@ impl Pipeline {
                 plugin_graph_nodes(&self.notifiers),
             ),
         ];
-        crate::config::validate_runtime_plugin_registry(&categories)
+        crate::config::validate_runtime_plugin_registry(&categories)?;
+
+        let phases = self
+            .post_processors
+            .iter()
+            .map(|plugin| (plugin.name(), plugin.phase()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for plugin in &self.post_processors {
+            for (dependencies, kind) in [
+                (plugin.hard_dependencies(), DependencyKind::Hard),
+                (plugin.order_after(), DependencyKind::OrderOnly),
+            ] {
+                for dependency in dependencies {
+                    if phases.get(dependency).is_some_and(|dependency_phase| {
+                        post_processor_phase_rank(*dependency_phase)
+                            > post_processor_phase_rank(plugin.phase())
+                    }) {
+                        return Err(
+                            crate::config::ConfigValidationError::InvalidDependencyOrder {
+                                category: PluginCategory::PostProcessor,
+                                plugin_id: plugin.name().to_string(),
+                                dependency: (*dependency).to_string(),
+                                kind,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+const fn post_processor_phase_rank(phase: PostProcessorPhase) -> u8 {
+    match phase {
+        PostProcessorPhase::BeforeCommit => 0,
+        PostProcessorPhase::AfterCommit => 1,
+        PostProcessorPhase::AfterNotify => 2,
+        PostProcessorPhase::FinalCleanup => 3,
     }
 }
 
@@ -769,6 +1177,15 @@ fn plugin_timeout(plugin_override: u32, category_default: u32) -> u32 {
 
 fn deps_satisfied(deps: &[&str], diagnostics: &Diagnostics) -> bool {
     deps.iter().all(|dep| diagnostics.succeeded(dep))
+}
+
+fn remap_committed_path(
+    path: &std::path::Path,
+    staging: &std::path::Path,
+    committed: &std::path::Path,
+) -> Option<PathBuf> {
+    let relative = path.strip_prefix(staging).ok()?;
+    (relative.components().count() == 1).then(|| committed.join(relative))
 }
 
 /// Validate one enabled runtime category without panicking. Missing order-only
@@ -971,7 +1388,10 @@ pub fn default_macos_pipeline_from_config(
         pre_processors.push(Box::new(Sanitizer::new()));
     }
 
-    // ── Post-processors (order matters: RawCleanup → Session → Feedback → ZIP → LogRotator → Retention) ──
+    // ── Post-processors ──
+    // Before commit: RawCleanup/PNG/Feedback/ZIP/Move mutate only staging.
+    // After commit: SessionRecorder/LogRotator observe publication.
+    // Final cleanup: Retention runs after notifiers and AfterNotify consumers.
     let mut post_processors: Vec<Box<dyn PostProcessor>> = vec![];
 
     if on("RawCleanup") {

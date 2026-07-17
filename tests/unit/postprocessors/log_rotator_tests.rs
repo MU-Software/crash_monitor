@@ -1,9 +1,12 @@
-use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
+use crate::pipeline::{
+    CrashEvent, Plugin, PluginContext, PostProcessor, PostProcessorPhase, ReportResult, ReportType,
+};
 use crate::postprocessors::LogRotator;
 use std::fmt::Write as _;
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),
@@ -20,6 +23,7 @@ fn dummy_event() -> CrashEvent {
 
 fn dummy_result() -> ReportResult {
     ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: None,
         session: None,
@@ -31,6 +35,7 @@ fn test_plugin_dependency_metadata() {
     let rotator = LogRotator::new(1);
     assert!(rotator.hard_dependencies().is_empty());
     assert_eq!(rotator.order_after(), &["SessionRecorder"]);
+    assert_eq!(rotator.phase(), PostProcessorPhase::AfterCommit);
 }
 
 #[test]

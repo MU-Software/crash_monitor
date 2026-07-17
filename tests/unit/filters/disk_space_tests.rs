@@ -3,6 +3,7 @@ use crate::pipeline::{CrashEvent, Filter, Plugin, PluginContext, ReportType};
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),

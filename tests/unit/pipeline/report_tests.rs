@@ -63,7 +63,20 @@ fn load_report_reads_plain_json() {
 
     let report = load_report(&path).expect("plain JSON should load");
     assert_eq!(report.header.pid, 1234);
+    assert_eq!(report.header.report_id, None);
     assert!(report.termination.is_none());
+}
+
+#[test]
+fn legacy_report_load_is_stable_and_does_not_invent_an_identity() {
+    let legacy = sample_report_json();
+    let first: CrashReport = serde_json::from_str(&legacy).unwrap();
+    let second: CrashReport = serde_json::from_str(&legacy).unwrap();
+
+    assert_eq!(first.header.report_id, None);
+    assert_eq!(second.header.report_id, None);
+    let serialized = serde_json::to_value(first).unwrap();
+    assert!(serialized["header"].get("report_id").is_none());
 }
 
 #[test]
@@ -76,6 +89,7 @@ fn report_without_termination_omits_the_field() {
 #[test]
 fn build_report_preserves_exit_termination() {
     let event = CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::ExitFailure,
         termination: Some(TerminationReason::Exited {
             exit_code: 23,
@@ -93,6 +107,7 @@ fn build_report_preserves_exit_termination() {
     };
 
     let report = build_report(&event, &CollectedData::default(), &Diagnostics::new());
+    assert_eq!(report.header.report_id.as_ref(), Some(&event.report_id));
     assert_eq!(report.header.report_type, ReportType::ExitFailure);
     assert_eq!(report.termination, event.termination);
     assert!(report.exception.is_none());
@@ -110,6 +125,7 @@ fn build_report_preserves_exit_termination() {
 fn build_report_preserves_the_exact_mach_code_array() {
     let raw_codes = vec![0xfedc_ba98_7654_3210, 0x0123_4567_89ab_cdef];
     let event = CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),

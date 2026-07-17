@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 fn make_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,
@@ -31,6 +32,7 @@ fn empty_report() -> CrashReport {
     CrashReport {
         header: ReportHeader {
             version: 1,
+            report_id: Default::default(),
             timestamp: "2026-05-24T00:00:00".into(),
             pid: 1234,
             process: "test".into(),
@@ -81,6 +83,7 @@ fn write_report_with_rgba_attachments(
 
 fn make_result(json_path: PathBuf) -> ReportResult {
     ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: Some(json_path),
         session: None,
@@ -374,6 +377,7 @@ fn test_rgba_path_traversal_is_ignored() {
 #[test]
 fn test_no_json_path_is_noop() {
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: None,
         session: None,

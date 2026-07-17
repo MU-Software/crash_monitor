@@ -4,7 +4,25 @@ use super::{
     PluginContext, PluginRunResult, run_plugin_catching_panics, run_plugin_cooperative,
     write_raw_shm_stage1,
 };
-use crate::pipeline::{RawShmSnapshot, ReportType};
+use crate::pipeline::{ArtifactTransaction, CrashEvent, RawShmSnapshot, ReportContext, ReportType};
+
+fn raw_transaction(root: &std::path::Path) -> std::sync::Arc<ArtifactTransaction> {
+    let event = CrashEvent {
+        report_id: Default::default(),
+        report_type: ReportType::Crash,
+        termination: None,
+        exception_type: None,
+        exception_code: None,
+        exception_subcode: None,
+        exception_codes: Vec::new(),
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 1234,
+        process_name: "fixture".into(),
+        hang_duration_ms: None,
+    };
+    ArtifactTransaction::begin(ReportContext::new(&event, root)).unwrap()
+}
 
 #[test]
 fn test_run_plugin_catching_panics_ok() {
@@ -99,10 +117,11 @@ fn test_write_raw_shm_stage1_writes_owned_snapshot_bytes() {
         breadcrumbs: vec![0x01, 0x02, 0x03, 0x04],
         context: vec![0xAA, 0xBB, 0xCC],
     };
+    let transaction = raw_transaction(dir.path());
 
-    write_raw_shm_stage1(dir.path(), ReportType::Crash, 1234, &snapshot).unwrap();
+    write_raw_shm_stage1(&transaction, &snapshot).unwrap();
 
-    let mut files: Vec<_> = std::fs::read_dir(dir.path())
+    let mut files: Vec<_> = std::fs::read_dir(transaction.staging_dir())
         .unwrap()
         .filter_map(Result::ok)
         .collect();
@@ -111,21 +130,11 @@ fn test_write_raw_shm_stage1_writes_owned_snapshot_bytes() {
 
     let breadcrumbs = files
         .iter()
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with("_raw_breadcrumbs.bin")
-        })
+        .find(|entry| entry.file_name().to_string_lossy() == "breadcrumbs.bin")
         .expect("breadcrumbs dump");
     let context = files
         .iter()
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with("_raw_context.bin")
-        })
+        .find(|entry| entry.file_name().to_string_lossy() == "context.bin")
         .expect("context dump");
 
     assert_eq!(
@@ -138,12 +147,13 @@ fn test_write_raw_shm_stage1_writes_owned_snapshot_bytes() {
 #[test]
 fn test_write_raw_shm_stage1_reports_write_failure() {
     let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("missing");
     let snapshot = RawShmSnapshot {
         breadcrumbs: vec![1],
         context: vec![2],
     };
+    let transaction = raw_transaction(dir.path());
+    std::fs::remove_dir(transaction.staging_dir()).unwrap();
 
-    let error = write_raw_shm_stage1(&missing, ReportType::Crash, 1234, &snapshot).unwrap_err();
+    let error = write_raw_shm_stage1(&transaction, &snapshot).unwrap_err();
     assert!(error.contains("Failed to write raw breadcrumbs"));
 }

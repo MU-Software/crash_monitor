@@ -165,6 +165,7 @@ fn test_feedback_post_processor_with_real_binary() {
 
     let pp = crash_monitor::postprocessors::FeedbackPostProcessor::new(wrapper_path);
     let event = CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,
@@ -178,6 +179,7 @@ fn test_feedback_post_processor_with_real_binary() {
         hang_duration_ms: None,
     };
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: Some(report_path.clone()),
         session: None,

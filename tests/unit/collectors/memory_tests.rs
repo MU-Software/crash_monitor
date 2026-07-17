@@ -46,6 +46,7 @@ fn test_memory_collector_preserves_partial_map_and_returns_quality_diagnostic() 
     let platform = std::sync::Arc::new(platform);
     let collector = MemoryCollector::new(platform);
     let event = CrashEvent {
+        report_id: Default::default(),
         report_type: crate::pipeline::ReportType::Crash,
         termination: None,
         exception_type: Some(1),
@@ -89,6 +90,7 @@ fn test_partial_memory_quality_is_exposed_in_pipeline_diagnostics() {
         output_dir: Some(tempdir.path().to_path_buf()),
     };
     let event = CrashEvent {
+        report_id: Default::default(),
         report_type: crate::pipeline::ReportType::Crash,
         termination: None,
         exception_type: Some(1),

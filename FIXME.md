@@ -139,12 +139,12 @@
 
 ### P0-13. event-scoped `ReportId`와 원자적 artifact transaction을 도입한다
 
-- [ ] event 생성 시 UUID 또는 boot nonce+monotonic sequence 기반 `ReportId`를 한 번만 만든다.
-- [ ] 모든 stage, attachment, raw, screenshot, JSON, ZIP, notifier가 같은 immutable `ReportContext`를 사용한다.
-- [ ] report별 전용 directory와 exact manifest를 사용하고 basename prefix 탐색을 제거한다.
-- [ ] temp write, fsync, atomic rename으로 manifest를 마지막에 commit한다.
-- [ ] 같은 PID·type·second에 두 event가 생겨도 정확히 두 report가 생성되는 테스트를 추가한다.
-- [ ] 처리 도중 강제 종료 후 재시작해도 partial artifact가 노출되지 않거나 scavenger가 복구하게 한다.
+- [x] event 생성 시 UUID 또는 boot nonce+monotonic sequence 기반 `ReportId`를 한 번만 만든다.
+- [x] 모든 stage, attachment, raw, screenshot, JSON, ZIP, notifier가 같은 immutable `ReportContext`를 사용한다.
+- [x] report별 전용 directory와 exact manifest를 사용하고 basename prefix 탐색을 제거한다.
+- [x] temp write, fsync, atomic rename으로 manifest를 마지막에 commit한다.
+- [x] 같은 PID·type·second에 두 event가 생겨도 정확히 두 report가 생성되는 테스트를 추가한다.
+- [x] 처리 도중 강제 종료 후 재시작해도 partial artifact가 노출되지 않거나 scavenger가 복구하게 한다.
 
 범위: `src/pipeline`, collectors, postprocessors, event-loop tests.
 

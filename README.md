@@ -37,9 +37,12 @@ without sudo. Override the identity with `make build SIGN_IDENTITY="…"`.
 ./target/release/crash_monitor run <path-to-app> [args…]
 ```
 
-Reports are written to `~/.crash_monitor/crashes/pending/<type>_<ts>_<pid>.json`
-(override the base directory with `CRASH_MONITOR_DATA_DIR`). Report types:
-`crash`, `snapshot`, `anr`, `oom`.
+Each event receives a UUID `ReportId` and is atomically committed as one
+directory, normally
+`~/.crash_monitor/crashes/sent/<report-id>/{manifest.json,report.json|report.zip}`.
+Until commit, its files remain hidden under `pending/.report-<report-id>.pending`.
+Override the base directory with `CRASH_MONITOR_DATA_DIR`. Report types:
+`crash`, `snapshot`, `anr`, `oom`, `exit_failure`, `signal_failure`.
 
 ## Inspect reports
 

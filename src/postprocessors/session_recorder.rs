@@ -3,7 +3,8 @@
 //! Self-contained — absorbs `record_crash` from `session.rs`.
 
 use crate::pipeline::{
-    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+    CommittedReport, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor,
+    PostProcessorPhase, Priority, ReportResult,
 };
 use crate::utils::paths;
 use chrono::Local;
@@ -12,9 +13,45 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DATA_DIR_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 const MAX_SESSION_RECORD_BYTES: usize = 16 * 1024;
 
 pub struct SessionRecorder;
+
+#[cfg(test)]
+fn with_test_data_dir<T>(path: &std::path::Path, action: impl FnOnce() -> T) -> T {
+    struct Reset(Option<std::path::PathBuf>);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_DATA_DIR_OVERRIDE.with(|override_path| {
+                override_path.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = TEST_DATA_DIR_OVERRIDE
+        .with(|override_path| override_path.replace(Some(path.to_path_buf())));
+    let _reset = Reset(previous);
+    action()
+}
+
+fn session_data_dir() -> Result<std::path::PathBuf, String> {
+    #[cfg(test)]
+    if let Some(path) = TEST_DATA_DIR_OVERRIDE.with(|override_path| override_path.borrow().clone())
+    {
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("Failed to create test data dir: {error}"))?;
+        return Ok(path);
+    }
+
+    paths::data_dir()
+}
 
 impl Plugin for SessionRecorder {
     fn name(&self) -> &'static str {
@@ -29,6 +66,10 @@ impl Plugin for SessionRecorder {
 }
 
 impl PostProcessor for SessionRecorder {
+    fn phase(&self) -> PostProcessorPhase {
+        PostProcessorPhase::AfterCommit
+    }
+
     fn process(
         &self,
         event: &CrashEvent,
@@ -39,14 +80,27 @@ impl PostProcessor for SessionRecorder {
         if !event.is_crash() {
             return Ok(());
         }
-        if let Some(session) = &result.session
-            && let Some(json_path) = &result.json_path
-        {
-            let filename = json_path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("unknown");
-            record_crash(session, filename, context)?;
+        if let Some(session) = &result.session {
+            let committed = context
+                .committed_report()
+                .ok_or_else(|| "session record requires a committed report".to_string())?;
+            let report_relative_path = result
+                .json_path
+                .as_deref()
+                .and_then(|path| path.strip_prefix(&committed.report_dir).ok())
+                .or_else(|| {
+                    result
+                        .artifact_paths
+                        .iter()
+                        .find(|path| {
+                            path.file_name()
+                                .and_then(std::ffi::OsStr::to_str)
+                                .is_some_and(|name| name == "report.json" || name == "report.zip")
+                        })
+                        .and_then(|path| path.strip_prefix(&committed.report_dir).ok())
+                })
+                .and_then(std::path::Path::to_str);
+            record_crash(session, &committed, report_relative_path, context)?;
         }
         context.checkpoint()?;
         Ok(())
@@ -65,18 +119,31 @@ struct SessionRecord {
     end: String,
     status: String,
     duration_s: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Stable event identity. Consumers should resolve this ID through a
+    /// committed report manifest instead of treating `report` as a path.
+    ///
+    /// `default` keeps records written before `ReportId` was introduced
+    /// readable, while `skip_serializing_if` preserves the legacy shape for
+    /// callers that do not execute inside an artifact transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report_id: Option<String>,
+    /// Final artifact path relative to the committed report directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     report: Option<String>,
+    /// Exact committed manifest path. Legacy rows omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<String>,
 }
 
 /// Record a crash in sessions.jsonl and remove session.lock.
 fn record_crash(
     session: &crate::pipeline::report::SessionReport,
-    report_filename: &str,
+    committed: &CommittedReport,
+    report_relative_path: Option<&str>,
     context: &PluginContext,
 ) -> Result<(), String> {
     context.checkpoint()?;
-    let dir = match paths::data_dir() {
+    let dir = match session_data_dir() {
         Ok(d) => d,
         Err(e) => {
             eprintln!("[monitor] Failed to get data dir: {e}");
@@ -84,24 +151,44 @@ fn record_crash(
         }
     };
 
+    record_crash_in_dir(session, committed, report_relative_path, &dir, context)
+}
+
+fn record_crash_in_dir(
+    session: &crate::pipeline::report::SessionReport,
+    committed: &CommittedReport,
+    report_relative_path: Option<&str>,
+    dir: &std::path::Path,
+    context: &PluginContext,
+) -> Result<(), String> {
+    context.checkpoint()?;
     let record = SessionRecord {
         id: session.id.clone(),
         start: session.start.clone(),
         end: Local::now().to_rfc3339(),
         status: "crash".into(),
         duration_s: session.duration_s, // precomputed, no drift
-        report: Some(report_filename.to_string()),
+        report_id: Some(committed.report_id.as_str().to_string()),
+        report: report_relative_path.map(str::to_string),
+        manifest: Some(committed.manifest_path.to_string_lossy().into_owned()),
     };
 
     let json = serde_json::to_string(&record)
         .map_err(|error| format!("cannot serialize session record: {error}"))?;
     let jsonl_path = dir.join("sessions.jsonl");
-    if let Err(error) = append_session_record(&jsonl_path, &json, context) {
-        eprintln!("[monitor] Failed to append session record: {error}");
-    }
+    append_session_record(&jsonl_path, &json, context)?;
 
     let lock_path = dir.join("session.lock");
-    let _ = fs::remove_file(lock_path);
+    match fs::remove_file(&lock_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot remove committed session lock '{}': {error}",
+                lock_path.display()
+            ));
+        }
+    }
     context.checkpoint()?;
     Ok(())
 }
@@ -134,6 +221,8 @@ fn append_session_record(
     file.write_all(json.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
         .map_err(|error| format!("cannot append '{}': {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("cannot sync '{}': {error}", path.display()))?;
     context.checkpoint()
 }
 

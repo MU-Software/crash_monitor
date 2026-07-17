@@ -397,6 +397,15 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };
+    match pl.recover_prepared_artifacts() {
+        Ok(recovered) if recovered != 0 => {
+            eprintln!("[monitor] recovered {recovered} prepared report transaction(s)");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("[monitor] artifact recovery failed during startup: {error}");
+        }
+    }
 
     // Build argv and envp for posix_spawn
     let Ok(c_path) = CString::new(app_path) else {

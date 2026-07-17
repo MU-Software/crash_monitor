@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::artifact::ReportId;
 use super::report::SessionReport;
 use crate::collectors::RawData;
 
@@ -117,6 +118,9 @@ pub enum TerminationReason {
 /// Event data produced by a trigger. Owns all data (no lifetimes).
 #[derive(Clone)]
 pub struct CrashEvent {
+    /// Identity allocated once by the trigger and preserved by every clone and
+    /// capture/finalization handoff for this logical event.
+    pub report_id: ReportId,
     pub report_type: ReportType,
     /// Process termination metadata for exit/signal failure reports.
     pub termination: Option<TerminationReason>,
@@ -231,6 +235,10 @@ impl Diagnostics {
 // ═══════════════════════════════════════════════════
 
 pub struct ReportResult {
+    /// Exact artifact draft for callers that do not run inside an
+    /// [`ArtifactTransaction`](super::ArtifactTransaction). Production
+    /// finalization mirrors this set in the transaction registry.
+    pub artifact_paths: Vec<PathBuf>,
     pub raw_path: Option<PathBuf>,
     pub json_path: Option<PathBuf>,
     pub session: Option<SessionReport>,
@@ -263,6 +271,7 @@ pub struct CapturePayload {
 /// this value leaves the capture worker.
 pub struct CapturedEvent {
     pub(crate) event: CrashEvent,
+    pub(crate) report_context: Option<std::sync::Arc<super::ReportContext>>,
     pub(crate) data: Box<CollectedData>,
     pub(crate) raw_shm: Option<RawShmSnapshot>,
     pub(crate) diagnostics: Diagnostics,
@@ -275,6 +284,24 @@ impl CapturedEvent {
         event.bail_on_suspend_failure = false;
         Self {
             event,
+            report_context: None,
+            data: Box::new(payload.data),
+            raw_shm: payload.raw_shm,
+            diagnostics: payload.diagnostics,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_report_context(
+        mut event: CrashEvent,
+        report_context: std::sync::Arc<super::ReportContext>,
+        payload: CapturePayload,
+    ) -> Self {
+        event.crashed_thread = None;
+        event.bail_on_suspend_failure = false;
+        Self {
+            event,
+            report_context: Some(report_context),
             data: Box::new(payload.data),
             raw_shm: payload.raw_shm,
             diagnostics: payload.diagnostics,
@@ -288,7 +315,7 @@ impl CapturedEvent {
 
 /// Result of the task-facing capture boundary.
 pub enum CaptureOutcome {
-    Captured(CapturedEvent),
+    Captured(Box<CapturedEvent>),
     /// Capture was intentionally skipped (for example, a mandatory suspend
     /// failed). Mach reply still proceeds for crash events.
     Skipped(Diagnostics),

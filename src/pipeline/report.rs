@@ -12,6 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
+use super::artifact::{ArtifactKind, ArtifactTransaction, ReportId};
 use super::types::{CollectedData, CrashEvent, Diagnostics, ReportType, TerminationReason};
 
 // ═══════════════════════════════════════════════════
@@ -62,6 +63,8 @@ pub struct CrashReport {
 #[derive(Serialize, Deserialize)]
 pub struct ReportHeader {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_id: Option<ReportId>,
     pub timestamp: String,
     pub pid: u32,
     pub process: String,
@@ -97,6 +100,7 @@ impl ReportHeader {
 
         Self {
             version: 1,
+            report_id: Some(event.report_id.clone()),
             timestamp: Local::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false),
             pid: event.pid,
             process: event.process_name.clone(),
@@ -265,9 +269,19 @@ pub fn update_termination(path: &Path, reason: TerminationReason) -> Result<(), 
     }
 }
 
-fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp_path = termination_tmp_path(path)?;
-    if let Err(e) = fs::write(&tmp_path, bytes) {
+    let write_result = (|| -> Result<(), std::io::Error> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!(
             "cannot write temporary report '{}': {e}",
@@ -278,6 +292,12 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("cannot replace report '{}': {e}", path.display()));
     }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("report path has no parent: '{}'", path.display()))?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| format!("cannot sync report directory '{}': {e}", parent.display()))?;
     Ok(())
 }
 
@@ -353,7 +373,10 @@ fn termination_tmp_path(path: &Path) -> Result<PathBuf, String> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("report path has no valid filename: '{}'", path.display()))?;
-    Ok(path.with_file_name(format!(".{file_name}.termination.tmp")))
+    Ok(path.with_file_name(format!(
+        ".{file_name}.termination-{}.tmp",
+        uuid::Uuid::new_v4()
+    )))
 }
 
 /// True if `path` has a `.zip` extension (case-insensitive).
@@ -518,16 +541,15 @@ pub fn build_report(
 /// # Errors
 /// Returns an error if JSON serialization or file I/O fails.
 pub fn write_report(
-    dir: &Path,
+    transaction: &ArtifactTransaction,
     report: &mut CrashReport,
     screenshots: &[crate::shm::RawScreenshot],
 ) -> Result<PathBuf, String> {
-    let basename = report_filename(report.header.report_type, report.header.pid);
-
     for (i, shot) in screenshots.iter().enumerate() {
-        let rgba_name = format!("{basename}_screenshot_{i:03}.rgba");
-        let rgba_path = dir.join(&rgba_name);
-        if let Err(e) = fs::write(&rgba_path, &shot.rgba) {
+        let rgba_name = format!("screenshot-{i:03}.rgba");
+        if let Err(e) =
+            transaction.write_bytes(&rgba_name, ArtifactKind::ScreenshotRgba, &shot.rgba)
+        {
             eprintln!("[monitor] Failed to write screenshot RGBA: {e}");
             continue;
         }
@@ -542,12 +564,11 @@ pub fn write_report(
             ));
     }
 
-    let json_path = dir.join(format!("{basename}.json"));
-    let json = serde_json::to_string_pretty(report)
-        .map_err(|e| format!("JSON serialization failed: {e}"))?;
-    fs::write(&json_path, json).map_err(|e| format!("Failed to write report: {e}"))?;
-
-    Ok(json_path)
+    let json =
+        serde_json::to_vec_pretty(report).map_err(|e| format!("JSON serialization failed: {e}"))?;
+    transaction
+        .write_bytes("report.json", ArtifactKind::Report, &json)
+        .map_err(|e| format!("Failed to write report: {e}"))
 }
 
 #[cfg(test)]

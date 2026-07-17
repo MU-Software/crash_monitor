@@ -12,7 +12,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::pipeline::report::CrashReport;
 use crate::pipeline::{
-    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+    ArtifactKind, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
+    ReportResult,
 };
 
 pub struct PNGConverter;
@@ -31,6 +32,7 @@ struct FileIdentity {
 
 struct ConvertedRgba {
     path: PathBuf,
+    png_path: PathBuf,
     identity: FileIdentity,
 }
 
@@ -82,6 +84,12 @@ impl PNGConverter {
                 context.checkpoint()?;
             }
             if let Some(rgba_path) = convert_one(&dir, attachment, context, &mut after_png_write) {
+                if let Some(transaction) = context.artifact_transaction() {
+                    transaction.register_file(&rgba_path.png_path, ArtifactKind::ScreenshotPng)?;
+                }
+                if !result.artifact_paths.contains(&rgba_path.png_path) {
+                    result.artifact_paths.push(rgba_path.png_path.clone());
+                }
                 converted_rgba.push(rgba_path);
             }
         }
@@ -99,7 +107,19 @@ impl PNGConverter {
         // failure before this point leaves the original report usable, while
         // a failure here can only leave redundant RGBA files behind.
         for converted in converted_rgba {
-            remove_if_unchanged(&converted.path, converted.identity);
+            match remove_if_unchanged(&converted.path, converted.identity) {
+                Ok(true) => {
+                    if let Some(transaction) = context.artifact_transaction() {
+                        transaction.unregister_file(&converted.path)?;
+                    }
+                    result.artifact_paths.retain(|path| path != &converted.path);
+                }
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "[monitor] PNGConverter: cannot remove converted RGBA '{}': {error}",
+                    converted.path.display()
+                ),
+            }
         }
 
         context.checkpoint()
@@ -220,6 +240,7 @@ fn convert_one(
     obj.remove("height");
     Some(ConvertedRgba {
         path: rgba_path,
+        png_path,
         identity,
     })
 }
@@ -374,12 +395,20 @@ fn publish_bytes_atomically(
     }
     tmp.flush()
         .map_err(|error| format!("Failed to flush {kind} temporary file: {error}"))?;
+    tmp.sync_all()
+        .map_err(|error| format!("Failed to sync {kind} temporary file: {error}"))?;
     drop(tmp);
     if let Some(context) = context {
         context.checkpoint()?;
     }
 
     fs::rename(&tmp_path, path).map_err(|error| format!("Failed to replace {kind}: {error}"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{kind} path has no parent: '{}'", path.display()))?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Failed to sync {kind} directory: {error}"))?;
     pending.published();
     Ok(())
 }
@@ -441,16 +470,23 @@ fn load_report_for_conversion(path: &Path, context: &PluginContext) -> Result<Cr
         .map_err(|error| format!("invalid report JSON in '{}': {error}", path.display()))
 }
 
-fn remove_if_unchanged(path: &Path, expected: FileIdentity) {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
+fn remove_if_unchanged(path: &Path, expected: FileIdentity) -> Result<bool, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.to_string()),
     };
     if metadata.file_type().is_file()
         && metadata.dev() == expected.device
         && metadata.ino() == expected.inode
     {
-        let _ = fs::remove_file(path);
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error.to_string()),
+        }
     }
+    Ok(false)
 }
 
 /// Encode RGBA pixel data to PNG. Returns the PNG bytes.

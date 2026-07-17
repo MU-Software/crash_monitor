@@ -25,6 +25,7 @@ const BACKGROUND_QUEUE_CAPACITY: usize = 2;
 
 struct CaptureJob {
     event: super::CrashEvent,
+    report_context: Arc<super::ReportContext>,
     task: mach_port_t,
     cancelled: Arc<AtomicBool>,
     shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
@@ -52,6 +53,7 @@ impl CaptureWorker {
             .spawn(move || {
                 while let Ok(CaptureJob {
                     event,
+                    report_context,
                     task,
                     cancelled,
                     shm_snapshot,
@@ -63,6 +65,7 @@ impl CaptureWorker {
                         task,
                         &cancelled,
                         shm_snapshot.as_ref(),
+                        &report_context,
                     );
                     let _ = result_tx.send(payload);
                 }
@@ -102,12 +105,24 @@ impl CaptureWorker {
         if !self.pipeline.report_enabled(event.report_type) {
             return CaptureOutcome::Skipped(Diagnostics::new());
         }
+        let report_context = match self.pipeline.create_report_context(&event) {
+            Ok(report_context) => report_context,
+            Err(error) => {
+                let mut diagnostics = Diagnostics::new();
+                diagnostics.record_immediate("ReportContext", PluginStatus::Error(error));
+                return CaptureOutcome::Skipped(diagnostics);
+            }
+        };
         if Instant::now() >= deadline {
-            return timed_out_capture(event, "absolute capture deadline already elapsed");
+            return timed_out_capture(
+                event,
+                report_context,
+                "absolute capture deadline already elapsed",
+            );
         }
 
         if let Some(reason) = &self.unavailable_reason {
-            return failed_capture(event, reason);
+            return failed_capture(event, report_context, reason);
         }
 
         let failure_sink = TaskControlFailureSink::new();
@@ -138,7 +153,11 @@ impl CaptureWorker {
         if Instant::now() >= deadline {
             finish_suspend(&mut suspend_guard);
             return with_task_control_diagnostics(
-                timed_out_capture(event, "absolute capture deadline elapsed during suspend"),
+                timed_out_capture(
+                    event,
+                    report_context,
+                    "absolute capture deadline elapsed during suspend",
+                ),
                 suspend_error,
                 None,
                 &failure_sink,
@@ -169,6 +188,7 @@ impl CaptureWorker {
             return with_task_control_diagnostics(
                 timed_out_capture_with_snapshot(
                     event,
+                    report_context,
                     "absolute capture deadline elapsed during shm snapshot",
                     shm_snapshot.as_deref(),
                 ),
@@ -181,12 +201,14 @@ impl CaptureWorker {
         let cancelled = Arc::new(AtomicBool::new(false));
         let (result_tx, result_rx) = sync_channel(1);
         let event_for_result = event.clone();
+        let report_context_for_result = report_context.clone();
         // Keep a cheap Arc clone on the guard-owning thread. If the worker
         // handoff fails or times out, Stage 1 can still persist the immutable
         // bytes that were already copied while the task was suspended.
         let fallback_shm_snapshot = shm_snapshot.clone();
         let job = CaptureJob {
             event,
+            report_context,
             task,
             cancelled: cancelled.clone(),
             shm_snapshot,
@@ -198,6 +220,7 @@ impl CaptureWorker {
             return with_task_control_diagnostics(
                 failed_capture_with_snapshot(
                     job.event,
+                    job.report_context,
                     "capture worker is unavailable",
                     fallback_shm_snapshot.as_deref(),
                 ),
@@ -208,14 +231,17 @@ impl CaptureWorker {
         };
 
         if let Err(error) = sender.try_send(job) {
-            let event = match error {
-                TrySendError::Full(job) | TrySendError::Disconnected(job) => job.event,
+            let (event, report_context) = match error {
+                TrySendError::Full(job) | TrySendError::Disconnected(job) => {
+                    (job.event, job.report_context)
+                }
             };
             finish_suspend(&mut suspend_guard);
             self.retire("capture worker queue unavailable");
             return with_task_control_diagnostics(
                 failed_capture_with_snapshot(
                     event,
+                    report_context,
                     "capture worker queue unavailable",
                     fallback_shm_snapshot.as_deref(),
                 ),
@@ -235,11 +261,16 @@ impl CaptureWorker {
         finish_suspend(&mut suspend_guard);
 
         let outcome = match result {
-            Ok(payload) => CaptureOutcome::Captured(CapturedEvent::new(event_for_result, payload)),
+            Ok(payload) => CaptureOutcome::Captured(Box::new(CapturedEvent::with_report_context(
+                event_for_result,
+                report_context_for_result,
+                payload,
+            ))),
             Err(RecvTimeoutError::Timeout) => {
                 self.retire("capture worker exceeded absolute deadline");
                 timed_out_capture_with_snapshot(
                     event_for_result,
+                    report_context_for_result,
                     "capture worker exceeded absolute deadline",
                     fallback_shm_snapshot.as_deref(),
                 )
@@ -248,6 +279,7 @@ impl CaptureWorker {
                 self.retire("capture worker disconnected");
                 failed_capture_with_snapshot(
                     event_for_result,
+                    report_context_for_result,
                     "capture worker disconnected",
                     fallback_shm_snapshot.as_deref(),
                 )
@@ -298,34 +330,52 @@ fn with_task_control_diagnostics(
     outcome
 }
 
-fn timed_out_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {
-    minimal_capture(event, reason, PluginStatus::TimedOut, None)
+fn timed_out_capture(
+    event: super::CrashEvent,
+    report_context: Arc<super::ReportContext>,
+    reason: &str,
+) -> CaptureOutcome {
+    minimal_capture(event, report_context, reason, PluginStatus::TimedOut, None)
 }
 
 fn timed_out_capture_with_snapshot(
     event: super::CrashEvent,
+    report_context: Arc<super::ReportContext>,
     reason: &str,
     snapshot: Option<&crate::shm::OwnedShmSnapshot>,
 ) -> CaptureOutcome {
     minimal_capture(
         event,
+        report_context,
         reason,
         PluginStatus::TimedOut,
         raw_shm_from_snapshot(snapshot),
     )
 }
 
-fn failed_capture(event: super::CrashEvent, reason: &str) -> CaptureOutcome {
-    minimal_capture(event, reason, PluginStatus::Error(reason.to_string()), None)
+fn failed_capture(
+    event: super::CrashEvent,
+    report_context: Arc<super::ReportContext>,
+    reason: &str,
+) -> CaptureOutcome {
+    minimal_capture(
+        event,
+        report_context,
+        reason,
+        PluginStatus::Error(reason.to_string()),
+        None,
+    )
 }
 
 fn failed_capture_with_snapshot(
     event: super::CrashEvent,
+    report_context: Arc<super::ReportContext>,
     reason: &str,
     snapshot: Option<&crate::shm::OwnedShmSnapshot>,
 ) -> CaptureOutcome {
     minimal_capture(
         event,
+        report_context,
         reason,
         PluginStatus::Error(reason.to_string()),
         raw_shm_from_snapshot(snapshot),
@@ -343,6 +393,7 @@ fn raw_shm_from_snapshot(
 
 fn minimal_capture(
     event: super::CrashEvent,
+    report_context: Arc<super::ReportContext>,
     reason: &str,
     status: PluginStatus,
     raw_shm: Option<super::RawShmSnapshot>,
@@ -350,14 +401,15 @@ fn minimal_capture(
     eprintln!("[monitor] {reason}; continuing with minimum capture payload");
     let mut diagnostics = Diagnostics::new();
     diagnostics.record_immediate("CaptureWorker", status);
-    CaptureOutcome::Captured(CapturedEvent::new(
+    CaptureOutcome::Captured(Box::new(CapturedEvent::with_report_context(
         event,
+        report_context,
         CapturePayload {
             data: super::CollectedData::default(),
             raw_shm,
             diagnostics,
         },
-    ))
+    )))
 }
 
 /// Bounded, non-blocking queue for manual snapshot and ANR finalization.
@@ -476,14 +528,14 @@ pub(crate) fn finalize_terminated_child(
 /// born with the final wait status rather than being patched afterward.
 pub enum CrashFinalization {
     Pending(CrashFinalizeTicket),
-    Deferred(CapturedEvent),
+    Deferred(Box<CapturedEvent>),
 }
 
 impl CrashFinalization {
     pub(crate) fn start(pipeline: Arc<Pipeline>, captured: CapturedEvent) -> Self {
         match CrashFinalizeTicket::spawn(pipeline, captured) {
             Ok(ticket) => Self::Pending(ticket),
-            Err(captured) => Self::Deferred(*captured),
+            Err(captured) => Self::Deferred(captured),
         }
     }
 
@@ -502,7 +554,7 @@ impl CrashFinalization {
                     "CrashFinalizer",
                     PluginStatus::Error("initial worker spawn failed; retrying".into()),
                 );
-                match CrashFinalizeTicket::spawn(pipeline, captured) {
+                match CrashFinalizeTicket::spawn(pipeline, *captured) {
                     Ok(ticket) => ticket.complete(reason, timeout),
                     Err(captured) => {
                         let mut captured = *captured;
@@ -841,6 +893,7 @@ mod tests {
     fn captured(pid: u32) -> CapturedEvent {
         CapturedEvent::new(
             CrashEvent {
+                report_id: Default::default(),
                 report_type: ReportType::Snapshot,
                 termination: None,
                 exception_type: None,

@@ -146,28 +146,12 @@ impl PostProcessor for FeedbackPostProcessor {
             return Ok(());
         }
 
-        // Patch report JSON with user feedback (atomic: write tmp → rename).
-        match report::load_report(json_path) {
-            Ok(mut crash_report) => {
-                crash_report.user_feedback = Some(serde_json::json!({ "comment": feedback }));
-                match serde_json::to_string_pretty(&crash_report) {
-                    Ok(json) => {
-                        let tmp = json_path.with_extension("json.tmp");
-                        if let Err(e) = std::fs::write(&tmp, &json) {
-                            eprintln!("[monitor] Failed to write feedback tmp: {e}");
-                        } else if let Err(e) = std::fs::rename(&tmp, json_path) {
-                            eprintln!("[monitor] Failed to rename feedback tmp: {e}");
-                            // Fallback: try direct write.
-                            let _ = std::fs::write(json_path, json);
-                        } else {
-                            eprintln!("[monitor] Feedback saved to report");
-                        }
-                    }
-                    Err(e) => eprintln!("[monitor] Failed to serialize report: {e}"),
-                }
-            }
-            Err(e) => eprintln!("[monitor] Failed to load report for feedback patch: {e}"),
-        }
+        let mut crash_report = report::load_report(json_path)?;
+        crash_report.user_feedback = Some(serde_json::json!({ "comment": feedback }));
+        let json = serde_json::to_vec_pretty(&crash_report)
+            .map_err(|error| format!("failed to serialize feedback report: {error}"))?;
+        report::atomic_replace(json_path, &json)?;
+        eprintln!("[monitor] Feedback saved to report");
 
         Ok(())
     }

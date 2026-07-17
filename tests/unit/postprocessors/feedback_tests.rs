@@ -9,6 +9,7 @@ use std::time::Duration;
 
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,
@@ -28,6 +29,7 @@ fn write_test_report(dir: &std::path::Path) -> PathBuf {
     let report = CrashReport {
         header: ReportHeader {
             version: 1,
+            report_id: Default::default(),
             timestamp: "2026-04-10T00:00:00".to_string(),
             pid: 9999,
             process: "test_app".to_string(),
@@ -97,6 +99,7 @@ fn test_submit_patches_report() {
     let pp = FeedbackPostProcessor::new(script);
     let event = make_crash_event();
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: Some(report_path.clone()),
         session: None,
@@ -107,8 +110,12 @@ fn test_submit_patches_report() {
 
     // Verify the report was patched.
     let patched = report::load_report(&report_path).unwrap();
+    assert_eq!(patched.header.report_id, None);
     let feedback = patched.user_feedback.unwrap();
     assert_eq!(feedback["comment"], "crashed during bevel operation");
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    assert!(rewritten["header"].get("report_id").is_none());
 }
 
 #[test]
@@ -121,6 +128,7 @@ fn test_skip_does_not_modify_report() {
     let pp = FeedbackPostProcessor::new(script);
     let event = make_crash_event();
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: Some(report_path.clone()),
         session: None,
@@ -144,6 +152,7 @@ fn test_dialog_crash_is_reported_without_modifying_report() {
     let pp = FeedbackPostProcessor::new(script);
     let event = make_crash_event();
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: Some(report_path.clone()),
         session: None,
@@ -180,6 +189,7 @@ fn test_dialog_timeout_kills_child() {
     let pp = FeedbackPostProcessor::with_timeout(script, Duration::from_secs(3));
     let event = make_crash_event();
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: Some(report_path.clone()),
         session: None,
@@ -238,6 +248,7 @@ fn test_no_report_path_skips_dialog() {
     let pp = FeedbackPostProcessor::new(script);
     let event = make_crash_event();
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: None,
         session: None,

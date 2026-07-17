@@ -3,7 +3,8 @@
 //! Keeps the most recent 50% of lines to preserve recent session history.
 
 use crate::pipeline::{
-    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, PostProcessorPhase,
+    Priority, ReportResult,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -69,6 +70,10 @@ impl Plugin for LogRotator {
 }
 
 impl PostProcessor for LogRotator {
+    fn phase(&self) -> PostProcessorPhase {
+        PostProcessorPhase::AfterCommit
+    }
+
     fn process(
         &self,
         _event: &CrashEvent,

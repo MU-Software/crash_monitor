@@ -13,7 +13,9 @@ use crate::pipeline::worker::{
     BACKGROUND_DRAIN_DEADLINE, BackgroundFinalizeWorker, CAPTURE_DEADLINE, CRASH_FINALIZE_WAIT,
     CaptureWorker, CrashFinalization, finalize_terminated_child,
 };
-use crate::pipeline::{CaptureOutcome, CrashEvent, Pipeline, ReportType, TerminationReason};
+use crate::pipeline::{
+    CaptureOutcome, CrashEvent, Pipeline, ReportId, ReportType, TerminationReason,
+};
 use crate::platform::macos::ReceivedMachMessage;
 use crate::shm::SharedMemory;
 use crate::watchdog::{
@@ -203,6 +205,7 @@ fn finalize_child_termination_report(
 ) -> Option<crate::pipeline::Diagnostics> {
     let report_type = termination_report_type(pipeline, reason)?;
     let event = CrashEvent {
+        report_id: ReportId::default(),
         report_type,
         exception_type: None,
         exception_code: None,
@@ -253,7 +256,7 @@ fn finalize_contained_capture(pipeline: &Arc<Pipeline>, capture: CaptureOutcome)
     let CaptureOutcome::Captured(captured) = capture else {
         return;
     };
-    let diagnostics = CrashFinalization::start(pipeline.clone(), captured).complete(
+    let diagnostics = CrashFinalization::start(pipeline.clone(), *captured).complete(
         pipeline.clone(),
         None,
         BACKGROUND_DRAIN_DEADLINE,
@@ -351,6 +354,7 @@ pub fn event_loop(
                 let thread_port = request.thread_port();
                 let captured = if pipeline.report_enabled(ReportType::Crash) {
                     let event = CrashEvent {
+                        report_id: ReportId::default(),
                         report_type: ReportType::Crash,
                         exception_type: Some(exception_type),
                         exception_code: Some(code),
@@ -386,7 +390,7 @@ pub fn event_loop(
                 capture_worker.detach();
                 background_worker.detach();
                 let crash_finalization =
-                    captured.map(|captured| CrashFinalization::start(pipeline.clone(), captured));
+                    captured.map(|captured| CrashFinalization::start(pipeline.clone(), *captured));
                 let outcome = match (task_control_failure, reply_result) {
                     (None, Ok(())) => MonitorOutcome::DetectedCrash {
                         termination: None,
@@ -413,6 +417,7 @@ pub fn event_loop(
                 }
                 let monitor_work_started = Instant::now();
                 let event = CrashEvent {
+                    report_id: ReportId::default(),
                     report_type: ReportType::Snapshot,
                     exception_type: None,
                     exception_code: None,
@@ -438,7 +443,7 @@ pub fn event_loop(
                     };
                 }
                 if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {
-                    let _ = background_worker.try_submit(captured);
+                    let _ = background_worker.try_submit(*captured);
                 }
                 finish_anr_monitor_work(
                     anr_state.as_mut(),
@@ -494,6 +499,7 @@ pub fn event_loop(
                                 "[monitor] ANR detected: heartbeat stale for {hang_duration_ms}ms"
                             );
                             let event = CrashEvent {
+                                report_id: ReportId::default(),
                                 report_type: ReportType::Anr,
                                 exception_type: None,
                                 exception_code: None,
@@ -522,7 +528,7 @@ pub fn event_loop(
                                 };
                             }
                             if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {
-                                let _ = background_worker.try_submit(captured);
+                                let _ = background_worker.try_submit(*captured);
                             }
                             finish_anr_monitor_work(
                                 Some(state),

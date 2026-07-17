@@ -3,6 +3,7 @@ use crate::pipeline::{CrashEvent, PluginContext, ReportResult, ReportType};
 
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: None,
@@ -26,6 +27,7 @@ fn test_raw_cleanup_deletes_file() {
 
     let json_path = dir.path().join("crash_test_report.json");
     let mut result = ReportResult {
+        artifact_paths: vec![tmp.clone()],
         raw_path: Some(tmp.clone()),
         json_path: Some(json_path),
         session: None,
@@ -49,6 +51,7 @@ fn test_raw_cleanup_observes_expired_deadline_before_deleting() {
     let raw_path = dir.path().join("report_raw.bin");
     std::fs::write(&raw_path, b"raw data").unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![raw_path.clone()],
         raw_path: Some(raw_path.clone()),
         json_path: Some(dir.path().join("report.json")),
         session: None,

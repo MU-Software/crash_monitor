@@ -8,14 +8,14 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::report::report_filename;
+use super::{ArtifactKind, ArtifactTransaction};
 
 // ═══════════════════════════════════════════════════
 //  Deadline-aware plugin execution
@@ -72,6 +72,9 @@ pub struct PluginContext {
     /// Keeping this on the per-invocation context prevents collectors from
     /// retaining or reaching back into the live mapping after capture.
     shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
+    /// Event-scoped artifact transaction used by finalization plugins.
+    artifact_transaction: Option<Arc<crate::pipeline::ArtifactTransaction>>,
+    report_context: Option<Arc<crate::pipeline::ReportContext>>,
     subprocess_boundary: Arc<AtomicU8>,
     subprocess_cleanup_failure: Arc<OnceLock<String>>,
 }
@@ -87,6 +90,8 @@ impl PluginContext {
             deadline: None,
             cancellation: CancellationToken::new(),
             shm_snapshot: None,
+            artifact_transaction: None,
+            report_context: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
         }
@@ -101,6 +106,8 @@ impl PluginContext {
             deadline: Some(now.checked_add(timeout).unwrap_or(now)),
             cancellation: CancellationToken::new(),
             shm_snapshot: None,
+            artifact_transaction: None,
+            report_context: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
         }
@@ -120,6 +127,8 @@ impl PluginContext {
             deadline: timeout.map(|timeout| now.checked_add(timeout).unwrap_or(now)),
             cancellation,
             shm_snapshot: None,
+            artifact_transaction: None,
+            report_context: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
         }
@@ -133,6 +142,43 @@ impl PluginContext {
     ) -> Self {
         self.shm_snapshot = snapshot;
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_artifact_transaction(
+        mut self,
+        transaction: Arc<crate::pipeline::ArtifactTransaction>,
+    ) -> Self {
+        self.report_context = Some(transaction.report_context_arc());
+        self.artifact_transaction = Some(transaction);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_report_context(
+        mut self,
+        report_context: Arc<crate::pipeline::ReportContext>,
+    ) -> Self {
+        self.report_context = Some(report_context);
+        self
+    }
+
+    /// Return the immutable report context shared by all finalization stages.
+    #[must_use]
+    pub fn report_context(&self) -> Option<&crate::pipeline::ReportContext> {
+        self.report_context.as_deref()
+    }
+
+    /// Return the final immutable destination after atomic report publish.
+    #[must_use]
+    pub fn committed_report(&self) -> Option<crate::pipeline::CommittedReport> {
+        self.artifact_transaction
+            .as_deref()
+            .and_then(crate::pipeline::ArtifactTransaction::committed_report)
+    }
+
+    pub(crate) fn artifact_transaction(&self) -> Option<&crate::pipeline::ArtifactTransaction> {
+        self.artifact_transaction.as_deref()
     }
 
     /// Return the shared-memory payload captured before task resume.
@@ -157,6 +203,8 @@ impl PluginContext {
             ),
             cancellation: self.cancellation.clone(),
             shm_snapshot: self.shm_snapshot.clone(),
+            artifact_transaction: self.artifact_transaction.clone(),
+            report_context: self.report_context.clone(),
             subprocess_boundary: self.subprocess_boundary.clone(),
             subprocess_cleanup_failure: self.subprocess_cleanup_failure.clone(),
         }
@@ -800,43 +848,36 @@ impl Drop for PortGuard {
 /// # Errors
 /// Returns an error if file creation or write I/O fails.
 pub fn write_raw_stage1(
-    dir: &Path,
-    report_type: crate::pipeline::ReportType,
-    pid: u32,
+    transaction: &ArtifactTransaction,
     threads: &[RawThreadData],
 ) -> Result<PathBuf, String> {
-    let basename = report_filename(report_type, pid);
-    let raw_path = dir.join(format!("{basename}_raw.bin"));
+    transaction.write_artifact("threads.raw", ArtifactKind::ThreadRaw, |file| {
+        for (i, thread) in threads.iter().enumerate() {
+            writeln!(
+                file,
+                "---thread {} (port={}, name={:?}, crashed={})---",
+                i, thread.thread_port, thread.name, thread.crashed
+            )
+            .map_err(|e| format!("write: {e}"))?;
 
-    let mut file =
-        std::fs::File::create(&raw_path).map_err(|e| format!("Failed to create raw file: {e}"))?;
-
-    for (i, thread) in threads.iter().enumerate() {
-        writeln!(
-            file,
-            "---thread {} (port={}, name={:?}, crashed={})---",
-            i, thread.thread_port, thread.name, thread.crashed
-        )
-        .map_err(|e| format!("write: {e}"))?;
-
-        match &thread.registers {
-            Some(regs) => {
-                for (name, val) in regs {
-                    writeln!(file, "{name}={val:#018x}").map_err(|e| format!("write: {e}"))?;
+            match &thread.registers {
+                Some(regs) => {
+                    for (name, val) in regs {
+                        writeln!(file, "{name}={val:#018x}").map_err(|e| format!("write: {e}"))?;
+                    }
+                    writeln!(file, "---backtrace---").map_err(|e| format!("write: {e}"))?;
+                    for addr in &thread.backtrace {
+                        writeln!(file, "{addr:#018x}").map_err(|e| format!("write: {e}"))?;
+                    }
                 }
-                writeln!(file, "---backtrace---").map_err(|e| format!("write: {e}"))?;
-                for addr in &thread.backtrace {
-                    writeln!(file, "{addr:#018x}").map_err(|e| format!("write: {e}"))?;
+                None => {
+                    writeln!(file, "ERROR: register inspection failed")
+                        .map_err(|e| format!("write: {e}"))?;
                 }
-            }
-            None => {
-                writeln!(file, "ERROR: register inspection failed")
-                    .map_err(|e| format!("write: {e}"))?;
             }
         }
-    }
-
-    Ok(raw_path)
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -849,19 +890,18 @@ mod tests;
 /// # Errors
 /// Returns an error if file write I/O fails.
 pub fn write_raw_shm_stage1(
-    dir: &Path,
-    report_type: crate::pipeline::ReportType,
-    pid: u32,
+    transaction: &ArtifactTransaction,
     snapshot: &crate::pipeline::RawShmSnapshot,
 ) -> Result<(), String> {
-    let basename = report_filename(report_type, pid);
-
-    let crumb_path = dir.join(format!("{basename}_raw_breadcrumbs.bin"));
-    std::fs::write(&crumb_path, &snapshot.breadcrumbs)
+    transaction
+        .write_bytes(
+            "breadcrumbs.bin",
+            ArtifactKind::BreadcrumbsRaw,
+            &snapshot.breadcrumbs,
+        )
         .map_err(|e| format!("Failed to write raw breadcrumbs: {e}"))?;
-
-    let ctx_path = dir.join(format!("{basename}_raw_context.bin"));
-    std::fs::write(&ctx_path, &snapshot.context)
+    transaction
+        .write_bytes("context.bin", ArtifactKind::ContextRaw, &snapshot.context)
         .map_err(|e| format!("Failed to write raw context: {e}"))?;
 
     Ok(())

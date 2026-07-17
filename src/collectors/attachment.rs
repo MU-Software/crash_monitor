@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use mach2::port::mach_port_t;
 
 use crate::pipeline::{
-    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor,
-    Priority,
+    ArtifactKind, CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution,
+    PreProcessor, Priority,
 };
 // ═══════════════════════════════════════════════════
 //  Raw data type
@@ -140,18 +140,38 @@ impl PendingAttachmentFile {
     }
 
     fn commit(mut self, destination: &Path) -> Result<(), String> {
-        drop(self.file.take());
-        // Publish atomically without replacing an existing attachment if a
-        // filename collision or another writer wins the race.
+        self.commit_with_remove(destination, |path| std::fs::remove_file(path))
+    }
+
+    fn commit_with_remove(
+        &mut self,
+        destination: &Path,
+        mut remove_file: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        let file = self
+            .file
+            .take()
+            .ok_or_else(|| "temporary attachment is already closed".to_string())?;
+        file.sync_all()
+            .map_err(|error| format!("sync temporary attachment failed: {error}"))?;
+        drop(file);
         std::fs::hard_link(&self.path, destination)
             .map_err(|error| format!("commit temporary attachment failed: {error}"))?;
-        self.committed = true;
-        if let Err(error) = std::fs::remove_file(&self.path) {
-            eprintln!(
-                "[monitor] AttachmentCopier: failed to remove committed temporary file {}: {error}",
-                self.path.display()
-            );
+        if let Err(error) = remove_file(&self.path) {
+            let cleanup = remove_file(destination).err();
+            return Err(match cleanup {
+                Some(cleanup) => format!(
+                    "commit temporary attachment could not unlink '{}': {error}; cleanup of '{}' also failed: {cleanup}",
+                    self.path.display(),
+                    destination.display()
+                ),
+                None => format!(
+                    "commit temporary attachment could not unlink '{}': {error}",
+                    self.path.display()
+                ),
+            });
         }
+        self.committed = true;
         Ok(())
     }
 }
@@ -326,7 +346,7 @@ impl Plugin for AttachmentCopier {
 impl PreProcessor for AttachmentCopier {
     fn process(
         &self,
-        event: &CrashEvent,
+        _event: &CrashEvent,
         data: &mut CollectedData,
         context: &PluginContext,
     ) -> Result<(), String> {
@@ -336,11 +356,15 @@ impl PreProcessor for AttachmentCopier {
             return Ok(());
         }
 
-        let pending_dir = match &self.output_dir {
-            Some(dir) => dir.clone(),
-            None => crate::utils::paths::pending_dir()?,
+        let transaction = context.artifact_transaction();
+        let pending_dir = if let Some(transaction) = transaction {
+            transaction.staging_dir().to_path_buf()
+        } else {
+            match &self.output_dir {
+                Some(dir) => dir.clone(),
+                None => crate::utils::paths::pending_dir()?,
+            }
         };
-        let basename = crate::pipeline::report::report_filename(event.report_type, event.pid);
 
         for att in registered {
             context.checkpoint()?;
@@ -355,7 +379,7 @@ impl PreProcessor for AttachmentCopier {
             // Keep duplicate labels and labels that sanitize to the same
             // component distinct. The no-clobber publish above remains the
             // final guard against the vanishingly unlikely UUID collision.
-            let dest_name = format!("{basename}_{label}_{}.{ext}", uuid::Uuid::new_v4().simple());
+            let dest_name = format!("attachment-{label}-{}.{ext}", uuid::Uuid::new_v4().simple());
             let dest = pending_dir.join(&dest_name);
             let temporary_path = pending_dir.join(format!(
                 ".{dest_name}.{}.attachment.tmp",
@@ -375,6 +399,9 @@ impl PreProcessor for AttachmentCopier {
                     continue;
                 }
             };
+            if let Some(transaction) = transaction {
+                transaction.register_file(&dest, ArtifactKind::Attachment)?;
+            }
 
             data.raw.attachments.push(RawCopiedAttachment {
                 label: att.label.clone(),
@@ -435,6 +462,7 @@ mod tests {
 
     fn event() -> CrashEvent {
         CrashEvent {
+            report_id: Default::default(),
             report_type: ReportType::Crash,
             termination: None,
             exception_type: Some(1),
@@ -567,6 +595,35 @@ mod tests {
 
         assert!(error.contains("commit temporary attachment failed"));
         assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+        assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn temporary_commit_unlink_failure_is_reported_and_destination_is_rolled_back() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let temporary = tempdir.path().join("temporary.tmp");
+        let destination = tempdir.path().join("attachment.log");
+        let mut pending = PendingAttachmentFile::create(temporary.clone()).unwrap();
+        pending.file_mut().unwrap().write_all(b"new").unwrap();
+        let mut first_remove = true;
+
+        let error = pending
+            .commit_with_remove(&destination, |path| {
+                if first_remove {
+                    first_remove = false;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "simulated unlink failure",
+                    ))
+                } else {
+                    std::fs::remove_file(path)
+                }
+            })
+            .unwrap_err();
+        drop(pending);
+
+        assert!(error.contains("could not unlink"), "{error}");
+        assert!(!destination.exists());
         assert!(!temporary.exists());
     }
 

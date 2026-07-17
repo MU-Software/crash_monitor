@@ -23,7 +23,10 @@ Mach request received (record monotonic timestamp)
                               │
                               ▼
  Filter → PreProcessor / symbolication → Stage 1 → Stage 2 JSON
-        → feedback / PNG / ZIP / move / retention → Notifier
+        → feedback / PNG / ZIP / select destination
+        → manifest-last atomic directory commit
+        → session / log rotation → Notifier → AfterNotify consumers
+        → FinalCleanup retention
 ```
 
 For a Mach exception, the supervisor uses one absolute five-second wait budget
@@ -45,6 +48,18 @@ and notifications therefore cannot delay task resume or the Mach reply.
 Task-independent exit/signal reports use a dedicated bounded-wait finalizer as
 well, so report serialization and notification code never runs on the event
 loop thread.
+
+The trigger creates one immutable `ReportContext` containing the event's
+`ReportId` and report paths. The same allocation is carried through capture
+collectors, filters, pre-processors, artifact writers, pre-commit
+post-processors, post-commit bookkeeping, and notifiers. Artifact mutation is
+serialized by the event transaction. After `manifest.json` is synced last, the
+entire hidden report directory is atomically renamed; only then do bookkeeping
+plugins and notifiers receive the committed descriptor. A short process-local
+publication lease protects each committed path until post-commit consumers and
+notifiers finish. Destructive retention runs only in the terminal
+`FinalCleanup` phase; it defers at an older report still leased by another live
+finalizer instead of skipping ahead and deleting a newer report.
 
 | Phase | Child state/capability | Typical work |
 |-------|------------------------|--------------|

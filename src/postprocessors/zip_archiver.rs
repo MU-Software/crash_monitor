@@ -1,10 +1,10 @@
 //! Post-processor: bundle report files into a single ZIP archive.
 //!
-//! Collects all files sharing the same basename prefix as the report JSON
-//! (e.g., screenshots), compresses them into a `.zip`, then removes originals.
+//! Archives only the exact files registered by the event-scoped transaction.
 
 use crate::pipeline::{
-    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+    ArtifactKind, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
+    ReportResult,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -75,19 +75,23 @@ impl ZIPArchiver {
         let dir = json_path
             .parent()
             .ok_or_else(|| "no parent directory".to_string())?;
-        let stem = json_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| "no file stem".to_string())?;
 
-        // Collect files matching the report basename
-        let files = collect_report_files(dir, stem, context)?;
+        let files = collect_report_files(result, context)?;
         if files.is_empty() {
             return Ok(());
         }
 
-        let zip_path = dir.join(format!("{stem}.zip"));
-        let tmp_path = dir.join(format!(".{stem}.zip-{}.tmp", uuid::Uuid::new_v4()));
+        let archive_stem = if context.artifact_transaction().is_some() {
+            "report".to_string()
+        } else {
+            json_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| "no report file stem".to_string())?
+                .to_string()
+        };
+        let zip_path = dir.join(format!("{archive_stem}.zip"));
+        let tmp_path = dir.join(format!(".{archive_stem}.zip-{}.tmp", uuid::Uuid::new_v4()));
         let raw_was_archived = result
             .raw_path
             .as_ref()
@@ -108,12 +112,19 @@ impl ZIPArchiver {
         }
         pending_archive.mark_published();
 
+        if let Some(transaction) = context.artifact_transaction() {
+            transaction.register_file(&zip_path, ArtifactKind::Archive)?;
+        }
+
         after_archive_publish();
 
         // The published ZIP is canonical immediately. Commit every result
         // field represented by the archive before any cleanup checkpoint can
         // return on cancellation.
-        result.json_path = Some(zip_path);
+        result.json_path = Some(zip_path.clone());
+        if !result.artifact_paths.contains(&zip_path) {
+            result.artifact_paths.push(zip_path);
+        }
         if raw_was_archived {
             result.raw_path = None;
         }
@@ -122,7 +133,28 @@ impl ZIPArchiver {
         // original behind is safe because ReportResult already names the ZIP.
         for file in &files {
             context.checkpoint()?;
-            let _ = fs::remove_file(&file.path);
+            match fs::remove_file(&file.path) {
+                Ok(()) => {
+                    if let Some(transaction) = context.artifact_transaction() {
+                        transaction.unregister_file(&file.path)?;
+                    }
+                    result
+                        .artifact_paths
+                        .retain(|artifact| artifact != &file.path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(transaction) = context.artifact_transaction() {
+                        transaction.unregister_file(&file.path)?;
+                    }
+                    result
+                        .artifact_paths
+                        .retain(|artifact| artifact != &file.path);
+                }
+                Err(error) => eprintln!(
+                    "[monitor] ZIPArchiver: cannot remove archived input '{}': {error}",
+                    file.path.display()
+                ),
+            }
         }
 
         context.checkpoint()
@@ -186,49 +218,38 @@ impl PostProcessor for ZIPArchiver {
 }
 
 fn collect_report_files(
-    dir: &Path,
-    stem: &str,
+    result: &ReportResult,
     context: &PluginContext,
 ) -> Result<Vec<ArchiveEntry>, String> {
     context.checkpoint()?;
-    let entries =
-        fs::read_dir(dir).map_err(|e| format!("cannot read directory '{}': {e}", dir.display()))?;
+    let paths = if let Some(transaction) = context.artifact_transaction() {
+        transaction.artifact_paths()
+    } else if !result.artifact_paths.is_empty() {
+        result.artifact_paths.clone()
+    } else {
+        [result.json_path.clone(), result.raw_path.clone()]
+            .into_iter()
+            .flatten()
+            .collect()
+    };
 
     let mut files = Vec::new();
     let mut total_bytes = 0_u64;
-    let mut matching_entries = 0_usize;
-    for entry in entries {
+    for path in paths {
         context.checkpoint()?;
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !matches_report_file(&name_str, stem)
-            || name_str.ends_with(".zip")
-            || name_str.ends_with(".tmp")
-        {
-            continue;
-        }
-
-        matching_entries = matching_entries
-            .checked_add(1)
-            .ok_or_else(|| "archive entry count overflow".to_string())?;
-        if matching_entries > MAX_ARCHIVE_ENTRIES {
+        if files.len() >= MAX_ARCHIVE_ENTRIES {
             return Err(format!(
-                "report family exceeds archive entry limit ({MAX_ARCHIVE_ENTRIES})"
+                "report manifest exceeds archive entry limit ({MAX_ARCHIVE_ENTRIES})"
             ));
         }
-
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("cannot inspect '{}': {e}", entry.path().display()))?;
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let path = entry.path();
-        let metadata = entry
-            .metadata()
+        let metadata = fs::symlink_metadata(&path)
             .map_err(|e| format!("cannot inspect '{}': {e}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "manifest artifact is not a regular file: '{}'",
+                path.display()
+            ));
+        }
         let size = metadata.len();
         if size > MAX_ARCHIVE_FILE_BYTES {
             return Err(format!(
@@ -248,12 +269,6 @@ fn collect_report_files(
     }
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
-}
-
-fn matches_report_file(name: &str, stem: &str) -> bool {
-    name.strip_prefix(stem).is_some_and(|suffix| {
-        suffix.is_empty() || suffix.starts_with('.') || suffix.starts_with('_')
-    })
 }
 
 fn write_zip(
@@ -333,9 +348,12 @@ fn write_zip(
         }
     }
 
-    writer
+    let output = writer
         .finish()
         .map_err(|e| format!("ZIP finalize failed: {e}"))?;
+    output
+        .sync_all()
+        .map_err(|e| format!("ZIP sync failed: {e}"))?;
     Ok(())
 }
 

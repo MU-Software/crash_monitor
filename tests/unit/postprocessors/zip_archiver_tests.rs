@@ -7,6 +7,7 @@ use std::io::Read;
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),
@@ -33,6 +34,7 @@ fn test_creates_zip_with_json_and_png() {
     std::fs::write(&png_path, b"fakepng").unwrap();
 
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone(), png_path],
         raw_path: None,
         json_path: Some(json_path),
         session: None,
@@ -64,6 +66,7 @@ fn test_zip_contains_all_files() {
     std::fs::write(&png_path, b"pngdata").unwrap();
 
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone(), png_path],
         raw_path: None,
         json_path: Some(json_path),
         session: None,
@@ -99,6 +102,7 @@ fn test_zip_contains_all_files() {
 #[test]
 fn test_no_json_path_skips() {
     let mut result = ReportResult {
+        artifact_paths: Vec::new(),
         raw_path: None,
         json_path: None,
         session: None,
@@ -121,6 +125,7 @@ fn test_originals_deleted_after_zip() {
     std::fs::write(&json_path, "{}").unwrap();
 
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone()],
         raw_path: None,
         json_path: Some(json_path.clone()),
         session: None,
@@ -163,6 +168,7 @@ fn test_cancellation_after_zip_publish_commits_canonical_result_path() {
     std::fs::write(&raw_path, b"raw report").unwrap();
     std::fs::write(&png_path, b"fakepng").unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone(), raw_path.clone(), png_path.clone()],
         raw_path: Some(raw_path.clone()),
         json_path: Some(json_path.clone()),
         session: None,
@@ -196,6 +202,7 @@ fn test_cancellation_after_zip_finalize_removes_owned_temporary_file() {
     std::fs::write(&json_path, r#"{"header":{}}"#).unwrap();
     std::fs::write(&raw_path, b"raw report").unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone(), raw_path.clone()],
         raw_path: Some(raw_path.clone()),
         json_path: Some(json_path.clone()),
         session: None,
@@ -233,6 +240,7 @@ fn test_archiving_raw_file_clears_raw_path() {
     std::fs::write(&json_path, "{}").unwrap();
     std::fs::write(&raw_path, b"raw report").unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone(), raw_path.clone()],
         raw_path: Some(raw_path.clone()),
         json_path: Some(json_path),
         session: None,
@@ -260,6 +268,7 @@ fn test_zip_publish_failure_preserves_original_result_path() {
     // Renaming a file over a directory fails deterministically.
     std::fs::create_dir(dir.path().join("crash_publish_failure.zip")).unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone()],
         raw_path: None,
         json_path: Some(json_path.clone()),
         session: None,
@@ -284,10 +293,14 @@ fn test_rejects_too_many_matching_entries_before_writing_zip() {
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("crash_many.json");
     std::fs::write(&json_path, "{}").unwrap();
+    let mut artifact_paths = vec![json_path.clone()];
     for index in 0..MAX_ARCHIVE_ENTRIES {
-        std::fs::write(dir.path().join(format!("crash_many_{index:03}.log")), []).unwrap();
+        let path = dir.path().join(format!("crash_many_{index:03}.log"));
+        std::fs::write(&path, []).unwrap();
+        artifact_paths.push(path);
     }
     let mut result = ReportResult {
+        artifact_paths,
         raw_path: None,
         json_path: Some(json_path.clone()),
         session: None,
@@ -313,6 +326,7 @@ fn test_rejects_oversized_regular_file_before_writing_zip() {
     let file = std::fs::File::create(&json_path).unwrap();
     file.set_len(MAX_ARCHIVE_FILE_BYTES + 1).unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone()],
         raw_path: None,
         json_path: Some(json_path.clone()),
         session: None,
@@ -336,17 +350,19 @@ fn test_rejects_archive_family_over_total_byte_limit() {
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("crash_total.json");
     let sparse_size = MAX_ARCHIVE_TOTAL_BYTES / 3 + 1;
-    for path in [
+    let artifact_paths = [
         json_path.clone(),
         dir.path().join("crash_total_a.bin"),
         dir.path().join("crash_total_b.bin"),
-    ] {
+    ];
+    for path in &artifact_paths {
         std::fs::File::create(path)
             .unwrap()
             .set_len(sparse_size)
             .unwrap();
     }
     let mut result = ReportResult {
+        artifact_paths: artifact_paths.to_vec(),
         raw_path: None,
         json_path: Some(json_path.clone()),
         session: None,
@@ -375,6 +391,7 @@ fn test_skips_matching_symlink_instead_of_following_it() {
     std::fs::write(&outside, "secret").unwrap();
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone()],
         raw_path: None,
         json_path: Some(json_path),
         session: None,
@@ -403,6 +420,7 @@ fn test_cancellation_between_stream_chunks_removes_partial_zip() {
     let payload = vec![0x7b; STREAM_BUFFER_BYTES * 2];
     std::fs::write(&json_path, &payload).unwrap();
     let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone()],
         raw_path: None,
         json_path: Some(json_path.clone()),
         session: None,

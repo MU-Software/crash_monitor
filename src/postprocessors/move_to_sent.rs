@@ -1,10 +1,9 @@
 //! Post-processor: relocate finished reports from `pending/` to `sent/`.
 //!
 //! Runs near the end of the post-processor chain (after PNG conversion,
-//! feedback dialog, ZIP archival). For each `result.json_path`, finds every
-//! file in the same directory that shares the report's basename prefix and
-//! moves them all to the sibling `sent/` directory. Mutates
-//! `result.json_path` so downstream notifiers see the new path.
+//! feedback dialog, ZIP archival). Event-scoped transactions select `sent/`
+//! as their atomic publication root; legacy callers move only explicitly
+//! named `ReportResult` paths and never infer a family by basename prefix.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -57,6 +56,16 @@ impl MoveToSent {
         Ok(sibling)
     }
 
+    fn resolve_transaction_sent_dir(&self, output_root: &Path) -> Result<PathBuf, String> {
+        if let Some(ref path) = self.sent_dir_override {
+            fs::create_dir_all(path).map_err(|error| format!("create sent override: {error}"))?;
+            return Ok(path.clone());
+        }
+        let sibling = crate::utils::paths::sent_dir_for(output_root);
+        fs::create_dir_all(&sibling).map_err(|error| format!("create sent sibling: {error}"))?;
+        Ok(sibling)
+    }
+
     fn process_impl(
         &self,
         result: &mut ReportResult,
@@ -68,38 +77,31 @@ impl MoveToSent {
             return Ok(()); // Nothing written → nothing to move
         };
         let raw_path = result.raw_path.clone();
+        if let Some(transaction) = context.artifact_transaction() {
+            let sent_dir =
+                self.resolve_transaction_sent_dir(transaction.report_context().output_root())?;
+            transaction.set_destination_root(&sent_dir)?;
+            return context.checkpoint();
+        }
         let pending_dir = json_path
             .parent()
             .ok_or_else(|| "json_path has no parent".to_string())?
             .to_path_buf();
 
-        let stem = json_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| "json_path stem unreadable".to_string())?
-            .to_string();
-
         let sent_dir = self.resolve_sent_dir(&pending_dir)?;
-
-        let read_dir = fs::read_dir(&pending_dir)
-            .map_err(|e| format!("read_dir {}: {e}", pending_dir.display()))?;
-        for entry in read_dir {
+        let paths: Vec<PathBuf> = if result.artifact_paths.is_empty() {
+            [Some(json_path.clone()), raw_path.clone()]
+                .into_iter()
+                .flatten()
+                .collect()
+        } else {
+            result.artifact_paths.clone()
+        };
+        for path in paths {
             context.checkpoint()?;
-            let Ok(entry) = entry else { continue };
-            let path = entry.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !name.starts_with(&stem) {
-                continue;
-            }
-            // Match either exact basename or basename followed by `.` / `_`.
-            // Prevents accidental prefix collision between e.g. `crash_..._123`
-            // and `crash_..._1234`.
-            let suffix = &name[stem.len()..];
-            if !suffix.is_empty() && !suffix.starts_with('.') && !suffix.starts_with('_') {
-                continue;
-            }
 
             let dest = sent_dir.join(name);
             if let Err(e) = move_file(&path, &dest, context) {
@@ -120,7 +122,14 @@ impl MoveToSent {
                 result.json_path = Some(dest.clone());
             }
             if raw_path.as_ref() == Some(&path) {
-                result.raw_path = Some(dest);
+                result.raw_path = Some(dest.clone());
+            }
+            if let Some(artifact) = result
+                .artifact_paths
+                .iter_mut()
+                .find(|artifact| **artifact == path)
+            {
+                *artifact = dest;
             }
         }
 

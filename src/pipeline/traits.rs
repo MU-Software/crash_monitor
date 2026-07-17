@@ -20,6 +20,20 @@ pub enum PluginExecution {
     Subprocess,
 }
 
+/// Publication boundary for post-processors. Staging mutations run before the
+/// manifest is sealed; externally visible bookkeeping runs after the report
+/// directory has been atomically committed; terminal cleanup runs only after
+/// notifiers and every `AfterNotify` path consumer have finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostProcessorPhase {
+    BeforeCommit,
+    AfterCommit,
+    AfterNotify,
+    /// Terminal destructive maintenance. Plugins in this phase must not
+    /// expect report paths to remain available for another consumer.
+    FinalCleanup,
+}
+
 /// Base trait for all plugins.
 ///
 /// Metadata methods are evaluated outside the execution runner. They must be
@@ -88,6 +102,10 @@ pub trait PreProcessor: Plugin {
 
 /// Post-processor — operates on the written report file.
 pub trait PostProcessor: Plugin {
+    fn phase(&self) -> PostProcessorPhase {
+        PostProcessorPhase::BeforeCommit
+    }
+
     /// Process the completed report (e.g., move files, notify).
     /// `result` is mutable so a plugin can update `json_path`/`raw_path`
     /// when it relocates files (used by `MoveToSent`).

@@ -1,12 +1,12 @@
 use super::*;
 use crate::collectors::thread::RawThreadData;
 use crate::platform::mock::MockPlatform;
-use crate::postprocessors::{MoveToSent, ZIPArchiver};
+use crate::postprocessors::{MoveToSent, RetentionManager, ZIPArchiver};
 use mach2::port::mach_port_t;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 // ═══════════════════════════════════════════════════
 //  Mock Collector
@@ -73,12 +73,128 @@ impl Filter for MockFilter {
     }
 }
 
+#[derive(Clone, Debug)]
+struct StageContextObservation {
+    stage: &'static str,
+    report_id: String,
+    context_address: usize,
+    committed_report_id: Option<String>,
+    committed_report_dir: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct StageContextProbe {
+    name: &'static str,
+    phase: PostProcessorPhase,
+    observations: Arc<Mutex<Vec<StageContextObservation>>>,
+}
+
+impl StageContextProbe {
+    fn new(
+        name: &'static str,
+        phase: PostProcessorPhase,
+        observations: Arc<Mutex<Vec<StageContextObservation>>>,
+    ) -> Self {
+        Self {
+            name,
+            phase,
+            observations,
+        }
+    }
+
+    fn observe(&self, context: &PluginContext) -> Result<(), String> {
+        let report = context
+            .report_context()
+            .ok_or_else(|| format!("{} received no report context", self.name))?;
+        let committed = context.committed_report();
+        self.observations
+            .lock()
+            .map_err(|_| "context observations lock poisoned".to_string())?
+            .push(StageContextObservation {
+                stage: self.name,
+                report_id: report.report_id().as_str().to_string(),
+                context_address: std::ptr::from_ref(report) as usize,
+                committed_report_id: committed
+                    .as_ref()
+                    .map(|report| report.report_id.as_str().to_string()),
+                committed_report_dir: committed.map(|report| report.report_dir),
+            });
+        Ok(())
+    }
+}
+
+impl Plugin for StageContextProbe {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Medium
+    }
+}
+
+impl Collector for StageContextProbe {
+    fn collect(
+        &self,
+        _event: &CrashEvent,
+        _task: mach_port_t,
+        _data: &mut CollectedData,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        self.observe(context)
+    }
+}
+
+impl Filter for StageContextProbe {
+    fn should_process(&self, _event: &CrashEvent, context: &PluginContext) -> Result<bool, String> {
+        self.observe(context)?;
+        Ok(true)
+    }
+}
+
+impl PreProcessor for StageContextProbe {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _data: &mut CollectedData,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        self.observe(context)
+    }
+}
+
+impl PostProcessor for StageContextProbe {
+    fn phase(&self) -> PostProcessorPhase {
+        self.phase
+    }
+
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        self.observe(context)
+    }
+}
+
+impl Notifier for StageContextProbe {
+    fn notify(&self, _report_path: &Path, context: &PluginContext) -> Result<(), String> {
+        self.observe(context)
+    }
+}
+
 // ═══════════════════════════════════════════════════
 //  Helpers
 // ═══════════════════════════════════════════════════
 
 fn make_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Snapshot,
         termination: None,
         exception_type: None,
@@ -269,8 +385,10 @@ fn test_expired_capture_deadline_is_diagnosed_as_timeout() {
     let pipeline =
         make_pipeline_with_collector(Box::new(MockCollector { dep: &[] }), tempdir.path());
     let cancelled = Arc::new(AtomicBool::new(true));
+    let event = make_event();
+    let report_context = pipeline.create_report_context(&event).unwrap();
 
-    let payload = pipeline.collect_snapshot(&make_event(), 0, &cancelled, None);
+    let payload = pipeline.collect_snapshot(&event, 0, &cancelled, None, &report_context);
     let status = payload
         .diagnostics
         .plugins
@@ -316,19 +434,11 @@ fn test_stage1_shm_dump_uses_pre_resume_owned_bytes() {
 
     // Simulate the child changing the live mapping immediately after resume.
     publish_shm_app_version(&shm, "after-resume");
-    let _ = pipeline.finalize_captured(captured);
+    let _ = pipeline.finalize_captured(*captured);
 
-    let raw_context = std::fs::read_dir(tempdir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with("_raw_context.bin")
-        })
-        .expect("Stage 1 context dump");
-    let bytes = std::fs::read(raw_context.path()).unwrap();
+    let raw_context =
+        committed_artifact(tempdir.path(), "context.bin").expect("Stage 1 context dump");
+    let bytes = std::fs::read(raw_context).unwrap();
     assert!(
         bytes
             .windows("before-resume".len())
@@ -428,7 +538,7 @@ fn test_torn_context_snapshot_is_diagnosed_and_sanitized_without_live_reaccess()
     // post-resume mapping access would now fail; Stage 1 must use owned bytes.
     drop(pipeline.shm.take());
     drop(shm);
-    let diagnostics = pipeline.finalize_captured(captured);
+    let diagnostics = pipeline.finalize_captured(*captured);
     assert!(
         diagnostics
             .plugins
@@ -437,20 +547,9 @@ fn test_torn_context_snapshot_is_diagnosed_and_sanitized_without_live_reaccess()
         "the consistency diagnostic must survive finalization"
     );
 
-    let raw_context_path = std::fs::read_dir(tempdir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with("_raw_context.bin")
-        })
-        .expect("Stage 1 context dump");
-    assert_eq!(
-        std::fs::read(raw_context_path.path()).unwrap(),
-        expected_stage1
-    );
+    let raw_context_path =
+        committed_artifact(tempdir.path(), "context.bin").expect("Stage 1 context dump");
+    assert_eq!(std::fs::read(raw_context_path).unwrap(), expected_stage1);
 }
 
 #[test]
@@ -706,6 +805,7 @@ impl Collector for DependentOnFailCollector {
 
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Crash,
         termination: None,
         exception_type: Some(1),
@@ -762,30 +862,317 @@ fn test_full_crash_flow_writes_files() {
     assert_eq!(platform.suspend_count(), 1);
     assert_eq!(platform.resume_count(), 1);
 
-    // Verify files were written
-    let files: Vec<_> = std::fs::read_dir(tempdir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .collect();
-    assert!(
-        files.len() >= 2,
-        "Expected raw + json files, got {}",
-        files.len()
+    let report_path = diag.report_path.expect("committed JSON report");
+    let report_dir = report_path.parent().expect("report directory");
+    assert_eq!(
+        report_path.file_name().and_then(|name| name.to_str()),
+        Some("report.json")
     );
+    assert!(report_dir.join("threads.raw").exists());
+    assert!(report_dir.join("manifest.json").exists());
+}
 
-    // Check for JSON report
-    let json_file = files
-        .iter()
-        .find(|f| f.path().extension().is_some_and(|e| e == "json"));
-    assert!(json_file.is_some(), "Should have a JSON report file");
+#[test]
+fn identical_pid_type_and_second_create_two_isolated_reports() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_pipeline_with_tempdir(
+        vec![Box::new(TrackingCollector::new())],
+        Arc::new(MockPlatform::default()),
+        tempdir.path(),
+    );
+    let first = make_crash_event();
+    let second = make_crash_event();
+    assert_ne!(first.report_id, second.report_id);
 
-    // Check for raw file
-    let raw_file = files.iter().find(|f| {
-        f.file_name()
-            .to_str()
-            .is_some_and(|n| n.contains("_raw.bin"))
+    let first_path = pipeline
+        .handle_event(&first, 123)
+        .report_path
+        .expect("first committed report");
+    let second_path = pipeline
+        .handle_event(&second, 123)
+        .report_path
+        .expect("second committed report");
+
+    assert_ne!(first_path.parent(), second_path.parent());
+    for (event, report_path) in [(&first, first_path), (&second, second_path)] {
+        let report_dir = report_path.parent().expect("report directory");
+        assert_eq!(
+            report_dir.file_name().and_then(|name| name.to_str()),
+            Some(event.report_id.as_str())
+        );
+        let manifest = crate::pipeline::load_manifest(&report_dir.join("manifest.json")).unwrap();
+        assert_eq!(manifest.report_id, event.report_id);
+        assert_eq!(
+            manifest
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["report.json", "threads.raw"]
+        );
+        let report = crate::pipeline::report::load_report(&report_path).unwrap();
+        assert_eq!(report.header.report_id.as_ref(), Some(&event.report_id));
+    }
+
+    assert_eq!(
+        std::fs::read_dir(tempdir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn every_pipeline_phase_shares_one_immutable_report_context() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let probe = |name, phase| StageContextProbe::new(name, phase, observations.clone());
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![Box::new(probe(
+            "ContextFilter",
+            PostProcessorPhase::BeforeCommit,
+        ))],
+        collectors: vec![Box::new(probe(
+            "ContextCollector",
+            PostProcessorPhase::BeforeCommit,
+        ))],
+        pre_processors: vec![Box::new(probe(
+            "ContextPreProcessor",
+            PostProcessorPhase::BeforeCommit,
+        ))],
+        post_processors: vec![
+            Box::new(probe(
+                "ContextBeforeCommit",
+                PostProcessorPhase::BeforeCommit,
+            )),
+            Box::new(probe("ContextAfterCommit", PostProcessorPhase::AfterCommit)),
+            Box::new(probe("ContextAfterNotify", PostProcessorPhase::AfterNotify)),
+            Box::new(probe(
+                "ContextFinalCleanup",
+                PostProcessorPhase::FinalCleanup,
+            )),
+        ],
+        notifiers: vec![Box::new(probe(
+            "ContextNotifier",
+            PostProcessorPhase::AfterCommit,
+        ))],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+    let event = make_event();
+
+    let diagnostics = pipeline.handle_event(&event, 0);
+    let report_path = diagnostics.report_path.expect("committed report path");
+    let observed = observations.lock().unwrap();
+    assert_eq!(observed.len(), 8, "observations: {observed:?}");
+    assert!(
+        observed
+            .iter()
+            .all(|entry| entry.report_id == event.report_id.as_str())
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .map(|entry| entry.context_address)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        1,
+        "all stages must receive the same ReportContext allocation"
+    );
+    for entry in observed.iter().filter(|entry| {
+        matches!(
+            entry.stage,
+            "ContextCollector" | "ContextFilter" | "ContextPreProcessor" | "ContextBeforeCommit"
+        )
+    }) {
+        assert!(entry.committed_report_id.is_none(), "{}", entry.stage);
+    }
+    for entry in observed.iter().filter(|entry| {
+        matches!(
+            entry.stage,
+            "ContextAfterCommit" | "ContextNotifier" | "ContextAfterNotify" | "ContextFinalCleanup"
+        )
+    }) {
+        assert_eq!(
+            entry.committed_report_id.as_deref(),
+            Some(event.report_id.as_str()),
+            "{}",
+            entry.stage
+        );
+        assert_eq!(
+            entry.committed_report_dir.as_deref(),
+            report_path.parent(),
+            "{}",
+            entry.stage
+        );
+    }
+}
+
+struct PublicationGate {
+    released: Mutex<BTreeSet<String>>,
+    wake: Condvar,
+    missing_path: AtomicBool,
+}
+
+impl PublicationGate {
+    fn release(&self, report_id: &str) {
+        self.released.lock().unwrap().insert(report_id.to_string());
+        self.wake.notify_all();
+    }
+}
+
+struct GatedPathNotifier {
+    entered: std::sync::mpsc::Sender<(String, PathBuf)>,
+    gate: Arc<PublicationGate>,
+}
+
+impl Plugin for GatedPathNotifier {
+    fn name(&self) -> &'static str {
+        "GatedPathNotifier"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Medium
+    }
+}
+
+impl Notifier for GatedPathNotifier {
+    fn notify(&self, report_path: &Path, context: &PluginContext) -> Result<(), String> {
+        let report_id = context
+            .report_context()
+            .ok_or_else(|| "notifier received no report context".to_string())?
+            .report_id()
+            .as_str()
+            .to_string();
+        if !report_path.exists() {
+            self.gate.missing_path.store(true, Ordering::SeqCst);
+        }
+        self.entered
+            .send((report_id.clone(), report_path.to_path_buf()))
+            .map_err(|error| format!("cannot announce notifier entry: {error}"))?;
+
+        let mut released = self
+            .gate
+            .released
+            .lock()
+            .map_err(|_| "publication gate lock poisoned".to_string())?;
+        while !released.remove(&report_id) {
+            context.checkpoint()?;
+            let (next, _) = self
+                .gate
+                .wake
+                .wait_timeout(released, std::time::Duration::from_millis(10))
+                .map_err(|_| "publication gate lock poisoned".to_string())?;
+            released = next;
+        }
+        drop(released);
+
+        if !report_path.exists() {
+            self.gate.missing_path.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn concurrent_retention_never_removes_a_report_from_a_live_notifier() {
+    let root = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(PublicationGate {
+        released: Mutex::new(BTreeSet::new()),
+        wake: Condvar::new(),
+        missing_path: AtomicBool::new(false),
     });
-    assert!(raw_file.is_some(), "Should have a raw.bin file");
+    let pipeline = Arc::new(Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![Box::new(RetentionManager::with_dir(
+            1,
+            u64::MAX,
+            u64::MAX,
+            root.path().to_path_buf(),
+        ))],
+        notifiers: vec![Box::new(GatedPathNotifier {
+            entered: entered_tx,
+            gate: gate.clone(),
+        })],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(root.path().to_path_buf()),
+    });
+    let event_a = make_event();
+    let event_b = make_event();
+    let id_a = event_a.report_id.as_str().to_string();
+    let id_b = event_b.report_id.as_str().to_string();
+
+    let pipeline_a = pipeline.clone();
+    let thread_a = std::thread::spawn(move || pipeline_a.handle_event(&event_a, 0));
+    let (entered_a, path_a) = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("first notifier did not start");
+    assert_eq!(entered_a, id_a);
+    filetime::set_file_mtime(
+        path_a.parent().unwrap(),
+        filetime::FileTime::from_unix_time(1, 0),
+    )
+    .unwrap();
+
+    let pipeline_b = pipeline.clone();
+    let thread_b = std::thread::spawn(move || pipeline_b.handle_event(&event_b, 0));
+    let (entered_b, path_b) = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("second notifier did not start");
+    assert_eq!(entered_b, id_b);
+    filetime::set_file_mtime(
+        path_b.parent().unwrap(),
+        filetime::FileTime::from_unix_time(2, 0),
+    )
+    .unwrap();
+
+    // The newer report finishes first. Its final-cleanup pass must defer at the
+    // leased older report rather than deleting either live notifier path.
+    gate.release(&id_b);
+    let diagnostics_b = thread_b.join().unwrap();
+    assert!(diagnostics_b.report_path.is_some());
+    assert!(path_a.exists());
+    assert!(path_b.exists());
+    assert!(crate::pipeline::artifact::is_report_publication_leased(
+        path_a.parent().unwrap()
+    ));
+    assert!(!crate::pipeline::artifact::is_report_publication_leased(
+        path_b.parent().unwrap()
+    ));
+    filetime::set_file_mtime(
+        path_a.parent().unwrap(),
+        filetime::FileTime::from_unix_time(1, 0),
+    )
+    .unwrap();
+    filetime::set_file_mtime(
+        path_b.parent().unwrap(),
+        filetime::FileTime::from_unix_time(2, 0),
+    )
+    .unwrap();
+
+    // Once the older notifier finishes, its own final-cleanup pass may remove
+    // that older report and leave the newer committed report in place.
+    gate.release(&id_a);
+    let diagnostics_a = thread_a.join().unwrap();
+    assert!(!gate.missing_path.load(Ordering::SeqCst));
+    assert!(!path_a.exists());
+    assert!(path_b.exists());
+    assert!(diagnostics_a.report_path.is_none());
 }
 
 #[test]
@@ -965,18 +1352,9 @@ fn test_stage1_raw_file_contents() {
     let event = make_crash_event();
     let _diag = pipeline.handle_event(&event, 0);
 
-    // Find the raw.bin file
-    let raw_file = std::fs::read_dir(tempdir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|f| {
-            f.file_name()
-                .to_str()
-                .is_some_and(|n| n.contains("_raw.bin"))
-        })
-        .expect("raw.bin file should exist");
-
-    let contents = std::fs::read_to_string(raw_file.path()).unwrap();
+    let raw_file =
+        committed_artifact(tempdir.path(), "threads.raw").expect("threads.raw file should exist");
+    let contents = std::fs::read_to_string(raw_file).unwrap();
     assert!(
         contents.contains("---thread 0"),
         "Should contain thread header"
@@ -1005,6 +1383,7 @@ fn test_anr_event_produces_report() {
     );
 
     let event = CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::Anr,
         termination: None,
         exception_type: None,
@@ -1020,14 +1399,9 @@ fn test_anr_event_produces_report() {
 
     let _diag = pipeline.handle_event(&event, 0);
 
-    // Find JSON file and verify report_type
-    let json_file = std::fs::read_dir(tempdir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|f| f.path().extension().is_some_and(|e| e == "json"))
-        .expect("JSON report should exist");
-
-    let json_str = std::fs::read_to_string(json_file.path()).unwrap();
+    let json_file =
+        committed_artifact(tempdir.path(), "report.json").expect("JSON report should exist");
+    let json_str = std::fs::read_to_string(json_file).unwrap();
     assert!(
         json_str.contains("\"type\": \"anr\""),
         "Report type should be anr, got: {json_str}"
@@ -1378,10 +1752,17 @@ fn make_full_pipeline(
 }
 
 fn json_report_exists(dir: &std::path::Path) -> bool {
+    committed_artifact(dir, "report.json").is_some()
+}
+
+fn committed_artifact(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     std::fs::read_dir(dir)
-        .unwrap()
+        .ok()?
         .filter_map(Result::ok)
-        .any(|f| f.path().extension().is_some_and(|e| e == "json"))
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|report_dir| report_dir.join(name))
+        .find(|path| path.is_file())
 }
 
 fn assert_dependency_skipped(diagnostics: &Diagnostics, plugin_name: &str) {
@@ -1599,6 +1980,7 @@ fn test_termination_pipeline_applies_hard_and_order_only_contract_to_three_live_
     );
     pipeline.validate_dependencies().unwrap();
     let event = CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::ExitFailure,
         termination: Some(TerminationReason::Exited {
             exit_code: 7,
@@ -1662,6 +2044,7 @@ fn test_unavailable_filter_hard_provider_skips_dependent_in_live_and_termination
     ));
 
     let termination_event = CrashEvent {
+        report_id: Default::default(),
         report_type: ReportType::ExitFailure,
         termination: Some(TerminationReason::Exited {
             exit_code: 9,
@@ -2007,7 +2390,9 @@ fn test_zip_move_and_notifier_share_exact_final_report_path() {
         .report_path
         .expect("pipeline should expose its final artifact");
     assert_eq!(captured.lock().unwrap().as_ref(), Some(&report_path));
-    assert_eq!(report_path.parent(), Some(sent.as_path()));
+    let report_dir = report_path.parent().expect("report directory");
+    assert_eq!(report_dir.parent(), Some(sent.as_path()));
+    assert!(report_dir.join("manifest.json").exists());
     assert_eq!(
         report_path.extension().and_then(|ext| ext.to_str()),
         Some("zip")
@@ -2568,4 +2953,272 @@ fn test_runtime_registry_rejects_duplicate_ids_across_categories() {
             second_category: PluginCategory::Collector,
         }) if plugin_id == "GlobalDuplicate"
     ));
+}
+
+struct CommitBreaker;
+
+impl Plugin for CommitBreaker {
+    fn name(&self) -> &'static str {
+        "CommitBreaker"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Low
+    }
+}
+
+impl PostProcessor for CommitBreaker {
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        let staging = context
+            .artifact_transaction()
+            .expect("artifact transaction")
+            .staging_dir();
+        std::fs::write(staging.join("unregistered.bin"), b"break exact manifest")
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct AfterCommitProbe {
+    calls: Arc<AtomicU32>,
+    mutation_rejected: Arc<AtomicBool>,
+}
+
+impl Plugin for AfterCommitProbe {
+    fn name(&self) -> &'static str {
+        "AfterCommitProbe"
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Low
+    }
+}
+
+impl PostProcessor for AfterCommitProbe {
+    fn phase(&self) -> PostProcessorPhase {
+        PostProcessorPhase::AfterCommit
+    }
+
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        context: &PluginContext,
+    ) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let transaction = context
+            .artifact_transaction()
+            .expect("artifact transaction");
+        self.mutation_rejected.store(
+            transaction
+                .write_bytes("late.bin", ArtifactKind::Attachment, b"late")
+                .is_err(),
+            Ordering::SeqCst,
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn commit_failure_runs_no_after_commit_side_effects() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicU32::new(0));
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![
+            Box::new(CommitBreaker),
+            Box::new(AfterCommitProbe {
+                calls: calls.clone(),
+                mutation_rejected: Arc::new(AtomicBool::new(false)),
+            }),
+        ],
+        notifiers: vec![],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(root.path().to_path_buf()),
+    };
+
+    let diagnostics = pipeline.handle_event(&make_crash_event(), 123);
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(diagnostics.plugins.iter().any(|plugin| {
+        plugin.name == "ArtifactCommit" && matches!(plugin.status, PluginStatus::Error(_))
+    }));
+    assert!(diagnostics.report_path.is_none());
+}
+
+#[test]
+fn after_commit_stage_cannot_mutate_the_sealed_transaction() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicU32::new(0));
+    let mutation_rejected = Arc::new(AtomicBool::new(false));
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![Box::new(AfterCommitProbe {
+            calls: calls.clone(),
+            mutation_rejected: mutation_rejected.clone(),
+        })],
+        notifiers: vec![],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(root.path().to_path_buf()),
+    };
+
+    let diagnostics = pipeline.handle_event(&make_crash_event(), 123);
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(mutation_rejected.load(Ordering::SeqCst));
+    assert!(diagnostics.report_path.is_some());
+}
+
+struct PhaseDependencyPostProcessor {
+    name: &'static str,
+    phase: PostProcessorPhase,
+    order_after: &'static [&'static str],
+}
+
+impl Plugin for PhaseDependencyPostProcessor {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Low
+    }
+
+    fn order_after(&self) -> &'static [&'static str] {
+        self.order_after
+    }
+}
+
+impl PostProcessor for PhaseDependencyPostProcessor {
+    fn phase(&self) -> PostProcessorPhase {
+        self.phase
+    }
+
+    fn process(
+        &self,
+        _event: &CrashEvent,
+        _result: &mut ReportResult,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn dependency_validation_rejects_dependencies_on_any_later_phase() {
+    for (dependent_phase, dependency_phase) in [
+        (
+            PostProcessorPhase::BeforeCommit,
+            PostProcessorPhase::AfterCommit,
+        ),
+        (
+            PostProcessorPhase::BeforeCommit,
+            PostProcessorPhase::AfterNotify,
+        ),
+        (
+            PostProcessorPhase::AfterCommit,
+            PostProcessorPhase::AfterNotify,
+        ),
+        (
+            PostProcessorPhase::AfterNotify,
+            PostProcessorPhase::FinalCleanup,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let pipeline = make_full_pipeline(
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                Box::new(PhaseDependencyPostProcessor {
+                    name: "LaterPhase",
+                    phase: dependency_phase,
+                    order_after: &[],
+                }),
+                Box::new(PhaseDependencyPostProcessor {
+                    name: "EarlierPhase",
+                    phase: dependent_phase,
+                    order_after: &["LaterPhase"],
+                }),
+            ],
+            vec![],
+            root.path(),
+        );
+
+        assert!(matches!(
+            pipeline.validate_dependencies(),
+            Err(crate::config::ConfigValidationError::InvalidDependencyOrder {
+                category: PluginCategory::PostProcessor,
+                ref plugin_id,
+                ref dependency,
+                kind: DependencyKind::OrderOnly,
+            }) if plugin_id == "EarlierPhase" && dependency == "LaterPhase"
+        ));
+    }
+}
+
+#[test]
+fn dependency_validation_allows_dependencies_on_any_earlier_phase() {
+    let root = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![],
+        vec![],
+        vec![],
+        vec![
+            Box::new(PhaseDependencyPostProcessor {
+                name: "StagingMutation",
+                phase: PostProcessorPhase::BeforeCommit,
+                order_after: &[],
+            }),
+            Box::new(PhaseDependencyPostProcessor {
+                name: "PublishedState",
+                phase: PostProcessorPhase::AfterCommit,
+                order_after: &["StagingMutation"],
+            }),
+            Box::new(PhaseDependencyPostProcessor {
+                name: "PostNotificationCleanup",
+                phase: PostProcessorPhase::AfterNotify,
+                order_after: &["StagingMutation", "PublishedState"],
+            }),
+            Box::new(PhaseDependencyPostProcessor {
+                name: "TerminalMaintenance",
+                phase: PostProcessorPhase::FinalCleanup,
+                order_after: &[
+                    "StagingMutation",
+                    "PublishedState",
+                    "PostNotificationCleanup",
+                ],
+            }),
+        ],
+        vec![],
+        root.path(),
+    );
+
+    pipeline.validate_dependencies().unwrap();
 }
