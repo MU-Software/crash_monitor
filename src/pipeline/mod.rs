@@ -18,6 +18,7 @@ pub use safety::run_plugin_safe;
 pub use traits::{Collector, Filter, Notifier, Plugin, PostProcessor, PreProcessor};
 pub use types::{
     CollectedData, CrashEvent, Diagnostics, PluginStatus, Priority, ReportResult, ReportType,
+    TerminationReason,
 };
 
 // ═══════════════════════════════════════════════════
@@ -202,6 +203,109 @@ impl Pipeline {
                 diagnostics.record(n.name(), status, start.elapsed());
             }
         }
+
+        diagnostics.report_path = result.json_path;
+
+        diagnostics
+    }
+
+    /// Write and finalize a report for a child that has already terminated.
+    ///
+    /// Task suspension and task-port collectors are intentionally skipped: a
+    /// dead task is not introspectable, and attempting VM enumeration against
+    /// an invalid task can prevent the termination report from ever being
+    /// finalized. The immutable `TerminationReason` remains the authoritative
+    /// payload for this path.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn handle_termination_event(&self, event: &CrashEvent) -> Diagnostics {
+        debug_assert!(event.termination.is_some());
+        let mut diagnostics = Diagnostics::new();
+
+        let pending = match &self.output_dir {
+            Some(dir) => dir.clone(),
+            None => match crate::utils::paths::pending_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    eprintln!("[monitor] Failed to get pending dir: {e}");
+                    return diagnostics;
+                }
+            },
+        };
+
+        for filter in &self.filters {
+            let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
+            let pass = run_plugin_safe(filter.name(), timeout, || filter.should_process(event))
+                .unwrap_or(true);
+            if !pass {
+                return diagnostics;
+            }
+        }
+
+        for collector in &self.collectors {
+            diagnostics.record_immediate(
+                collector.name(),
+                PluginStatus::Skipped("child already terminated".into()),
+            );
+        }
+        for pre_processor in &self.pre_processors {
+            diagnostics.record_immediate(
+                pre_processor.name(),
+                PluginStatus::Skipped("child already terminated".into()),
+            );
+        }
+
+        let data = CollectedData::default();
+        let json_path: Option<PathBuf> = run_plugin_safe("Stage2Json", STAGE_TIMEOUT, || {
+            let mut crash_report = report::build_report(event, &data, &diagnostics);
+            report::write_report(&pending, &mut crash_report, &[])
+        });
+        let mut result = ReportResult {
+            raw_path: None,
+            json_path,
+            session: None,
+        };
+
+        for post_processor in &self.post_processors {
+            if !post_processor.is_available() {
+                diagnostics.record_immediate(
+                    post_processor.name(),
+                    PluginStatus::Skipped("not available".into()),
+                );
+                continue;
+            }
+            let start = Instant::now();
+            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let status = match run_plugin_safe(post_processor.name(), timeout, || {
+                post_processor.process(event, &mut result)
+            }) {
+                Some(()) => PluginStatus::Ok,
+                None => PluginStatus::Error("failed or panicked".into()),
+            };
+            diagnostics.record(post_processor.name(), status, start.elapsed());
+        }
+
+        if let Some(ref path) = result.json_path {
+            for notifier in &self.notifiers {
+                if !notifier.is_available() {
+                    diagnostics.record_immediate(
+                        notifier.name(),
+                        PluginStatus::Skipped("not available".into()),
+                    );
+                    continue;
+                }
+                let start = Instant::now();
+                let timeout = plugin_timeout(notifier.timeout_secs(), NOTIFIER_TIMEOUT);
+                let status =
+                    match run_plugin_safe(notifier.name(), timeout, || notifier.notify(path)) {
+                        Some(()) => PluginStatus::Ok,
+                        None => PluginStatus::Error("failed or panicked".into()),
+                    };
+                diagnostics.record(notifier.name(), status, start.elapsed());
+            }
+        }
+
+        diagnostics.report_path = result.json_path;
 
         diagnostics
     }

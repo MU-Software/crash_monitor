@@ -6,6 +6,7 @@ use std::path::PathBuf;
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
         report_type: ReportType::Crash,
+        termination: None,
         exception_type: None,
         exception_code: None,
         exception_subcode: None,

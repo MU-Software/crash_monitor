@@ -10,6 +10,7 @@ use std::time::Duration;
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
         report_type: ReportType::Crash,
+        termination: None,
         exception_type: None,
         exception_code: None,
         exception_subcode: None,
@@ -34,6 +35,7 @@ fn write_test_report(dir: &std::path::Path) -> PathBuf {
             trigger: None,
             hang_duration_ms: None,
         },
+        termination: None,
         build: None,
         exception: None,
         crash_context: None,

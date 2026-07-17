@@ -1,7 +1,7 @@
 //! Unit tests for `report::load_report` — plain JSON and ZIP archive loading.
 
 use super::*;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -63,6 +63,131 @@ fn load_report_reads_plain_json() {
 
     let report = load_report(&path).expect("plain JSON should load");
     assert_eq!(report.header.pid, 1234);
+    assert!(report.termination.is_none());
+}
+
+#[test]
+fn report_without_termination_omits_the_field() {
+    let report: CrashReport = serde_json::from_str(&sample_report_json()).unwrap();
+    let value = serde_json::to_value(report).unwrap();
+    assert!(value.get("termination").is_none());
+}
+
+#[test]
+fn build_report_preserves_exit_termination() {
+    let event = CrashEvent {
+        report_type: ReportType::ExitFailure,
+        termination: Some(TerminationReason::Exited {
+            exit_code: 23,
+            runtime_ms: 4_567,
+        }),
+        exception_type: None,
+        exception_code: None,
+        exception_subcode: None,
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 1234,
+        process_name: "test_app".into(),
+        hang_duration_ms: None,
+    };
+
+    let report = build_report(&event, &CollectedData::default(), &Diagnostics::new());
+    assert_eq!(report.header.report_type, ReportType::ExitFailure);
+    assert_eq!(report.termination, event.termination);
+    assert!(report.exception.is_none());
+    assert_eq!(
+        serde_json::to_value(&report).unwrap()["termination"],
+        serde_json::json!({
+            "kind": "exited",
+            "exit_code": 23,
+            "runtime_ms": 4_567
+        })
+    );
+}
+
+#[test]
+fn report_deserializes_signal_termination() {
+    let mut value: serde_json::Value = serde_json::from_str(&sample_report_json()).unwrap();
+    value["header"]["type"] = serde_json::json!("signal_failure");
+    value["termination"] = serde_json::json!({
+        "kind": "signaled",
+        "signal": 6,
+        "core_dumped": true,
+        "runtime_ms": 321
+    });
+
+    let report: CrashReport = serde_json::from_value(value).unwrap();
+    assert_eq!(report.header.report_type, ReportType::SignalFailure);
+    assert_eq!(
+        report.termination,
+        Some(TerminationReason::Signaled {
+            signal: 6,
+            core_dumped: true,
+            runtime_ms: 321,
+        })
+    );
+}
+
+#[test]
+fn update_termination_atomically_rewrites_plain_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("crash_test.json");
+    let mut original: serde_json::Value = serde_json::from_str(&sample_report_json()).unwrap();
+    original["future_plugin_field"] = serde_json::json!({"preserve": [1, 2, 3]});
+    original["header"]["future_schema_field"] = serde_json::json!("keep-me");
+    std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    let reason = TerminationReason::Signaled {
+        signal: 11,
+        core_dumped: true,
+        runtime_ms: 987,
+    };
+
+    update_termination(&path, reason).expect("plain report should be updated");
+
+    assert_eq!(load_report(&path).unwrap().termination, Some(reason));
+    let updated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        updated["future_plugin_field"],
+        original["future_plugin_field"]
+    );
+    assert_eq!(
+        updated["header"]["future_schema_field"],
+        original["header"]["future_schema_field"]
+    );
+    assert!(!dir.path().join(".crash_test.json.termination.tmp").exists());
+}
+
+#[test]
+fn update_termination_rewrites_zip_and_preserves_attachments() {
+    let json = sample_report_json();
+    let attachment = b"unchanged attachment bytes";
+    let (dir, zip_path) = make_zip(
+        "crash_test.zip",
+        &[
+            ("crash_test.json", json.as_bytes()),
+            ("crash_test_screenshot_000.png", attachment),
+        ],
+    );
+    let reason = TerminationReason::Signaled {
+        signal: 6,
+        core_dumped: false,
+        runtime_ms: 1_234,
+    };
+
+    update_termination(&zip_path, reason).expect("ZIP report should be updated");
+
+    assert_eq!(load_report(&zip_path).unwrap().termination, Some(reason));
+    let file = std::fs::File::open(&zip_path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut preserved = Vec::new();
+    archive
+        .by_name("crash_test_screenshot_000.png")
+        .unwrap()
+        .read_to_end(&mut preserved)
+        .unwrap();
+    assert_eq!(preserved, attachment);
+    assert!(!dir.path().join(".crash_test.zip.termination.tmp").exists());
 }
 
 #[test]

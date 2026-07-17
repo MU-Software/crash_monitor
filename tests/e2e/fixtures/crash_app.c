@@ -6,9 +6,11 @@
  * region from $CRASH_MONITOR_SHM, writes a breadcrumb + minimal context via the
  * schema layout, then triggers the requested scenario.
  *
- * Usage: crash_app <sigsegv|sigabrt|anr|clean>
+ * Usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean>
  *   sigsegv  — NULL pointer dereference
  *   sigabrt  — abort()
+ *   sigterm  — terminate via an uncaught SIGTERM
+ *   exit42   — immediate non-zero exit (42)
  *   anr      — hang forever (heartbeat never advances → ANR)
  *   clean    — normal exit (no report expected)
  *
@@ -21,6 +23,7 @@
 #include "crash_shm.h"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,7 +97,7 @@ static void populate_shm(const char* scenario) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "usage: crash_app <sigsegv|sigabrt|anr|clean>\n");
+        fprintf(stderr, "usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean>\n");
         return 1;
     }
     const char* scenario = argv[1];
@@ -105,6 +108,25 @@ int main(int argc, char* argv[]) {
         *np = 42; /* SIGSEGV */
     } else if (strcmp(scenario, "sigabrt") == 0) {
         abort();
+    } else if (strcmp(scenario, "sigterm") == 0) {
+        /* Make this deterministic even when the test runner ignored or blocked
+         * SIGTERM before spawning us: restore the default (uncaught) action and
+         * unblock it before raising it in this process. */
+        if (signal(SIGTERM, SIG_DFL) == SIG_ERR) {
+            _Exit(125);
+        }
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGTERM);
+        if (sigprocmask(SIG_UNBLOCK, &signals, NULL) != 0) {
+            _Exit(125);
+        }
+        if (raise(SIGTERM) != 0) {
+            _Exit(125);
+        }
+        _Exit(125); /* SIGTERM unexpectedly returned instead of terminating. */
+    } else if (strcmp(scenario, "exit42") == 0) {
+        return 42;
     } else if (strcmp(scenario, "anr") == 0) {
         for (;;) {
             pause(); /* hang; heartbeat never advances → ANR */

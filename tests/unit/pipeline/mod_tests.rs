@@ -1,6 +1,7 @@
 use super::*;
 use crate::collectors::thread::RawThreadData;
 use crate::platform::mock::MockPlatform;
+use crate::postprocessors::{MoveToSent, ZIPArchiver};
 use mach2::port::mach_port_t;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -68,6 +69,7 @@ impl Filter for MockFilter {
 fn make_event() -> CrashEvent {
     CrashEvent {
         report_type: ReportType::Snapshot,
+        termination: None,
         exception_type: None,
         exception_code: None,
         exception_subcode: None,
@@ -298,6 +300,7 @@ impl Collector for DependentOnFailCollector {
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
         report_type: ReportType::Crash,
+        termination: None,
         exception_type: Some(1),
         exception_code: Some(0xDEAD),
         exception_subcode: Some(0xBEEF),
@@ -548,6 +551,7 @@ fn test_anr_event_produces_report() {
 
     let event = CrashEvent {
         report_type: ReportType::Anr,
+        termination: None,
         exception_type: None,
         exception_code: None,
         exception_subcode: None,
@@ -931,7 +935,7 @@ fn test_duplicate_detected_skips_report() {
         tempdir.path(),
     );
 
-    pipeline.handle_event(&make_crash_event(), 0);
+    let _ = pipeline.handle_event(&make_crash_event(), 0);
 
     // Duplicate → Stage 2 report generation is skipped, so no JSON is written.
     assert!(
@@ -1011,11 +1015,48 @@ fn test_notifier_runs_with_report_path() {
         tempdir.path(),
     );
 
-    pipeline.handle_event(&make_crash_event(), 0);
+    let _ = pipeline.handle_event(&make_crash_event(), 0);
 
     let path = captured.lock().unwrap().clone();
     let path = path.expect("notifier should have received the report path");
     assert!(path.extension().is_some_and(|e| e == "json"));
+}
+
+#[test]
+fn test_zip_move_and_notifier_share_exact_final_report_path() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pending = tempdir.path().join("pending");
+    let sent = tempdir.path().join("sent");
+    std::fs::create_dir_all(&pending).unwrap();
+    let captured = Arc::new(Mutex::new(None));
+    let pipeline = make_full_pipeline(
+        vec![],
+        vec![],
+        vec![],
+        vec![
+            Box::new(ZIPArchiver),
+            Box::new(MoveToSent::with_dir(sent.clone())),
+        ],
+        vec![Box::new(CfgNotifier {
+            name: "FinalPathNotifier",
+            available: true,
+            captured: captured.clone(),
+        })],
+        &pending,
+    );
+
+    let diagnostics = pipeline.handle_event(&make_crash_event(), 0);
+
+    let report_path = diagnostics
+        .report_path
+        .expect("pipeline should expose its final artifact");
+    assert_eq!(captured.lock().unwrap().as_ref(), Some(&report_path));
+    assert_eq!(report_path.parent(), Some(sent.as_path()));
+    assert_eq!(
+        report_path.extension().and_then(|ext| ext.to_str()),
+        Some("zip")
+    );
+    assert!(report_path.exists());
 }
 
 #[test]

@@ -8,6 +8,8 @@
 | `snapshot` | manual, on `SIGUSR1` — the app keeps running |
 | `anr` | the ANR watchdog saw the heartbeat stall past its threshold |
 | `oom` | the child was killed under memory pressure (opt-in trigger) |
+| `exit_failure` | the child exited with a non-zero status |
+| `signal_failure` | the child terminated from a signal not already reported as a Mach crash |
 
 ## Location and lifecycle
 
@@ -30,6 +32,7 @@ ran, but the top-level shape is:
 ```jsonc
 {
   "header":        { "version", "timestamp", "pid", "process", "type", "collector" },
+  "termination":   { "kind": "exited", "exit_code", "runtime_ms" },
   "exception":     { "type", "code", "subcode", "signal", "fault_address" },
   "crash_context": { "annotations": { "<key>": "<value>", … } },   // app state, generic KV
   "threads": [
@@ -51,6 +54,40 @@ ran, but the top-level shape is:
 }
 ```
 
+`termination` is present on reports that describe a terminal child state,
+including fatal Mach crashes, and omitted from non-terminal snapshots/ANR
+reports. It is an internally tagged object with one of these shapes:
+
+```jsonc
+{ "kind": "exited",   "exit_code": 17, "runtime_ms": 250 }
+{ "kind": "signaled", "signal": 11, "core_dumped": true, "runtime_ms": 999 }
+```
+
+`runtime_ms` is wall-clock time from the start of the spawn operation until the
+terminal wait status is observed; it can therefore include supervisor
+observation delay. `core_dumped` preserves the corresponding wait-status flag
+rather than inferring it from the signal number. A Mach crash report is first
+produced from exception capture; after the Mach reply and child reap, the
+supervisor atomically adds the actual wait status to the final JSON or ZIP.
+
+## Monitor process exit status
+
+The monitor keeps outcome categories separate internally and exposes these
+stable CLI statuses:
+
+| Status | Meaning |
+|--------|---------|
+| `0` | child completed normally |
+| `70` | monitor-internal failure (including synchronous spawn/exec setup failure) |
+| `80` | child exited non-zero; the original code is in `termination.exit_code` |
+| `81` | a fatal Mach exception was detected and reported |
+| `128 + signal` | child terminated from an otherwise-unreported signal |
+
+A Unix process status cannot carry every child exit code and separate monitor
+namespaces at once. The JSON report is therefore authoritative for the original
+exit code, signal, core-dump flag, and runtime; the monitor status communicates
+the outcome category.
+
 Application/domain state lives under `crash_context.annotations` as string
 key-value pairs (the monitor does not interpret them — see
 [shared-memory.md](shared-memory.md#crash-context-app-agnostic)).
@@ -68,7 +105,8 @@ crash_monitor analyze <report.json>
 
 Prints the header, the annotation map, session, fingerprint, exception details,
 the crashed thread's backtrace, recent breadcrumbs, and a pipeline
-success/error/skipped tally.
+success/error/skipped tally. Exit- and signal-failure summaries also print the
+exit code or signal, core-dump status when set, and runtime.
 
 ### `stack` — stack memory hex dump
 

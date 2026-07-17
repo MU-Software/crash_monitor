@@ -67,6 +67,11 @@ impl PostProcessor for ZIPArchiver {
             let _ = fs::remove_file(file);
         }
 
+        // ZIP is now the canonical report artifact. Keeping this path exact is
+        // required by later post-processors, notifiers, and crash-status
+        // finalization after the child has been reaped.
+        result.json_path = Some(zip_path);
+
         Ok(())
     }
 }

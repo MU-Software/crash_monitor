@@ -4,7 +4,7 @@
 //! platform-agnostic `MonitorEvent` stream consumed by `event_loop`:
 //! - **Mach exception port** → `Crash`
 //! - **SIGUSR1 pipe** (F8 manual snapshot) → `Snapshot`
-//! - **`waitpid`** → `ChildExited` / `ChildSignaled` (probable OOM) / `ChildGone`
+//! - **`waitpid`** → one lossless `ChildTerminated(TerminationReason)` event
 //!
 //! The pure `MonitorEvent` → `CrashEvent` mapping (plus ANR/OOM decisions) lives
 //! in `event_loop` and is unit-tested via `TestEventSource`; this module owns the
@@ -18,8 +18,10 @@ use nix::unistd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::event_loop::{EventSource, MonitorEvent};
+use crate::pipeline::TerminationReason;
 use crate::platform;
 
 // ═══════════════════════════════════════════════════
@@ -98,6 +100,7 @@ pub struct MacEventSource {
     exc_rx: std::sync::mpsc::Receiver<platform::ExceptionInfo>,
     signal_read_fd: OwnedFd,
     child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
 }
 
 impl MacEventSource {
@@ -108,61 +111,101 @@ impl MacEventSource {
         exc_rx: std::sync::mpsc::Receiver<platform::ExceptionInfo>,
         signal_read_fd: OwnedFd,
         child_pid: nix::unistd::Pid,
+        child_started_at: Instant,
     ) -> Self {
         Self {
             exc_rx,
             signal_read_fd,
             child_pid,
+            child_started_at,
         }
+    }
+}
+
+/// Normalize every terminal `WaitStatus` without losing signal/core metadata.
+/// Non-terminal statuses deliberately return `None`.
+#[must_use]
+pub fn termination_from_wait_status(
+    status: WaitStatus,
+    runtime: Duration,
+) -> Option<TerminationReason> {
+    let runtime_ms = u64::try_from(runtime.as_millis()).unwrap_or(u64::MAX);
+    match status {
+        WaitStatus::Exited(_, exit_code) => Some(TerminationReason::Exited {
+            exit_code,
+            runtime_ms,
+        }),
+        WaitStatus::Signaled(_, signal, core_dumped) => Some(TerminationReason::Signaled {
+            signal: signal as i32,
+            core_dumped,
+            runtime_ms,
+        }),
+        _ => None,
     }
 }
 
 impl EventSource for MacEventSource {
     fn poll(&mut self) -> Option<MonitorEvent> {
         // Check for Mach exception (crash)
-        if let Ok(exc_info) = self.exc_rx.try_recv() {
-            eprintln!(
-                "[monitor] Crash detected: {} (code={:#x}, subcode={:#x})",
-                platform::exception_type_name(exc_info.exception_type),
-                exc_info.code,
-                exc_info.subcode
-            );
-            return Some(MonitorEvent::Crash {
-                exception_type: exc_info.exception_type,
-                code: exc_info.code,
-                subcode: exc_info.subcode,
-                thread_port: exc_info.thread_port,
-                reply_header: Some(exc_info.reply_header),
-            });
-        }
-
-        // Check for SIGUSR1 (manual snapshot)
-        if drain_signal_pipe(&self.signal_read_fd) {
-            eprintln!("[monitor] Manual snapshot requested (SIGUSR1)");
-            return Some(MonitorEvent::Snapshot);
-        }
+        let listener_disconnected = match self.exc_rx.try_recv() {
+            Ok(exc_info) => {
+                eprintln!(
+                    "[monitor] Crash detected: {} (code={:#x}, subcode={:#x})",
+                    platform::exception_type_name(exc_info.exception_type),
+                    exc_info.code,
+                    exc_info.subcode
+                );
+                return Some(MonitorEvent::Crash {
+                    exception_type: exc_info.exception_type,
+                    code: exc_info.code,
+                    subcode: exc_info.subcode,
+                    thread_port: exc_info.thread_port,
+                    reply_header: Some(exc_info.reply_header),
+                });
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
+        };
 
         // ANR detection is now handled inline by event_loop (no dedicated thread)
 
-        // Check if child has exited
-        match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::Exited(_, status)) => {
-                eprintln!("[monitor] Child exited with status {status}.");
-                return Some(MonitorEvent::ChildExited { status });
+        // A terminal wait status wins over lower-priority snapshot/listener
+        // events so a dead task can never enter the live-task capture path.
+        loop {
+            match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(status) => {
+                    if let Some(reason) =
+                        termination_from_wait_status(status, self.child_started_at.elapsed())
+                    {
+                        eprintln!("[monitor] Child terminated: {reason:?}.");
+                        return Some(MonitorEvent::ChildTerminated(reason));
+                    }
+                    break;
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(nix::errno::Errno::ECHILD) => {
+                    return Some(MonitorEvent::MonitorFailure {
+                        message: "waitpid lost ownership of the child (ECHILD)".to_string(),
+                    });
+                }
+                Err(e) => {
+                    return Some(MonitorEvent::MonitorFailure {
+                        message: format!("waitpid failed: {e}"),
+                    });
+                }
             }
-            Ok(WaitStatus::Signaled(_, sig, _)) => {
-                eprintln!("[monitor] Child killed by signal {sig}.");
-                return Some(MonitorEvent::ChildSignaled { signal: sig as i32 });
-            }
-            Ok(WaitStatus::StillAlive | _) => {}
-            Err(nix::errno::Errno::ECHILD) => {
-                eprintln!("[monitor] Child no longer exists.");
-                return Some(MonitorEvent::ChildGone);
-            }
-            Err(e) => {
-                eprintln!("[monitor] waitpid error: {e}");
-                return Some(MonitorEvent::ChildExited { status: 1 });
-            }
+        }
+
+        if listener_disconnected {
+            return Some(MonitorEvent::MonitorFailure {
+                message: "Mach exception listener disconnected".to_string(),
+            });
+        }
+
+        // Check for SIGUSR1 (manual snapshot) only while the child is alive.
+        if drain_signal_pipe(&self.signal_read_fd) {
+            eprintln!("[monitor] Manual snapshot requested (SIGUSR1)");
+            return Some(MonitorEvent::Snapshot);
         }
 
         None

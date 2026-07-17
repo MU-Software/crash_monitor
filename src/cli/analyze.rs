@@ -1,7 +1,7 @@
 //! `crash_monitor analyze <report.json>` — human-readable report summary.
 
-use crate::pipeline::ReportType;
 use crate::pipeline::report::{self, CrashReport};
+use crate::pipeline::{ReportType, TerminationReason};
 use std::path::Path;
 
 /// Maximum number of backtrace frames to display.
@@ -65,6 +65,11 @@ fn print_summary(report: &CrashReport) {
 }
 
 fn print_header(report: &CrashReport) {
+    println!("{}", header_summary(report));
+    println!("Time: {}", report.header.timestamp);
+}
+
+fn header_summary(report: &CrashReport) -> String {
     let h = &report.header;
     match h.report_type {
         ReportType::Crash => {
@@ -76,29 +81,48 @@ fn print_header(report: &CrashReport) {
                 .exception
                 .as_ref()
                 .map_or("unknown".into(), |e| e.fault_address.clone());
-            println!(
+            format!(
                 "Crash Report: {signal} at {fault}  (PID {}, {})",
                 h.pid, h.process
-            );
+            )
         }
         ReportType::Anr => {
             let dur = h.hang_duration_ms.unwrap_or(0);
-            println!(
+            format!(
                 "ANR Report: unresponsive for {dur}ms  (PID {}, {})",
                 h.pid, h.process
-            );
+            )
         }
-        ReportType::Oom => {
-            println!(
-                "OOM Report: process terminated by OOM  (PID {}, {})",
+        ReportType::Oom => format!(
+            "OOM Report: process terminated by OOM  (PID {}, {})",
+            h.pid, h.process
+        ),
+        ReportType::Snapshot => format!("Snapshot Report  (PID {}, {})", h.pid, h.process),
+        ReportType::ExitFailure => match report.termination {
+            Some(TerminationReason::Exited {
+                exit_code,
+                runtime_ms,
+            }) => format!(
+                "Exit Failure Report: exit code {exit_code} after {runtime_ms}ms  (PID {}, {})",
                 h.pid, h.process
-            );
-        }
-        ReportType::Snapshot => {
-            println!("Snapshot Report  (PID {}, {})", h.pid, h.process);
-        }
+            ),
+            _ => format!("Exit Failure Report  (PID {}, {})", h.pid, h.process),
+        },
+        ReportType::SignalFailure => match report.termination {
+            Some(TerminationReason::Signaled {
+                signal,
+                core_dumped,
+                runtime_ms,
+            }) => {
+                let core = if core_dumped { ", core dumped" } else { "" };
+                format!(
+                    "Signal Failure Report: signal {signal}{core} after {runtime_ms}ms  (PID {}, {})",
+                    h.pid, h.process
+                )
+            }
+            _ => format!("Signal Failure Report  (PID {}, {})", h.pid, h.process),
+        },
     }
-    println!("Time: {}", h.timestamp);
 }
 
 fn print_crash_context(report: &CrashReport) {

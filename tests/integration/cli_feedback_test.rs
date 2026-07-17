@@ -1,7 +1,7 @@
 //! Integration test: `crash_dialog_macos` binary with `--mock-input` and `--dry-run`.
 //!
 //! These tests exercise the real binary end-to-end without showing any UI
-//! (AppKit is never initialized). They verify argument parsing, exit codes,
+//! (`AppKit` is never initialized). They verify argument parsing, exit codes,
 //! and stdout output.
 
 use std::io::Write;
@@ -166,6 +166,7 @@ fn test_feedback_post_processor_with_real_binary() {
     let pp = crash_monitor::postprocessors::FeedbackPostProcessor::new(wrapper_path);
     let event = CrashEvent {
         report_type: ReportType::Crash,
+        termination: None,
         exception_type: None,
         exception_code: None,
         exception_subcode: None,

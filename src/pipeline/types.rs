@@ -21,6 +21,8 @@ pub enum ReportType {
     Snapshot,
     Anr,
     Oom,
+    ExitFailure,
+    SignalFailure,
 }
 
 impl ReportType {
@@ -32,6 +34,8 @@ impl ReportType {
             ReportType::Snapshot => "snapshot",
             ReportType::Anr => "anr",
             ReportType::Oom => "oom",
+            ReportType::ExitFailure => "exit_failure",
+            ReportType::SignalFailure => "signal_failure",
         }
     }
 }
@@ -46,9 +50,29 @@ impl std::fmt::Display for ReportType {
 //  CrashEvent
 // ═══════════════════════════════════════════════════
 
+/// How a monitored child process terminated.
+///
+/// The internally tagged representation keeps the reason and its metadata in
+/// one unambiguously self-describing object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminationReason {
+    Exited {
+        exit_code: i32,
+        runtime_ms: u64,
+    },
+    Signaled {
+        signal: i32,
+        core_dumped: bool,
+        runtime_ms: u64,
+    },
+}
+
 /// Event data produced by a trigger. Owns all data (no lifetimes).
 pub struct CrashEvent {
     pub report_type: ReportType,
+    /// Process termination metadata for exit/signal failure reports.
+    pub termination: Option<TerminationReason>,
     pub exception_type: Option<u32>,
     pub exception_code: Option<u64>,
     pub exception_subcode: Option<u64>,
@@ -99,6 +123,10 @@ pub struct PluginDiagnostic {
 
 pub struct Diagnostics {
     pub plugins: Vec<PluginDiagnostic>,
+    /// Final report artifact after post-processing (JSON or ZIP, possibly
+    /// relocated). `None` means the event was filtered or report creation
+    /// failed.
+    pub report_path: Option<PathBuf>,
     start: Instant,
 }
 
@@ -113,6 +141,7 @@ impl Diagnostics {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
+            report_path: None,
             start: Instant::now(),
         }
     }

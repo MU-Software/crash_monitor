@@ -10,6 +10,7 @@ use std::path::PathBuf;
 fn make_event() -> CrashEvent {
     CrashEvent {
         report_type: ReportType::Crash,
+        termination: None,
         exception_type: None,
         exception_code: None,
         exception_subcode: None,
@@ -33,6 +34,7 @@ fn empty_report() -> CrashReport {
             trigger: None,
             hang_duration_ms: None,
         },
+        termination: None,
         build: None,
         exception: None::<ExceptionReport>,
         crash_context: None,

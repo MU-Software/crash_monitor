@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 fn dummy_event(report_type: ReportType) -> CrashEvent {
     CrashEvent {
         report_type,
+        termination: None,
         exception_type: Some(1),
         exception_code: Some(0),
         exception_subcode: Some(0),

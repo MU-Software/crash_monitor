@@ -6,6 +6,11 @@
 //! 3. Debugger entitlement on `crash_monitor` (codesign)
 //! 4. Debug build (`cargo build`) for `test_e2e_unsigned_binary_fails_fast`
 //!
+//! Lifecycle coverage includes fast clean and non-zero exits, an uncaught
+//! SIGTERM, and an exec failure. The signed release monitor reserves exit 70
+//! for its own failures and exit 80 for a child-reported failure; signal exits
+//! preserve the conventional `128 + signal` status.
+//!
 //! Each test uses its own temporary directory via `CRASH_MONITOR_DATA_DIR` so that
 //! tests can run in parallel without interfering with each other.
 
@@ -14,6 +19,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
+
+const MONITOR_INTERNAL_FAILURE_EXIT_CODE: i32 = 70;
+const CHILD_FAILURE_EXIT_CODE: i32 = 80;
+const DETECTED_CRASH_EXIT_CODE: i32 = 81;
+const SIGABRT_NUMBER: i32 = 6;
+const SIGSEGV_NUMBER: i32 = 11;
+const SIGTERM_NUMBER: i32 = 15;
 
 /// Locate the `crash_app` test child binary.
 fn crash_app_path() -> PathBuf {
@@ -50,13 +62,13 @@ fn monitor_cmd(data_dir: &Path) -> Command {
 }
 
 /// Get the sent crashes directory within a test's data dir.
-/// After Phase 7-B, finished reports live here (MoveToSent relocates them).
+/// After Phase 7-B, finished reports live here (`MoveToSent` relocates them).
 fn archive_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("crashes/sent")
 }
 
 /// List report files in the sent directory matching a prefix.
-/// Accepts both `.json` (raw) and `.zip` (archived by ZIPArchiver).
+/// Accepts both `.json` (raw) and `.zip` (archived by `ZIPArchiver`).
 fn find_reports(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     if !dir.exists() {
         return vec![];
@@ -75,6 +87,11 @@ fn find_reports(dir: &Path, prefix: &str) -> Vec<PathBuf> {
         .collect();
     reports.sort();
     reports
+}
+
+/// List every finalized report, regardless of report type.
+fn find_all_reports(dir: &Path) -> Vec<PathBuf> {
+    find_reports(dir, "")
 }
 
 /// Check prerequisites. Skip test if binaries don't exist or lack entitlements.
@@ -127,7 +144,10 @@ fn read_report_json(path: &Path) -> serde_json::Value {
             // Find the .json entry inside the ZIP
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i).expect("ZIP entry");
-                if entry.name().ends_with(".json") {
+                if Path::new(entry.name())
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                {
                     let mut content = String::new();
                     entry.read_to_string(&mut content).expect("read ZIP entry");
                     return serde_json::from_str(&content).expect("parse JSON from ZIP");
@@ -154,10 +174,11 @@ fn test_e2e_crash_sigsegv() {
         .output()
         .expect("failed to run crash_monitor");
 
-    // Monitor should exit with non-zero (child crashed)
-    assert!(
-        !output.status.success(),
-        "monitor should exit non-zero on crash"
+    assert_eq!(
+        output.status.code(),
+        Some(DETECTED_CRASH_EXIT_CODE),
+        "detected Mach crash should use the crash namespace; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
     // Find the crash report
@@ -171,6 +192,10 @@ fn test_e2e_crash_sigsegv() {
     let json = read_report_json(&reports[0]);
     assert_eq!(json["header"]["type"], "crash");
     assert!(json["exception"].is_object(), "expected exception field");
+    assert_eq!(json["termination"]["kind"], "signaled");
+    assert_eq!(json["termination"]["signal"], SIGSEGV_NUMBER);
+    assert!(json["termination"]["core_dumped"].is_boolean());
+    assert!(json["termination"]["runtime_ms"].as_u64().is_some());
 }
 
 #[test]
@@ -188,17 +213,26 @@ fn test_e2e_crash_sigabrt() {
         .output()
         .expect("failed to run crash_monitor");
 
-    assert!(!output.status.success());
+    assert_eq!(
+        output.status.code(),
+        Some(DETECTED_CRASH_EXIT_CODE),
+        "detected Mach crash should use the crash namespace; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let reports = find_reports(&archive, "crash_");
     assert!(!reports.is_empty(), "expected crash report");
 
     let json = read_report_json(&reports[0]);
     assert_eq!(json["header"]["type"], "crash");
+    assert_eq!(json["termination"]["kind"], "signaled");
+    assert_eq!(json["termination"]["signal"], SIGABRT_NUMBER);
+    assert!(json["termination"]["core_dumped"].is_boolean());
+    assert!(json["termination"]["runtime_ms"].as_u64().is_some());
 }
 
 #[test]
-fn test_e2e_clean_exit() {
+fn test_e2e_fast_clean_exit() {
     if !check_prerequisites() {
         return;
     }
@@ -220,11 +254,110 @@ fn test_e2e_clean_exit() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // No reports should exist in a fresh temp dir
-    let reports = find_reports(&archive, "crash_").len()
-        + find_reports(&archive, "snapshot_").len()
-        + find_reports(&archive, "anr_").len();
-    assert_eq!(reports, 0, "no reports on clean exit");
+    // No report of any type should exist in the finalized report directory.
+    assert!(
+        find_all_reports(&archive).is_empty(),
+        "no reports expected on clean exit in {archive:?}"
+    );
+}
+
+#[test]
+fn test_e2e_nonzero_exit_reports_termination() {
+    if !check_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("exit42")
+        .output()
+        .expect("failed to run crash_monitor");
+
+    assert_eq!(
+        output.status.code(),
+        Some(CHILD_FAILURE_EXIT_CODE),
+        "non-zero child exit should use the child-failure namespace; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reports = find_reports(&archive, "exit_failure_");
+    assert_eq!(
+        reports.len(),
+        1,
+        "expected exactly one exit-failure report in {archive:?}"
+    );
+    let json = read_report_json(&reports[0]);
+    assert_eq!(json["header"]["type"], "exit_failure");
+    assert_eq!(json["termination"]["kind"], "exited");
+    assert_eq!(json["termination"]["exit_code"], 42);
+    assert!(json["termination"]["runtime_ms"].as_u64().is_some());
+}
+
+#[test]
+fn test_e2e_sigterm_preserves_signal_semantics() {
+    if !check_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("sigterm")
+        .output()
+        .expect("failed to run crash_monitor");
+
+    assert_eq!(
+        output.status.code(),
+        Some(128 + SIGTERM_NUMBER),
+        "SIGTERM should retain 128 + signal semantics; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reports = find_reports(&archive, "signal_failure_");
+    assert_eq!(
+        reports.len(),
+        1,
+        "expected exactly one signal-failure report in {archive:?}"
+    );
+    let json = read_report_json(&reports[0]);
+    assert_eq!(json["header"]["type"], "signal_failure");
+    assert_eq!(json["termination"]["kind"], "signaled");
+    assert_eq!(json["termination"]["signal"], SIGTERM_NUMBER);
+    assert_eq!(json["termination"]["core_dumped"], false);
+    assert!(json["termination"]["runtime_ms"].as_u64().is_some());
+}
+
+#[test]
+fn test_e2e_nonexistent_executable_is_monitor_failure() {
+    if !check_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+    let nonexistent = data_dir.path().join("executable-that-does-not-exist");
+    assert!(!nonexistent.exists(), "test fixture path must not exist");
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(&nonexistent)
+        .output()
+        .expect("failed to run crash_monitor");
+
+    assert_eq!(
+        output.status.code(),
+        Some(MONITOR_INTERNAL_FAILURE_EXIT_CODE),
+        "exec failure must be distinct from a fast clean exit; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        find_all_reports(&archive).is_empty(),
+        "monitor-internal exec failure must not produce a child termination report"
+    );
 }
 
 #[test]
@@ -265,7 +398,7 @@ fn test_e2e_anr() {
 /// The debug build binary lacks the debugger entitlement (only `make crash-monitor`
 /// applies it via codesign). Verify that the monitor detects this and exits
 /// immediately with a clear error instead of hanging or producing a confusing
-/// task_for_pid failure.
+/// `task_for_pid` failure.
 #[test]
 fn test_e2e_unsigned_binary_fails_fast() {
     let child = crash_app_path();

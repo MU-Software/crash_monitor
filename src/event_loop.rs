@@ -6,10 +6,11 @@
 
 use mach2::message::mach_msg_header_t;
 use mach2::port::mach_port_t;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::pipeline::{CrashEvent, Pipeline, ReportType};
+use crate::pipeline::{CrashEvent, Pipeline, ReportType, TerminationReason};
 use crate::shm::SharedMemory;
 use crate::watchdog::{WatchdogState, update_watchdog_state};
 
@@ -30,12 +31,10 @@ pub enum MonitorEvent {
     },
     /// SIGUSR1 manual snapshot.
     Snapshot,
-    /// Child exited normally.
-    ChildExited { status: i32 },
-    /// Child killed by signal.
-    ChildSignaled { signal: i32 },
-    /// Child no longer exists (ECHILD).
-    ChildGone,
+    /// A terminal child status, normalized from every `waitpid` owner.
+    ChildTerminated(TerminationReason),
+    /// The monitor can no longer determine the child's state reliably.
+    MonitorFailure { message: String },
 }
 
 /// Abstract source of monitor events.
@@ -65,7 +64,111 @@ pub struct AnrConfig {
 //  Event loop
 // ═══════════════════════════════════════════════════
 
-/// The extracted event loop. Returns the process exit code.
+/// Stable process exit codes for monitor-owned outcomes.
+///
+/// Child signals use the separate conventional `128 + signal` namespace. The
+/// original child exit code and signal are preserved in `TerminationReason`
+/// rather than being overloaded into this one-byte process status.
+pub const EXIT_MONITOR_INTERNAL: i32 = 70;
+pub const EXIT_CHILD_FAILURE: i32 = 80;
+pub const EXIT_DETECTED_CRASH: i32 = 81;
+
+/// Typed result of monitoring. Integer process status is encoded only at the
+/// outermost CLI boundary so monitor failures, detected crashes, and child
+/// failures cannot collapse into the same internal value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorOutcome {
+    ChildTerminated(TerminationReason),
+    DetectedCrash {
+        /// Filled by the supervisor after replying to the Mach exception and
+        /// reaping the child.
+        termination: Option<TerminationReason>,
+        /// Final JSON or ZIP produced by the pipeline. The supervisor uses it
+        /// to persist the terminal wait status after reaping the child.
+        report_path: Option<PathBuf>,
+    },
+    MonitorFailure(String),
+}
+
+impl MonitorOutcome {
+    /// Encode the public CLI exit-code contract.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::ChildTerminated(TerminationReason::Exited { exit_code: 0, .. }) => 0,
+            Self::ChildTerminated(TerminationReason::Exited { .. }) => EXIT_CHILD_FAILURE,
+            Self::ChildTerminated(TerminationReason::Signaled { signal, .. }) => 128 + signal,
+            Self::DetectedCrash { .. } => EXIT_DETECTED_CRASH,
+            Self::MonitorFailure(_) => EXIT_MONITOR_INTERNAL,
+        }
+    }
+
+    /// Attach the terminal status observed after a Mach exception report.
+    #[must_use]
+    pub fn with_crash_termination(self, reason: Option<TerminationReason>) -> Self {
+        match self {
+            Self::DetectedCrash { report_path, .. } => Self::DetectedCrash {
+                termination: reason,
+                report_path,
+            },
+            other => other,
+        }
+    }
+
+    /// Return the finalized artifact associated with a detected Mach crash.
+    #[must_use]
+    pub fn report_path(&self) -> Option<&Path> {
+        match self {
+            Self::DetectedCrash {
+                report_path: Some(path),
+                ..
+            } => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// Convert a terminal child status into a typed report (when abnormal) and a
+/// typed monitor outcome. This is shared by startup and steady-state paths.
+#[must_use]
+pub fn handle_child_termination(
+    pipeline: &Pipeline,
+    pid: u32,
+    process_name: &str,
+    reason: TerminationReason,
+    oom_detection: bool,
+) -> MonitorOutcome {
+    let report_type = match reason {
+        TerminationReason::Exited { exit_code: 0, .. } => None,
+        TerminationReason::Exited { .. } => Some(ReportType::ExitFailure),
+        TerminationReason::Signaled { signal, .. } if oom_detection && signal == SIGKILL_NUM => {
+            Some(ReportType::Oom)
+        }
+        TerminationReason::Signaled { .. } => Some(ReportType::SignalFailure),
+    };
+
+    if let Some(report_type) = report_type {
+        let event = CrashEvent {
+            report_type,
+            exception_type: None,
+            exception_code: None,
+            exception_subcode: None,
+            crashed_thread: None,
+            // The child has already terminated, so the pipeline uses its
+            // task-independent termination finalization path.
+            bail_on_suspend_failure: false,
+            pid,
+            process_name: process_name.to_string(),
+            hang_duration_ms: None,
+            termination: Some(reason),
+        };
+        let _diagnostics = pipeline.handle_termination_event(&event);
+    }
+
+    MonitorOutcome::ChildTerminated(reason)
+}
+
+/// The extracted event loop. Returns a typed monitor outcome.
 ///
 /// ANR detection is integrated directly: if `shm` and `anr_config` are provided,
 /// the event loop polls the heartbeat counter and fires ANR events inline
@@ -84,7 +187,7 @@ pub fn event_loop(
     shm: Option<&Arc<SharedMemory>>,
     anr_config: Option<&AnrConfig>,
     oom_detection: bool,
-) -> i32 {
+) -> MonitorOutcome {
     // Initialize ANR state if both shm and config are available
     let mut anr_state = match (&shm, &anr_config) {
         (Some(s), Some(cfg)) => Some((
@@ -118,13 +221,17 @@ pub fn event_loop(
                     pid,
                     process_name: process_name.to_string(),
                     hang_duration_ms: None,
+                    termination: None,
                 };
-                let _diagnostics = pipeline.handle_event(&event, task);
+                let diagnostics = pipeline.handle_event(&event, task);
 
                 if let Some(ref header) = reply_header {
                     reply_fn(header);
                 }
-                return 1;
+                return MonitorOutcome::DetectedCrash {
+                    termination: None,
+                    report_path: diagnostics.report_path,
+                };
             }
 
             Some(MonitorEvent::Snapshot) => {
@@ -138,42 +245,24 @@ pub fn event_loop(
                     pid,
                     process_name: process_name.to_string(),
                     hang_duration_ms: None,
+                    termination: None,
                 };
                 let _diagnostics = pipeline.handle_event(&event, task);
             }
 
-            Some(MonitorEvent::ChildExited { status }) => {
-                return status;
+            Some(MonitorEvent::ChildTerminated(reason)) => {
+                return handle_child_termination(
+                    pipeline,
+                    pid,
+                    process_name,
+                    reason,
+                    oom_detection,
+                );
             }
 
-            Some(MonitorEvent::ChildSignaled { signal }) => {
-                // SIGKILL is the macOS jetsam (memory-pressure) signal — treat as
-                // probable OOM and dispatch through the pipeline. We can't reliably
-                // distinguish a true jetsam kill from a manual `kill -9`, hence the
-                // "probable" framing via `header.trigger = "sigkill"`. Other signals
-                // are surfaced as crashes through the Mach exception path already.
-                if oom_detection && signal == SIGKILL_NUM {
-                    let event = CrashEvent {
-                        report_type: ReportType::Oom,
-                        exception_type: None,
-                        exception_code: None,
-                        exception_subcode: None,
-                        crashed_thread: None,
-                        // Child is already dead — suspend_task will fail. Continue
-                        // best-effort so shm-based collectors (breadcrumb, context,
-                        // screenshot, attachment) still produce data.
-                        bail_on_suspend_failure: false,
-                        pid,
-                        process_name: process_name.to_string(),
-                        hang_duration_ms: None,
-                    };
-                    let _diagnostics = pipeline.handle_event(&event, task);
-                }
-                return 128 + signal;
-            }
-
-            Some(MonitorEvent::ChildGone) => {
-                return 0;
+            Some(MonitorEvent::MonitorFailure { message }) => {
+                eprintln!("[monitor] {message}");
+                return MonitorOutcome::MonitorFailure(message);
             }
 
             None => {
@@ -211,6 +300,7 @@ pub fn event_loop(
                                     pid,
                                     process_name: process_name.to_string(),
                                     hang_duration_ms: Some(hang_duration_ms),
+                                    termination: None,
                                 };
                                 let _diagnostics = pipeline.handle_event(&event, task);
                             }

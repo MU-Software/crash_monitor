@@ -5,6 +5,7 @@ use std::io::Read;
 fn dummy_event() -> CrashEvent {
     CrashEvent {
         report_type: ReportType::Crash,
+        termination: None,
         exception_type: Some(1),
         exception_code: Some(0),
         exception_subcode: Some(0),
@@ -38,6 +39,7 @@ fn test_creates_zip_with_json_and_png() {
 
     let zip_path = dir.path().join("crash_20260411_120000_1234.zip");
     assert!(zip_path.exists(), "ZIP file should be created");
+    assert_eq!(result.json_path.as_deref(), Some(zip_path.as_path()));
 }
 
 #[test]
@@ -101,11 +103,10 @@ fn test_originals_deleted_after_zip() {
     };
 
     ZIPArchiver.process(&dummy_event(), &mut result).unwrap();
+    let zip_path = dir.path().join("snap_20260411_120000_9999.zip");
     assert!(!json_path.exists(), "original JSON should be deleted");
-    assert!(
-        dir.path().join("snap_20260411_120000_9999.zip").exists(),
-        "ZIP should exist"
-    );
+    assert!(zip_path.exists(), "ZIP should exist");
+    assert_eq!(result.json_path.as_deref(), Some(zip_path.as_path()));
 }
 
 #[test]

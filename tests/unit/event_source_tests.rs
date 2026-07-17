@@ -33,3 +33,46 @@ fn drain_reports_true_after_write_then_false_again() {
     // Once drained, the pipe is empty again.
     assert!(!drain_signal_pipe(&read_fd));
 }
+
+#[test]
+fn terminal_wait_status_preserves_exit_code_and_runtime() {
+    let reason = termination_from_wait_status(
+        WaitStatus::Exited(nix::unistd::Pid::from_raw(42), 23),
+        Duration::from_millis(456),
+    );
+    assert_eq!(
+        reason,
+        Some(TerminationReason::Exited {
+            exit_code: 23,
+            runtime_ms: 456,
+        })
+    );
+}
+
+#[test]
+fn terminal_wait_status_preserves_signal_core_and_runtime() {
+    let reason = termination_from_wait_status(
+        WaitStatus::Signaled(
+            nix::unistd::Pid::from_raw(42),
+            nix::sys::signal::Signal::SIGABRT,
+            true,
+        ),
+        Duration::from_millis(789),
+    );
+    assert_eq!(
+        reason,
+        Some(TerminationReason::Signaled {
+            signal: 6,
+            core_dumped: true,
+            runtime_ms: 789,
+        })
+    );
+}
+
+#[test]
+fn nonterminal_wait_status_is_not_fabricated_into_a_termination() {
+    assert_eq!(
+        termination_from_wait_status(WaitStatus::StillAlive, Duration::ZERO),
+        None
+    );
+}

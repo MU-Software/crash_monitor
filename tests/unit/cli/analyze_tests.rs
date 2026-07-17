@@ -1,6 +1,6 @@
 use super::*;
-use crate::pipeline::ReportType;
 use crate::pipeline::report::CrashReport;
+use crate::pipeline::{ReportType, TerminationReason};
 
 fn minimal_report_json() -> String {
     serde_json::json!({
@@ -88,6 +88,64 @@ fn test_parse_minimal_report() {
     assert!(report.threads.is_empty());
     assert!(report.exception.is_none());
     assert!(report.fingerprint.is_none());
+}
+
+#[test]
+fn test_exit_failure_header_includes_termination_details() {
+    let json = serde_json::json!({
+        "header": {
+            "version": 1,
+            "timestamp": "2026-04-05T12:00:00+09:00",
+            "pid": 1234,
+            "process": "test_app",
+            "collector": "crash_monitor",
+            "type": "exit_failure"
+        },
+        "termination": {
+            "kind": "exited",
+            "exit_code": 17,
+            "runtime_ms": 250
+        }
+    });
+    let report: CrashReport = serde_json::from_value(json).unwrap();
+
+    assert_eq!(
+        header_summary(&report),
+        "Exit Failure Report: exit code 17 after 250ms  (PID 1234, test_app)"
+    );
+    assert_eq!(
+        report.termination,
+        Some(TerminationReason::Exited {
+            exit_code: 17,
+            runtime_ms: 250,
+        })
+    );
+}
+
+#[test]
+fn test_signal_failure_header_includes_core_dump_and_runtime() {
+    let json = serde_json::json!({
+        "header": {
+            "version": 1,
+            "timestamp": "2026-04-05T12:00:00+09:00",
+            "pid": 5678,
+            "process": "test_app",
+            "collector": "crash_monitor",
+            "type": "signal_failure"
+        },
+        "termination": {
+            "kind": "signaled",
+            "signal": 11,
+            "core_dumped": true,
+            "runtime_ms": 999
+        }
+    });
+    let report: CrashReport = serde_json::from_value(json).unwrap();
+
+    assert_eq!(
+        header_summary(&report),
+        "Signal Failure Report: signal 11, core dumped after 999ms  (PID 5678, test_app)"
+    );
 }
 
 #[test]
@@ -188,7 +246,8 @@ fn test_diagnostics_field_layout() {
 
     // Top-level fields
     assert_eq!(
-        diag.get("pipeline_duration_ms").and_then(|v| v.as_u64()),
+        diag.get("pipeline_duration_ms")
+            .and_then(serde_json::Value::as_u64),
         Some(105)
     );
 

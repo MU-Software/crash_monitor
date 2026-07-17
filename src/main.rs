@@ -25,10 +25,10 @@ mod watchdog;
 
 use clap::{Parser, Subcommand};
 use mach2::port::mach_port_t;
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::sys::wait::{WaitPidFlag, waitpid};
 use std::ffi::CString;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ═══════════════════════════════════════════════════
 //  CLI
@@ -129,29 +129,112 @@ fn verify_self_entitlement() -> Result<(), String> {
     check_debugger_entitlement(&exe)
 }
 
-/// Check if the child exited immediately (e.g. exec failure). Returns exit code if so.
-fn check_immediate_exit(child_pid: nix::unistd::Pid) -> Option<i32> {
-    std::thread::sleep(Duration::from_millis(50));
-    if let Ok(WaitStatus::Exited(_, status)) = waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
-        Some(status)
-    } else {
-        None
+enum TaskAcquisition {
+    Acquired(mach_port_t),
+    ChildTerminated(pipeline::TerminationReason),
+}
+
+/// Poll the child without losing any terminal status. `EINTR` is retried and
+/// `ECHILD` is an ownership failure rather than a successful child exit.
+fn poll_child_termination(
+    child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
+) -> Result<Option<pipeline::TerminationReason>, String> {
+    loop {
+        match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(status) => {
+                return Ok(event_source::termination_from_wait_status(
+                    status,
+                    child_started_at.elapsed(),
+                ));
+            }
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(nix::errno::Errno::ECHILD) => {
+                return Err("waitpid lost ownership of the child (ECHILD)".to_string());
+            }
+            Err(e) => return Err(format!("waitpid failed: {e}")),
+        }
     }
 }
 
-/// Obtain the child's task port, retrying briefly while the child starts.
-fn acquire_task_port(pid: i32) -> Result<mach_port_t, String> {
+fn wait_for_child_termination(
+    child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
+) -> Result<pipeline::TerminationReason, String> {
+    loop {
+        match waitpid(child_pid, None) {
+            Ok(status) => {
+                if let Some(reason) =
+                    event_source::termination_from_wait_status(status, child_started_at.elapsed())
+                {
+                    return Ok(reason);
+                }
+            }
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(e) => return Err(format!("waitpid failed: {e}")),
+        }
+    }
+}
+
+/// Obtain the child's task port while also observing child termination during
+/// startup. This replaces the old 50ms heuristic: `posix_spawn` errors are exec
+/// setup failures, while every successfully spawned fast exit is a real child
+/// `TerminationReason` regardless of how quickly it happens.
+fn acquire_task_port_or_termination(
+    child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
+) -> Result<TaskAcquisition, String> {
+    let pid = child_pid.as_raw();
     let mut last_err = String::from("task_for_pid failed (no attempts)");
     for _ in 0..20 {
         match platform::get_task_for_pid(pid) {
-            Ok(task) => return Ok(task),
+            Ok(task) => return Ok(TaskAcquisition::Acquired(task)),
             Err(e) => {
                 last_err = e.to_string();
+                if let Some(reason) = poll_child_termination(child_pid, child_started_at)? {
+                    return Ok(TaskAcquisition::ChildTerminated(reason));
+                }
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
+
+    // Close the race between the final retry and returning an acquisition error.
+    if let Some(reason) = poll_child_termination(child_pid, child_started_at)? {
+        return Ok(TaskAcquisition::ChildTerminated(reason));
+    }
     Err(last_err)
+}
+
+/// Reap a child after a Mach exception was captured. Every terminal wait status
+/// still flows through the same lossless `TerminationReason` conversion.
+fn reap_after_detected_crash(
+    child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
+) -> Result<pipeline::TerminationReason, String> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(status) => {
+                if let Some(reason) =
+                    event_source::termination_from_wait_status(status, child_started_at.elapsed())
+                {
+                    return Ok(reason);
+                }
+            }
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => return Err(format!("waitpid after crash failed: {e}")),
+        }
+
+        if Instant::now() >= deadline {
+            eprintln!("[monitor] Child still alive after 3s, sending SIGKILL");
+            nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL)
+                .map_err(|e| format!("failed to kill child after crash: {e}"))?;
+            return wait_for_child_termination(child_pid, child_started_at)
+                .map_err(|e| format!("waitpid after SIGKILL failed: {e}"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 // ═══════════════════════════════════════════════════
@@ -168,7 +251,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
              [monitor] task_for_pid() requires com.apple.security.cs.debugger.\n\
              [monitor] Run `make crash-monitor` to rebuild with codesign."
         );
-        return 1;
+        return event_loop::EXIT_MONITOR_INTERNAL;
     }
 
     eprintln!("[monitor] Starting: {app_path}");
@@ -178,7 +261,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         Ok(fd) => fd,
         Err(e) => {
             eprintln!("[monitor] Failed to set up signal pipe: {e}");
-            return 1;
+            return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };
 
@@ -188,7 +271,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         Ok(port) => port,
         Err(e) => {
             eprintln!("[monitor] Failed to create exception port: {e}");
-            return 1;
+            return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };
 
@@ -204,13 +287,13 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Build argv and envp for posix_spawn
     let Ok(c_path) = CString::new(app_path) else {
         eprintln!("[monitor] app_path contains null byte");
-        return 1;
+        return event_loop::EXIT_MONITOR_INTERNAL;
     };
     let mut c_argv_owned: Vec<CString> = vec![c_path.clone()];
     for arg in app_args {
         let Ok(c_arg) = CString::new(arg.as_str()) else {
             eprintln!("[monitor] argument contains null byte: {arg}");
-            return 1;
+            return event_loop::EXIT_MONITOR_INTERNAL;
         };
         c_argv_owned.push(c_arg);
     }
@@ -229,47 +312,82 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let c_envp: Vec<&std::ffi::CStr> = env_strings.iter().map(AsRef::as_ref).collect();
 
     // Spawn child with exception port pre-configured (survives exec)
+    // Start the runtime clock before entering posix_spawn so a child that
+    // exits before the call returns still has its full observable lifetime
+    // represented.
+    let child_started_at = Instant::now();
     let child_pid_raw =
         match platform::spawn_with_exception_port(exc_port, &c_path, &c_argv, &c_envp) {
             Ok(pid) => pid,
             Err(e) => {
                 eprintln!("[monitor] {e}");
-                return 1;
+                return event_loop::EXIT_MONITOR_INTERNAL;
             }
         };
     let child_pid = nix::unistd::Pid::from_raw(child_pid_raw);
 
     eprintln!("[monitor] Child PID: {child_pid}");
 
-    // Detect exec failure (child exits immediately)
-    if let Some(status) = check_immediate_exit(child_pid) {
-        eprintln!("[monitor] Child exited immediately (status={status}). Likely exec failure.");
-        return status;
-    }
+    // Extract process name from app_path for reports.
+    let process_name = std::path::Path::new(app_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(app_path);
 
     // Get child task port for suspend/resume/vm_read (needed for crash introspection + snapshots).
     // Must succeed before starting listener — otherwise early crashes can't be inspected.
-    let child_task = match acquire_task_port(child_pid_raw) {
-        Ok(task) => platform::OwnedMachPort::new(task),
+    let child_task = match acquire_task_port_or_termination(child_pid, child_started_at) {
+        Ok(TaskAcquisition::Acquired(task)) => platform::OwnedMachPort::new(task),
+        Ok(TaskAcquisition::ChildTerminated(reason)) => {
+            let cfg = config::load_config();
+            let oom_detection =
+                cfg.enabled && cfg.triggers.enabled && cfg.triggers.oom_detection.enabled;
+            let pl = pipeline::default_macos_pipeline(shared_memory.clone());
+            #[allow(clippy::cast_sign_loss)]
+            let child_pid_u32 = child_pid_raw as u32;
+            return event_loop::handle_child_termination(
+                &pl,
+                child_pid_u32,
+                process_name,
+                reason,
+                oom_detection,
+            )
+            .exit_code();
+        }
         Err(e) => {
             eprintln!(
                 "[monitor] {e}. Cannot inspect crashes or take snapshots.\n\
                  [monitor] This usually means crash_monitor lacks the debugger entitlement.\n\
                  [monitor] Run `make crash-monitor` to rebuild with codesign."
             );
-            let _ = waitpid(child_pid, None);
-            return 1;
+            // Retain the existing ownership policy until P1-01 replaces it with
+            // an explicit bounded detach/terminate policy, but never discard a
+            // terminal status if one is observed here.
+            match wait_for_child_termination(child_pid, child_started_at) {
+                Ok(reason) => {
+                    eprintln!("[monitor] Child eventually terminated: {reason:?}");
+                    let cfg = config::load_config();
+                    let oom_detection =
+                        cfg.enabled && cfg.triggers.enabled && cfg.triggers.oom_detection.enabled;
+                    let pl = pipeline::default_macos_pipeline(shared_memory.clone());
+                    #[allow(clippy::cast_sign_loss)]
+                    let child_pid_u32 = child_pid_raw as u32;
+                    let _ = event_loop::handle_child_termination(
+                        &pl,
+                        child_pid_u32,
+                        process_name,
+                        reason,
+                        oom_detection,
+                    );
+                }
+                Err(wait_err) => eprintln!("[monitor] waitpid cleanup failed: {wait_err}"),
+            }
+            return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };
 
     // Start exception listener thread AFTER task port is acquired
     let exc_rx = platform::start_listener(exc_port);
-
-    // Extract process name from app_path for reports
-    let process_name = std::path::Path::new(app_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(app_path);
 
     eprintln!("[monitor] Monitoring active. Press F8 in app for manual snapshot.");
 
@@ -292,9 +410,10 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Build event source from Mac-specific channels
     #[allow(clippy::cast_sign_loss)] // PID is always positive
     let child_pid_u32 = child_pid_raw as u32;
-    let mut source = event_source::MacEventSource::new(exc_rx, signal_read_fd, child_pid);
+    let mut source =
+        event_source::MacEventSource::new(exc_rx, signal_read_fd, child_pid, child_started_at);
 
-    let exit_code = event_loop::event_loop(
+    let mut outcome = event_loop::event_loop(
         &mut source,
         &pl,
         child_task.raw(),
@@ -311,7 +430,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // there is no Mach exception handler and the kernel falls back to delivering
     // a Unix signal (SIG_DFL → terminate). Without this, the child gets stuck
     // in an uninterruptible Mach exception wait, immune to even SIGKILL.
-    if exit_code != 0 {
+    if matches!(outcome, event_loop::MonitorOutcome::DetectedCrash { .. }) {
         // SAFETY: mach_port_destroy removes all rights (receive + send) from
         // this task. The listener thread's mach_msg will return an error and exit.
         unsafe {
@@ -320,24 +439,28 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Wait for child to exit after crash (with SIGKILL fallback).
-    if exit_code != 0 {
-        use nix::sys::wait::WaitPidFlag;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while let Ok(nix::sys::wait::WaitStatus::StillAlive) =
-            waitpid(child_pid, Some(WaitPidFlag::WNOHANG))
-        {
-            if std::time::Instant::now() >= deadline {
-                eprintln!("[monitor] Child still alive after 3s, sending SIGKILL");
-                let _ = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL);
-                let _ = waitpid(child_pid, None);
-                break;
+    // Wait for child to exit after a detected crash and retain its raw status.
+    if matches!(outcome, event_loop::MonitorOutcome::DetectedCrash { .. }) {
+        match reap_after_detected_crash(child_pid, child_started_at) {
+            Ok(reason) => {
+                eprintln!("[monitor] Crashed child terminated: {reason:?}");
+                if let Some(report_path) = outcome.report_path()
+                    && let Err(e) = pipeline::report::update_termination(report_path, reason)
+                {
+                    eprintln!(
+                        "[monitor] Failed to persist crash termination in '{}': {e}",
+                        report_path.display()
+                    );
+                }
+                outcome = outcome.with_crash_termination(Some(reason));
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            Err(e) => {
+                eprintln!("[monitor] {e}");
+            }
         }
     }
 
-    exit_code
+    outcome.exit_code()
 }
 
 // ═══════════════════════════════════════════════════

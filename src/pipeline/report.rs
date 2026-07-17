@@ -8,9 +8,11 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use zip::write::SimpleFileOptions;
 
-use super::types::{CollectedData, CrashEvent, Diagnostics, ReportType};
+use super::types::{CollectedData, CrashEvent, Diagnostics, ReportType, TerminationReason};
 
 // ═══════════════════════════════════════════════════
 //  Serde report structures (design doc lines 1026-1153)
@@ -19,6 +21,10 @@ use super::types::{CollectedData, CrashEvent, Diagnostics, ReportType};
 #[derive(Serialize, Deserialize)]
 pub struct CrashReport {
     pub header: ReportHeader,
+    /// Process termination metadata for exit/signal failure reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub termination: Option<TerminationReason>,
     #[serde(default)]
     pub build: Option<serde_json::Value>, // Phase 4
     #[serde(default)]
@@ -83,7 +89,10 @@ impl ReportHeader {
                 event.hang_duration_ms,
             ),
             ReportType::Oom => (Some("sigkill".to_string()), None),
-            ReportType::Crash | ReportType::Snapshot => (None, None),
+            ReportType::Crash
+            | ReportType::Snapshot
+            | ReportType::ExitFailure
+            | ReportType::SignalFailure => (None, None),
         };
 
         Self {
@@ -217,6 +226,133 @@ pub fn load_report(path: &Path) -> Result<CrashReport, String> {
         .map_err(|e| format!("invalid report JSON in '{}': {e}", path.display()))
 }
 
+/// Persist the terminal wait status into an already finalized crash report.
+///
+/// Mach exception capture must reply before the child can reach a terminal
+/// `waitpid` state, so that status is only known after the normal pipeline has
+/// produced its JSON (or ZIP) artifact. This function atomically replaces the
+/// artifact while preserving every non-report ZIP entry.
+///
+/// # Errors
+/// Returns `Err(String)` if the existing report cannot be loaded, serialized,
+/// rewritten, or atomically replaced.
+pub fn update_termination(path: &Path, reason: TerminationReason) -> Result<(), String> {
+    let original = if is_zip_path(path) {
+        read_report_json_from_zip(path)?
+    } else {
+        read_plain_report(path)?
+    };
+    let mut document: serde_json::Value = serde_json::from_slice(&original)
+        .map_err(|e| format!("invalid report JSON in '{}': {e}", path.display()))?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| format!("report JSON in '{}' is not an object", path.display()))?;
+    object.insert(
+        "termination".to_string(),
+        serde_json::to_value(reason)
+            .map_err(|e| format!("cannot serialize termination reason: {e}"))?,
+    );
+    let bytes = serde_json::to_vec_pretty(&document)
+        .map_err(|e| format!("cannot serialize updated report '{}': {e}", path.display()))?;
+
+    if is_zip_path(path) {
+        rewrite_report_json_in_zip(path, &bytes)
+    } else {
+        atomic_replace(path, &bytes)
+    }
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp_path = termination_tmp_path(path)?;
+    if let Err(e) = fs::write(&tmp_path, bytes) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "cannot write temporary report '{}': {e}",
+            tmp_path.display()
+        ));
+    }
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("cannot replace report '{}': {e}", path.display()));
+    }
+    Ok(())
+}
+
+fn rewrite_report_json_in_zip(path: &Path, report_json: &[u8]) -> Result<(), String> {
+    let tmp_path = termination_tmp_path(path)?;
+    let rewrite_result = (|| -> Result<(), String> {
+        let source = fs::File::open(path)
+            .map_err(|e| format!("cannot open ZIP '{}': {e}", path.display()))?;
+        let mut archive = zip::ZipArchive::new(source)
+            .map_err(|e| format!("invalid ZIP '{}': {e}", path.display()))?;
+        let preferred = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| format!("{stem}.json"));
+        let report_index = find_report_json_index(&mut archive, preferred.as_deref())
+            .ok_or_else(|| format!("no report JSON (*.json) inside ZIP '{}'", path.display()))?;
+
+        let destination = fs::File::create(&tmp_path)
+            .map_err(|e| format!("cannot create temporary ZIP '{}': {e}", tmp_path.display()))?;
+        let mut writer = zip::ZipWriter::new(destination);
+        writer.set_raw_comment(archive.comment().to_vec().into_boxed_slice());
+
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index).map_err(|e| {
+                format!("cannot open ZIP entry {index} in '{}': {e}", path.display())
+            })?;
+            if index == report_index {
+                let name = entry.name().to_string();
+                let compression = entry.compression();
+                let unix_mode = entry.unix_mode();
+                let last_modified = entry.last_modified();
+                drop(entry);
+
+                let mut options = SimpleFileOptions::default().compression_method(compression);
+                if let Some(mode) = unix_mode {
+                    options = options.unix_permissions(mode);
+                }
+                if let Some(modified) = last_modified {
+                    options = options.last_modified_time(modified);
+                }
+                writer
+                    .start_file(name, options)
+                    .map_err(|e| format!("cannot replace report entry in ZIP: {e}"))?;
+                writer
+                    .write_all(report_json)
+                    .map_err(|e| format!("cannot write updated report entry in ZIP: {e}"))?;
+            } else {
+                writer
+                    .raw_copy_file(entry)
+                    .map_err(|e| format!("cannot preserve ZIP entry {index}: {e}"))?;
+            }
+        }
+
+        writer
+            .finish()
+            .map_err(|e| format!("cannot finalize updated ZIP '{}': {e}", path.display()))?;
+        Ok(())
+    })();
+
+    if let Err(e) = rewrite_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("cannot replace ZIP '{}': {e}", path.display()));
+    }
+    Ok(())
+}
+
+fn termination_tmp_path(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("report path has no valid filename: '{}'", path.display()))?;
+    Ok(path.with_file_name(format!(".{file_name}.termination.tmp")))
+}
+
 /// True if `path` has a `.zip` extension (case-insensitive).
 fn is_zip_path(path: &Path) -> bool {
     path.extension()
@@ -342,6 +478,7 @@ pub fn build_report(
 
     CrashReport {
         header,
+        termination: event.termination,
         build: formatted.build,
         exception,
         crash_context: formatted.crash_context,

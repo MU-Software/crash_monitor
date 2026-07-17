@@ -5,6 +5,7 @@ use crate::pipeline::{CollectedData, CrashEvent, Plugin, ReportType};
 fn dummy_event() -> CrashEvent {
     CrashEvent {
         report_type: ReportType::Crash,
+        termination: None,
         exception_type: Some(1),
         exception_code: Some(0),
         exception_subcode: Some(0),
