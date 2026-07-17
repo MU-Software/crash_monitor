@@ -25,11 +25,11 @@
 
 ### P0-02. 동기 capture와 비동기 finalize를 분리한다
 
-- [ ] Mach exception critical path를 deadline이 있는 bounded immutable snapshot 생성까지만 허용한다.
-- [ ] snapshot 직후 task를 resume하고 Mach reply를 보낸다.
-- [ ] symbolication, JSON/PNG/ZIP, move, retention, feedback, notifier는 worker process 또는 bounded worker queue에서 수행한다.
-- [ ] feedback·ZIP·notifier hang이 child resume나 Mach reply를 지연하지 않는 테스트를 추가한다.
-- [ ] snapshot/finalize 각 단계의 deadline과 failure policy를 문서화한다.
+- [x] Mach exception critical path를 deadline이 있는 bounded immutable snapshot 생성까지만 허용한다.
+- [x] snapshot 직후 task를 resume하고 Mach reply를 보낸다.
+- [x] symbolication, JSON/PNG/ZIP, move, retention, feedback, notifier는 worker process 또는 bounded worker queue에서 수행한다.
+- [x] feedback·ZIP·notifier hang이 child resume나 Mach reply를 지연하지 않는 테스트를 추가한다.
+- [x] snapshot/finalize 각 단계의 deadline과 failure policy를 문서화한다.
 
 범위: `src/event_loop.rs`, `src/pipeline`, `src/postprocessors`, `src/notifiers`.
 

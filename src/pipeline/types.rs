@@ -69,6 +69,7 @@ pub enum TerminationReason {
 }
 
 /// Event data produced by a trigger. Owns all data (no lifetimes).
+#[derive(Clone)]
 pub struct CrashEvent {
     pub report_type: ReportType,
     /// Process termination metadata for exit/signal failure reports.
@@ -183,6 +184,64 @@ pub struct ReportResult {
     pub raw_path: Option<PathBuf>,
     pub json_path: Option<PathBuf>,
     pub session: Option<SessionReport>,
+}
+
+// ═══════════════════════════════════════════════════
+//  Capture / finalize handoff
+// ═══════════════════════════════════════════════════
+
+/// Raw shared-memory evidence copied while the target is still suspended.
+///
+/// The finalizer receives owned bytes rather than a live shared-memory handle,
+/// so it cannot observe post-resume mutations.
+pub struct RawShmSnapshot {
+    pub breadcrumbs: Vec<u8>,
+    pub context: Vec<u8>,
+}
+
+/// Owned output of the task-facing capture worker.
+pub struct CapturePayload {
+    pub data: CollectedData,
+    pub raw_shm: Option<RawShmSnapshot>,
+    pub diagnostics: Diagnostics,
+}
+
+/// Immutable handoff from live capture to report finalization.
+///
+/// Live Mach capabilities are stripped in [`Self::new`]. Thread-port numbers
+/// may remain in raw diagnostic data, but their send rights are released before
+/// this value leaves the capture worker.
+pub struct CapturedEvent {
+    pub(crate) event: CrashEvent,
+    pub(crate) data: Box<CollectedData>,
+    pub(crate) raw_shm: Option<RawShmSnapshot>,
+    pub(crate) diagnostics: Diagnostics,
+}
+
+impl CapturedEvent {
+    #[must_use]
+    pub fn new(mut event: CrashEvent, payload: CapturePayload) -> Self {
+        event.crashed_thread = None;
+        event.bail_on_suspend_failure = false;
+        Self {
+            event,
+            data: Box::new(payload.data),
+            raw_shm: payload.raw_shm,
+            diagnostics: payload.diagnostics,
+        }
+    }
+
+    pub fn set_termination(&mut self, reason: Option<TerminationReason>) {
+        self.event.termination = reason;
+    }
+}
+
+/// Result of the task-facing capture boundary.
+pub enum CaptureOutcome {
+    Captured(CapturedEvent),
+    /// Capture was intentionally skipped (for example, a mandatory suspend
+    /// failed). Mach reply still proceeds for crash events.
+    Skipped(Diagnostics),
 }
 
 // ═══════════════════════════════════════════════════

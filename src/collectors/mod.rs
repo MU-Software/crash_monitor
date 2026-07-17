@@ -9,7 +9,7 @@ pub mod memory;
 pub mod screenshot;
 pub mod thread;
 
-pub use attachment::AttachmentCollector;
+pub use attachment::{AttachmentCollector, AttachmentCopier};
 pub use breadcrumb::BreadcrumbCollector;
 pub use context::ContextCollector;
 pub use dylib::DylibCollector;
@@ -30,6 +30,9 @@ pub struct RawData {
     pub crash_context: Option<crate::shm::RawCrashContext>,
     pub settings_snapshot: Option<crate::shm::RawSettingsSnapshot>,
     pub attachments: Vec<attachment::RawCopiedAttachment>,
+    /// Attachment path registrations copied from SHM during capture. File I/O
+    /// happens later in `AttachmentCopier` on the finalization worker.
+    pub attachment_registrations: Vec<crate::shm::RawAttachment>,
     pub screenshots: Vec<crate::shm::RawScreenshot>,
     /// Address → symbol name mapping, populated by `SymbolResolver` pre-processor.
     pub symbols: std::collections::BTreeMap<u64, String>,

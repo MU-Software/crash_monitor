@@ -45,12 +45,7 @@ pub trait PreProcessor: Plugin {
     ///
     /// # Errors
     /// Returns an error if processing fails.
-    fn process(
-        &self,
-        event: &CrashEvent,
-        task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String>;
+    fn process(&self, event: &CrashEvent, data: &mut CollectedData) -> Result<(), String>;
 }
 
 /// Post-processor — operates on the written report file.

@@ -156,6 +156,7 @@ impl EventSource for MacEventSource {
                     exc_info.subcode
                 );
                 return Some(MonitorEvent::Crash {
+                    received_at: exc_info.received_at,
                     exception_type: exc_info.exception_type,
                     code: exc_info.code,
                     subcode: exc_info.subcode,

@@ -5,7 +5,6 @@
 //! for other pre-processors to inspect (e.g., for fingerprint enrichment).
 
 use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
-use mach2::port::mach_port_t;
 
 /// Structured build metadata extracted from `RawCrashContext`.
 #[derive(Debug, Clone)]
@@ -30,12 +29,7 @@ impl Plugin for BuildInfoEnricher {
 }
 
 impl PreProcessor for BuildInfoEnricher {
-    fn process(
-        &self,
-        _event: &CrashEvent,
-        _task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String> {
+    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
         let Some(ctx) = &data.raw.crash_context else {
             return Ok(()); // No crash context → nothing to extract
         };

@@ -66,9 +66,11 @@ reports. It is an internally tagged object with one of these shapes:
 `runtime_ms` is wall-clock time from the start of the spawn operation until the
 terminal wait status is observed; it can therefore include supervisor
 observation delay. `core_dumped` preserves the corresponding wait-status flag
-rather than inferring it from the signal number. A Mach crash report is first
-produced from exception capture; after the Mach reply and child reap, the
-supervisor atomically adds the actual wait status to the final JSON or ZIP.
+rather than inferring it from the signal number. For a Mach crash, the monitor
+first captures an immutable snapshot, then resumes and replies. After reaping
+the child, the supervisor hands the actual wait status to the fatal finalizer;
+the original JSON and ZIP are therefore written with `termination` already
+present rather than patched afterward.
 
 ## Monitor process exit status
 

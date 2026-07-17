@@ -68,8 +68,7 @@ impl PostProcessor for ZIPArchiver {
         }
 
         // ZIP is now the canonical report artifact. Keeping this path exact is
-        // required by later post-processors, notifiers, and crash-status
-        // finalization after the child has been reaped.
+        // required by later post-processors and notifiers.
         result.json_path = Some(zip_path);
 
         Ok(())

@@ -6,19 +6,21 @@ pub mod report;
 pub mod safety;
 pub mod traits;
 pub mod types;
+pub mod worker;
 
 use mach2::port::mach_port_t;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::platform::PlatformOps;
 
-pub use safety::run_plugin_safe;
+pub use safety::{run_plugin_catching_panics, run_plugin_safe};
 pub use traits::{Collector, Filter, Notifier, Plugin, PostProcessor, PreProcessor};
 pub use types::{
-    CollectedData, CrashEvent, Diagnostics, PluginStatus, Priority, ReportResult, ReportType,
-    TerminationReason,
+    CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, Diagnostics,
+    PluginStatus, Priority, RawShmSnapshot, ReportResult, ReportType, TerminationReason,
 };
 
 // ═══════════════════════════════════════════════════
@@ -48,46 +50,96 @@ const POSTPROC_TIMEOUT: u32 = 30;
 const NOTIFIER_TIMEOUT: u32 = 5;
 const STAGE_TIMEOUT: u32 = 5;
 
+#[derive(Clone, Copy)]
+enum ExecutionMode {
+    Timed,
+    PanicOnly,
+}
+
+fn run_stage<T>(
+    mode: ExecutionMode,
+    name: &str,
+    timeout_secs: u32,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Option<T> {
+    match mode {
+        ExecutionMode::Timed => run_plugin_safe(name, timeout_secs, f),
+        ExecutionMode::PanicOnly => run_plugin_catching_panics(name, f),
+    }
+}
+
 impl Pipeline {
-    /// Process a crash/snapshot event through the full pipeline.
+    /// Process a crash/snapshot event synchronously.
+    ///
+    /// Production Mach events use [`worker`] so finalization cannot delay
+    /// target resume or the exception reply. This wrapper remains useful for
+    /// callers and unit tests that explicitly want synchronous completion.
     #[must_use]
-    #[allow(clippy::too_many_lines)] // orchestration function — splitting would scatter pipeline logic
     pub fn handle_event(&self, event: &CrashEvent, task: mach_port_t) -> Diagnostics {
+        match self.capture_event(event, task) {
+            CaptureOutcome::Captured(captured) => {
+                self.finalize_captured(captured, ExecutionMode::Timed)
+            }
+            CaptureOutcome::Skipped(diagnostics) => diagnostics,
+        }
+    }
+
+    /// Suspend, collect task-facing state, release thread rights, and resume.
+    fn capture_event(&self, event: &CrashEvent, task: mach_port_t) -> CaptureOutcome {
         let mut diagnostics = Diagnostics::new();
 
-        let pending = match &self.output_dir {
-            Some(dir) => dir.clone(),
-            None => match crate::utils::paths::pending_dir() {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("[monitor] Failed to get pending dir: {e}");
-                    return diagnostics;
-                }
-            },
-        };
-
-        // ── Filter ──
-        for f in &self.filters {
-            let timeout = plugin_timeout(f.timeout_secs(), FILTER_TIMEOUT);
-            let pass =
-                run_plugin_safe(f.name(), timeout, || f.should_process(event)).unwrap_or(true);
-            if !pass {
-                return diagnostics;
-            }
-        }
-
-        // ── Suspend ──
-        if let Err(e) = self.platform.suspend_task(task) {
+        let suspended = if let Err(e) = self.platform.suspend_task(task) {
             if event.bail_on_suspend_failure {
                 eprintln!("[monitor] {e}");
-                return diagnostics;
+                return CaptureOutcome::Skipped(diagnostics);
             }
             eprintln!("[monitor] suspend_task failed (proceeding with best-effort): {e}");
+            false
+        } else {
+            true
+        };
+
+        let cancelled = AtomicBool::new(false);
+        let payload = self.collect_snapshot(event, task, &cancelled, ExecutionMode::Timed);
+
+        if suspended && let Err(e) = self.platform.resume_task(task) {
+            eprintln!("[monitor] resume_task failed: {e}");
         }
+
+        diagnostics = payload.diagnostics;
+        CaptureOutcome::Captured(CapturedEvent::new(
+            event.clone(),
+            CapturePayload {
+                data: payload.data,
+                raw_shm: payload.raw_shm,
+                diagnostics,
+            },
+        ))
+    }
+
+    /// Collect only data that requires access to the live task.
+    ///
+    /// The caller owns suspension and resume. Worker callers pass a shared
+    /// cancellation flag and use panic-only execution to avoid SIGALRM races.
+    fn collect_snapshot(
+        &self,
+        event: &CrashEvent,
+        task: mach_port_t,
+        cancelled: &AtomicBool,
+        mode: ExecutionMode,
+    ) -> CapturePayload {
+        let mut diagnostics = Diagnostics::new();
 
         // ── Collectors ──
         let mut data = CollectedData::default();
         for c in &self.collectors {
+            if cancelled.load(Ordering::Acquire) {
+                diagnostics.record_immediate(
+                    "CaptureDeadline",
+                    PluginStatus::Error("absolute capture deadline reached".into()),
+                );
+                break;
+            }
             if !c.is_available() {
                 diagnostics
                     .record_immediate(c.name(), PluginStatus::Skipped("not available".into()));
@@ -100,18 +152,78 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(c.timeout_secs(), COLLECTOR_TIMEOUT);
-            let status =
-                match run_plugin_safe(c.name(), timeout, || c.collect(event, task, &mut data)) {
-                    Some(()) => PluginStatus::Ok,
-                    None => PluginStatus::Error("failed or panicked".into()),
-                };
+            let status = match run_stage(mode, c.name(), timeout, || {
+                c.collect(event, task, &mut data)
+            }) {
+                Some(()) => PluginStatus::Ok,
+                None => PluginStatus::Error("failed or panicked".into()),
+            };
             diagnostics.record(c.name(), status, start.elapsed());
         }
 
-        // ── Thread port deallocation + Resume ──
+        let raw_shm = if cancelled.load(Ordering::Acquire) {
+            None
+        } else {
+            self.shm.as_ref().map(|shm| RawShmSnapshot {
+                breadcrumbs: shm.raw_breadcrumb_bytes().to_vec(),
+                context: shm.raw_context_bytes().to_vec(),
+            })
+        };
+
+        // Thread rights cannot cross the immutable capture/finalize boundary.
         let thread_ports: Vec<u32> = data.raw.threads.iter().map(|t| t.thread_port).collect();
-        let _port_guard = safety::PortGuard::new(thread_ports, self.platform.clone());
-        let _ = self.platform.resume_task(task);
+        drop(safety::PortGuard::new(thread_ports, self.platform.clone()));
+
+        CapturePayload {
+            data,
+            raw_shm,
+            diagnostics,
+        }
+    }
+
+    pub(super) fn collect_snapshot_for_worker(
+        &self,
+        event: &CrashEvent,
+        task: mach_port_t,
+        cancelled: &AtomicBool,
+    ) -> CapturePayload {
+        self.collect_snapshot(event, task, cancelled, ExecutionMode::PanicOnly)
+    }
+
+    pub(super) fn finalize_captured_for_worker(&self, captured: CapturedEvent) -> Diagnostics {
+        self.finalize_captured(captured, ExecutionMode::PanicOnly)
+    }
+
+    /// Finalize owned capture data without a task port or live SHM view.
+    #[allow(clippy::too_many_lines)]
+    fn finalize_captured(&self, mut captured: CapturedEvent, mode: ExecutionMode) -> Diagnostics {
+        let event = &captured.event;
+        let data = &mut captured.data;
+        let diagnostics = &mut captured.diagnostics;
+
+        let pending = match &self.output_dir {
+            Some(dir) => dir.clone(),
+            None => match crate::utils::paths::pending_dir() {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[monitor] Failed to get pending dir: {e}");
+                    return std::mem::take(diagnostics);
+                }
+            },
+        };
+
+        // Filters run after resume so filesystem and lock contention cannot
+        // extend the Mach critical section.
+        for filter in &self.filters {
+            let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
+            let pass = run_stage(mode, filter.name(), timeout, || {
+                filter.should_process(event)
+            })
+            .unwrap_or(true);
+            if !pass {
+                return std::mem::take(diagnostics);
+            }
+        }
 
         // ── Pre-processors ──
         for pp in &self.pre_processors {
@@ -120,7 +232,7 @@ impl Pipeline {
                     .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
                 continue;
             }
-            if !deps_satisfied(pp.depends_on(), &diagnostics) {
+            if !deps_satisfied(pp.depends_on(), diagnostics) {
                 diagnostics.record_immediate(
                     pp.name(),
                     PluginStatus::Skipped("dependency not met".into()),
@@ -129,36 +241,35 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(pp.timeout_secs(), PREPROC_TIMEOUT);
-            let status =
-                match run_plugin_safe(pp.name(), timeout, || pp.process(event, task, &mut data)) {
-                    Some(()) => PluginStatus::Ok,
-                    None => PluginStatus::Error("failed or panicked".into()),
-                };
+            let status = match run_stage(mode, pp.name(), timeout, || pp.process(event, data)) {
+                Some(()) => PluginStatus::Ok,
+                None => PluginStatus::Error("failed or panicked".into()),
+            };
             diagnostics.record(pp.name(), status, start.elapsed());
         }
 
         // ── Duplicate check (set by DuplicateDetector pre-processor) ──
         if data.duplicate_detected {
             eprintln!("[monitor] Duplicate event detected, skipping report");
-            return diagnostics;
+            return std::mem::take(diagnostics);
         }
 
         // ── Stage 1: Raw data (fail-safe) ──
-        let raw_path: Option<PathBuf> = run_plugin_safe("Stage1Raw", STAGE_TIMEOUT, || {
+        let raw_path: Option<PathBuf> = run_stage(mode, "Stage1Raw", STAGE_TIMEOUT, || {
             safety::write_raw_stage1(&pending, event.report_type, event.pid, &data.raw.threads)
         });
 
         // Stage 1 shm dump (breadcrumbs + context raw bytes)
-        if let Some(shm) = &self.shm {
-            let _ = run_plugin_safe("Stage1Shm", STAGE_TIMEOUT, || {
-                safety::write_raw_shm_stage1(&pending, event.report_type, event.pid, shm)
+        if let Some(raw_shm) = &captured.raw_shm {
+            let _ = run_stage(mode, "Stage1Shm", STAGE_TIMEOUT, || {
+                safety::write_raw_shm_stage1(&pending, event.report_type, event.pid, raw_shm)
             });
         }
 
         // ── Stage 2: Full JSON report + screenshot PNGs ──
         let screenshots = std::mem::take(&mut data.raw.screenshots);
-        let json_path: Option<PathBuf> = run_plugin_safe("Stage2Json", STAGE_TIMEOUT, || {
-            let mut crash_report = report::build_report(event, &data, &diagnostics);
+        let json_path: Option<PathBuf> = run_stage(mode, "Stage2Json", STAGE_TIMEOUT, || {
+            let mut crash_report = report::build_report(event, data, diagnostics);
             report::write_report(&pending, &mut crash_report, &screenshots)
         });
 
@@ -179,7 +290,7 @@ impl Pipeline {
             let start = Instant::now();
             let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
             let status =
-                match run_plugin_safe(pp.name(), timeout, || pp.process(event, &mut result)) {
+                match run_stage(mode, pp.name(), timeout, || pp.process(event, &mut result)) {
                     Some(()) => PluginStatus::Ok,
                     None => PluginStatus::Error("failed or panicked".into()),
                 };
@@ -196,7 +307,7 @@ impl Pipeline {
                 }
                 let start = Instant::now();
                 let timeout = plugin_timeout(n.timeout_secs(), NOTIFIER_TIMEOUT);
-                let status = match run_plugin_safe(n.name(), timeout, || n.notify(path)) {
+                let status = match run_stage(mode, n.name(), timeout, || n.notify(path)) {
                     Some(()) => PluginStatus::Ok,
                     None => PluginStatus::Error("failed or panicked".into()),
                 };
@@ -206,7 +317,7 @@ impl Pipeline {
 
         diagnostics.report_path = result.json_path;
 
-        diagnostics
+        std::mem::take(diagnostics)
     }
 
     /// Write and finalize a report for a child that has already terminated.
@@ -217,8 +328,16 @@ impl Pipeline {
     /// finalized. The immutable `TerminationReason` remains the authoritative
     /// payload for this path.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn handle_termination_event(&self, event: &CrashEvent) -> Diagnostics {
+        self.finalize_termination_event(event, ExecutionMode::Timed)
+    }
+
+    pub(super) fn finalize_termination_event_for_worker(&self, event: &CrashEvent) -> Diagnostics {
+        self.finalize_termination_event(event, ExecutionMode::PanicOnly)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn finalize_termination_event(&self, event: &CrashEvent, mode: ExecutionMode) -> Diagnostics {
         debug_assert!(event.termination.is_some());
         let mut diagnostics = Diagnostics::new();
 
@@ -235,8 +354,10 @@ impl Pipeline {
 
         for filter in &self.filters {
             let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
-            let pass = run_plugin_safe(filter.name(), timeout, || filter.should_process(event))
-                .unwrap_or(true);
+            let pass = run_stage(mode, filter.name(), timeout, || {
+                filter.should_process(event)
+            })
+            .unwrap_or(true);
             if !pass {
                 return diagnostics;
             }
@@ -256,7 +377,7 @@ impl Pipeline {
         }
 
         let data = CollectedData::default();
-        let json_path: Option<PathBuf> = run_plugin_safe("Stage2Json", STAGE_TIMEOUT, || {
+        let json_path: Option<PathBuf> = run_stage(mode, "Stage2Json", STAGE_TIMEOUT, || {
             let mut crash_report = report::build_report(event, &data, &diagnostics);
             report::write_report(&pending, &mut crash_report, &[])
         });
@@ -276,7 +397,7 @@ impl Pipeline {
             }
             let start = Instant::now();
             let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
-            let status = match run_plugin_safe(post_processor.name(), timeout, || {
+            let status = match run_stage(mode, post_processor.name(), timeout, || {
                 post_processor.process(event, &mut result)
             }) {
                 Some(()) => PluginStatus::Ok,
@@ -297,7 +418,7 @@ impl Pipeline {
                 let start = Instant::now();
                 let timeout = plugin_timeout(notifier.timeout_secs(), NOTIFIER_TIMEOUT);
                 let status =
-                    match run_plugin_safe(notifier.name(), timeout, || notifier.notify(path)) {
+                    match run_stage(mode, notifier.name(), timeout, || notifier.notify(path)) {
                         Some(()) => PluginStatus::Ok,
                         None => PluginStatus::Error("failed or panicked".into()),
                     };
@@ -431,6 +552,7 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
 
     // ── Collectors ──
     let mut collectors: Vec<Box<dyn Collector>> = vec![];
+    let mut attachment_copy_enabled = false;
 
     if on(cfg.collectors.enabled, cfg.collectors.thread.enabled) {
         collectors.push(Box::new(ThreadCollector::new(platform.clone())));
@@ -460,6 +582,7 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
         }
         if on(cfg.collectors.enabled, cfg.collectors.attachment.enabled) {
             collectors.push(Box::new(AttachmentCollector::new(shm.clone())));
+            attachment_copy_enabled = true;
         }
     }
 
@@ -469,6 +592,10 @@ pub fn default_macos_pipeline(shm: Option<std::sync::Arc<crate::shm::SharedMemor
 
     // ── Pre-processors (order matters: dependencies must come first) ──
     let mut pre_processors: Vec<Box<dyn PreProcessor>> = vec![];
+
+    if attachment_copy_enabled {
+        pre_processors.push(Box::new(crate::collectors::AttachmentCopier::new()));
+    }
 
     if on(
         cfg.pre_processors.enabled,

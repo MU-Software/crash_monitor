@@ -113,3 +113,9 @@ fn test_diagnostics_pipeline_duration() {
     std::thread::sleep(Duration::from_millis(1));
     assert!(diag.pipeline_duration_ms() > 0);
 }
+
+#[test]
+fn captured_event_is_an_owned_worker_handoff() {
+    fn assert_send_static<T: Send + 'static>() {}
+    assert_send_static::<CapturedEvent>();
+}

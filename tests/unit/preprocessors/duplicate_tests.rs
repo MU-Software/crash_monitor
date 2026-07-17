@@ -29,7 +29,7 @@ fn test_first_event_always_passes() {
     let event = dummy_event();
     let mut data = data_with_fingerprint("abc123");
 
-    detector.process(&event, 0, &mut data).unwrap();
+    detector.process(&event, &mut data).unwrap();
     assert!(!data.duplicate_detected);
 }
 
@@ -40,12 +40,12 @@ fn test_duplicate_within_window_detected() {
 
     // First event
     let mut data1 = data_with_fingerprint("abc123");
-    detector.process(&event, 0, &mut data1).unwrap();
+    detector.process(&event, &mut data1).unwrap();
     assert!(!data1.duplicate_detected);
 
     // Same fingerprint again
     let mut data2 = data_with_fingerprint("abc123");
-    detector.process(&event, 0, &mut data2).unwrap();
+    detector.process(&event, &mut data2).unwrap();
     assert!(data2.duplicate_detected);
 }
 
@@ -56,12 +56,12 @@ fn test_duplicate_outside_window_passes() {
     let event = dummy_event();
 
     let mut data1 = data_with_fingerprint("abc123");
-    detector.process(&event, 0, &mut data1).unwrap();
+    detector.process(&event, &mut data1).unwrap();
     assert!(!data1.duplicate_detected);
 
     // Window expired (ZERO duration) — should pass
     let mut data2 = data_with_fingerprint("abc123");
-    detector.process(&event, 0, &mut data2).unwrap();
+    detector.process(&event, &mut data2).unwrap();
     assert!(!data2.duplicate_detected);
 }
 
@@ -71,10 +71,10 @@ fn test_different_fingerprints_not_blocked() {
     let event = dummy_event();
 
     let mut data1 = data_with_fingerprint("abc123");
-    detector.process(&event, 0, &mut data1).unwrap();
+    detector.process(&event, &mut data1).unwrap();
 
     let mut data2 = data_with_fingerprint("def456");
-    detector.process(&event, 0, &mut data2).unwrap();
+    detector.process(&event, &mut data2).unwrap();
     assert!(!data2.duplicate_detected);
 }
 
@@ -84,7 +84,7 @@ fn test_no_fingerprint_passes() {
     let event = dummy_event();
     let mut data = CollectedData::default(); // fingerprint is None
 
-    detector.process(&event, 0, &mut data).unwrap();
+    detector.process(&event, &mut data).unwrap();
     assert!(!data.duplicate_detected);
 }
 

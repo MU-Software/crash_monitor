@@ -6,6 +6,7 @@ use mach2::exception_types::{
 use mach2::kern_return::KERN_SUCCESS;
 use mach2::message::mach_msg_header_t;
 use mach2::port::mach_port_t;
+use std::time::Instant;
 
 // ═══════════════════════════════════════════════════
 //  Constants
@@ -59,6 +60,9 @@ impl std::error::Error for MachError {}
 /// Includes the raw reply header so the main thread can send the reply
 /// after crash data collection is complete.
 pub struct ExceptionInfo {
+    /// Monotonic timestamp captured immediately after `mach_msg` received the
+    /// request. Capture deadlines must use this instead of a later poll time.
+    pub received_at: Instant,
     pub thread_port: mach_port_t,
     #[allow(dead_code)] // available for Phase 4+ (shared memory via task port)
     pub task_port: mach_port_t,

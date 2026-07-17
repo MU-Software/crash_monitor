@@ -6,7 +6,6 @@
 
 use crate::collectors::dylib::RawImageData;
 use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
-use mach2::port::mach_port_t;
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -49,12 +48,7 @@ impl Plugin for SymbolResolver {
 }
 
 impl PreProcessor for SymbolResolver {
-    fn process(
-        &self,
-        _event: &CrashEvent,
-        _task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String> {
+    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
         let mut addresses: Vec<u64> = data
             .raw
             .threads

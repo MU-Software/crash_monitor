@@ -4,7 +4,6 @@
 //! unsanitized data, producing stable hashes for identical crashes.
 
 use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
-use mach2::port::mach_port_t;
 
 pub struct Sanitizer {
     /// The username to mask, detected from `$USER`.
@@ -42,12 +41,7 @@ impl Plugin for Sanitizer {
 }
 
 impl PreProcessor for Sanitizer {
-    fn process(
-        &self,
-        _event: &CrashEvent,
-        _task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String> {
+    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
         if self.username.is_none() {
             return Ok(());
         }

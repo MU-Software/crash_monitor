@@ -146,11 +146,13 @@ fn test_filter_blocks_processing() {
     let event = make_event();
     let diag = pipeline.handle_event(&event, 0);
 
-    // Filter returned false → pipeline short-circuits, no collectors run
+    // Filters are intentionally outside the live-task capture window. The
+    // collector runs, then finalization stops before writing a report.
     assert!(
-        diag.plugins.is_empty(),
-        "No plugins should run when filter blocks"
+        diag.succeeded("MockCollector"),
+        "capture must finish before a potentially blocking filter"
     );
+    assert!(!json_report_exists(tempdir.path()));
 }
 
 #[test]
@@ -433,8 +435,8 @@ fn test_proceed_on_suspend_failure_false() {
 
     // Collector should still run despite suspend failure
     assert!(diag.succeeded("MockCollector"));
-    // Resume should still be called
-    assert_eq!(platform.resume_count(), 1);
+    // Never decrement a suspend count that this monitor did not acquire.
+    assert_eq!(platform.resume_count(), 0);
 }
 
 #[test]
@@ -658,12 +660,7 @@ impl Plugin for CfgPreProcessor {
 }
 
 impl PreProcessor for CfgPreProcessor {
-    fn process(
-        &self,
-        _event: &CrashEvent,
-        _task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String> {
+    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
         self.called.store(true, Ordering::SeqCst);
         assert!(!self.panic, "intentional pre-processor panic");
         if self.set_duplicate {

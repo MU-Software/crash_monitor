@@ -6,7 +6,6 @@ use crate::pipeline::report::SessionReport;
 use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
 use crate::utils::paths;
 use chrono::Local;
-use mach2::port::mach_port_t;
 use std::fs;
 use std::path::Path;
 
@@ -22,12 +21,7 @@ impl Plugin for SessionEnricher {
 }
 
 impl PreProcessor for SessionEnricher {
-    fn process(
-        &self,
-        _event: &CrashEvent,
-        _task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String> {
+    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
         data.session = read_session_lock();
         Ok(())
     }

@@ -32,6 +32,19 @@ impl Drop for AlarmGuard {
 /// receive `EINTR`, which propagates as errors through nix/mach2 wrappers.
 extern "C" fn sigalrm_noop(_sig: nix::libc::c_int) {}
 
+/// Execute a plugin closure with panic catching and no process-global timeout.
+///
+/// This is the safe wrapper for worker stages that have their own deadline or
+/// isolation policy. Unlike [`run_plugin_safe`], it never installs a signal
+/// handler or arms `alarm()`, so concurrent work cannot interfere with the
+/// process-wide SIGALRM state.
+pub fn run_plugin_catching_panics<T>(
+    name: &str,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Option<T> {
+    finish_plugin_result(name, std::panic::catch_unwind(AssertUnwindSafe(f)))
+}
+
 /// Execute a plugin closure with panic catching and optional timeout.
 ///
 /// `timeout_secs`: 0 = no timeout. Otherwise, `alarm(timeout_secs)` is set
@@ -59,9 +72,15 @@ pub fn run_plugin_safe<T>(
         None
     };
 
-    let result = std::panic::catch_unwind(AssertUnwindSafe(f));
-    // _alarm_guard dropped here → alarm(0) cancels any pending SIGALRM
+    // _alarm_guard remains alive while the closure runs and is dropped before
+    // this function returns, cancelling any pending SIGALRM.
+    run_plugin_catching_panics(name, f)
+}
 
+fn finish_plugin_result<T>(
+    name: &str,
+    result: std::thread::Result<Result<T, String>>,
+) -> Option<T> {
     match result {
         Ok(Ok(val)) => Some(val),
         Ok(Err(e)) => {
@@ -175,16 +194,16 @@ pub fn write_raw_shm_stage1(
     dir: &Path,
     report_type: crate::pipeline::ReportType,
     pid: u32,
-    shm: &crate::shm::SharedMemory,
+    snapshot: &crate::pipeline::RawShmSnapshot,
 ) -> Result<(), String> {
     let basename = report_filename(report_type, pid);
 
     let crumb_path = dir.join(format!("{basename}_raw_breadcrumbs.bin"));
-    std::fs::write(&crumb_path, shm.raw_breadcrumb_bytes())
+    std::fs::write(&crumb_path, &snapshot.breadcrumbs)
         .map_err(|e| format!("Failed to write raw breadcrumbs: {e}"))?;
 
     let ctx_path = dir.join(format!("{basename}_raw_context.bin"));
-    std::fs::write(&ctx_path, shm.raw_context_bytes())
+    std::fs::write(&ctx_path, &snapshot.context)
         .map_err(|e| format!("Failed to write raw context: {e}"))?;
 
     Ok(())

@@ -342,7 +342,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             let cfg = config::load_config();
             let oom_detection =
                 cfg.enabled && cfg.triggers.enabled && cfg.triggers.oom_detection.enabled;
-            let pl = pipeline::default_macos_pipeline(shared_memory.clone());
+            let pl = Arc::new(pipeline::default_macos_pipeline(shared_memory.clone()));
             #[allow(clippy::cast_sign_loss)]
             let child_pid_u32 = child_pid_raw as u32;
             return event_loop::handle_child_termination(
@@ -369,7 +369,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
                     let cfg = config::load_config();
                     let oom_detection =
                         cfg.enabled && cfg.triggers.enabled && cfg.triggers.oom_detection.enabled;
-                    let pl = pipeline::default_macos_pipeline(shared_memory.clone());
+                    let pl = Arc::new(pipeline::default_macos_pipeline(shared_memory.clone()));
                     #[allow(clippy::cast_sign_loss)]
                     let child_pid_u32 = child_pid_raw as u32;
                     let _ = event_loop::handle_child_termination(
@@ -392,7 +392,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     eprintln!("[monitor] Monitoring active. Press F8 in app for manual snapshot.");
 
     // Create the plugin pipeline
-    let pl = pipeline::default_macos_pipeline(shared_memory.clone());
+    let pl = Arc::new(pipeline::default_macos_pipeline(shared_memory.clone()));
 
     // Inline-trigger toggles (Mach/SIGUSR1 are always-on; only OOM is opt-in).
     let cfg = config::load_config();
@@ -413,7 +413,10 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let mut source =
         event_source::MacEventSource::new(exc_rx, signal_read_fd, child_pid, child_started_at);
 
-    let mut outcome = event_loop::event_loop(
+    let event_loop::EventLoopResult {
+        mut outcome,
+        mut crash_finalization,
+    } = event_loop::event_loop(
         &mut source,
         &pl,
         child_task.raw(),
@@ -440,24 +443,33 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     }
 
     // Wait for child to exit after a detected crash and retain its raw status.
+    // Fatal report finalization starts only after this handoff, so JSON and ZIP
+    // contain the terminal status from their first write.
     if matches!(outcome, event_loop::MonitorOutcome::DetectedCrash { .. }) {
-        match reap_after_detected_crash(child_pid, child_started_at) {
+        let termination = match reap_after_detected_crash(child_pid, child_started_at) {
             Ok(reason) => {
                 eprintln!("[monitor] Crashed child terminated: {reason:?}");
-                if let Some(report_path) = outcome.report_path()
-                    && let Err(e) = pipeline::report::update_termination(report_path, reason)
-                {
-                    eprintln!(
-                        "[monitor] Failed to persist crash termination in '{}': {e}",
-                        report_path.display()
-                    );
-                }
-                outcome = outcome.with_crash_termination(Some(reason));
+                Some(reason)
             }
             Err(e) => {
                 eprintln!("[monitor] {e}");
+                None
             }
+        };
+
+        let report_path = crash_finalization.take().and_then(|finalization| {
+            finalization
+                .complete(
+                    pl.clone(),
+                    termination,
+                    pipeline::worker::CRASH_FINALIZE_WAIT,
+                )
+                .and_then(|diagnostics| diagnostics.report_path)
+        });
+        if report_path.is_none() {
+            eprintln!("[monitor] Fatal report finalization did not produce an artifact");
         }
+        outcome = outcome.with_crash_result(termination, report_path);
     }
 
     outcome.exit_code()

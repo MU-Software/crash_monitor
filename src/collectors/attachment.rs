@@ -1,15 +1,15 @@
 //! Collector: Attachment files registered by the C app via `sut_crash_attach_file()`.
 //!
-//! Reads file paths from the shared memory attachment section,
-//! copies each file to the report's pending directory.
-//! Self-contained — shm reading is in `SharedMemory`, file copy is here.
+//! The collector only snapshots registered paths from shared memory while the
+//! target is suspended. `AttachmentCopier` performs filesystem I/O later on
+//! the finalization worker.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use mach2::port::mach_port_t;
 
-use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, Priority};
+use crate::pipeline::{CollectedData, Collector, CrashEvent, Plugin, PreProcessor, Priority};
 use crate::shm::SharedMemory;
 
 // ═══════════════════════════════════════════════════
@@ -53,19 +53,65 @@ impl Plugin for AttachmentCollector {
 impl Collector for AttachmentCollector {
     fn collect(
         &self,
-        event: &CrashEvent,
+        _event: &CrashEvent,
         _task: mach_port_t,
         data: &mut CollectedData,
     ) -> Result<(), String> {
-        let registered = self.shm.read_attachments();
+        data.raw.attachment_registrations = self.shm.read_attachments();
+        Ok(())
+    }
+}
+
+/// Finalization-only pre-processor that copies registered attachment files.
+pub struct AttachmentCopier {
+    output_dir: Option<PathBuf>,
+}
+
+impl AttachmentCopier {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { output_dir: None }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_dir(output_dir: PathBuf) -> Self {
+        Self {
+            output_dir: Some(output_dir),
+        }
+    }
+}
+
+impl Default for AttachmentCopier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Plugin for AttachmentCopier {
+    fn name(&self) -> &'static str {
+        "AttachmentCopier"
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::High
+    }
+}
+
+impl PreProcessor for AttachmentCopier {
+    fn process(&self, event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
+        let registered = &data.raw.attachment_registrations;
         if registered.is_empty() {
             return Ok(());
         }
 
-        let pending_dir = crate::utils::paths::pending_dir()?;
+        let pending_dir = match &self.output_dir {
+            Some(dir) => dir.clone(),
+            None => crate::utils::paths::pending_dir()?,
+        };
         let basename = crate::pipeline::report::report_filename(event.report_type, event.pid);
 
-        for att in &registered {
+        for att in registered {
             let src = std::path::Path::new(&att.path);
             if !src.exists() {
                 eprintln!(
@@ -123,5 +169,47 @@ impl Collector for AttachmentCollector {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::ReportType;
+
+    #[test]
+    fn attachment_copy_runs_in_preprocessor_stage() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let source = tempdir.path().join("source.log");
+        std::fs::write(&source, b"diagnostic").unwrap();
+        let mut data = CollectedData::default();
+        data.raw
+            .attachment_registrations
+            .push(crate::shm::RawAttachment {
+                label: "log".into(),
+                path: source.to_string_lossy().into_owned(),
+            });
+        let event = CrashEvent {
+            report_type: ReportType::Crash,
+            termination: None,
+            exception_type: Some(1),
+            exception_code: None,
+            exception_subcode: None,
+            crashed_thread: None,
+            bail_on_suspend_failure: false,
+            pid: 123,
+            process_name: "app".into(),
+            hang_duration_ms: None,
+        };
+
+        AttachmentCopier::with_dir(tempdir.path().to_path_buf())
+            .process(&event, &mut data)
+            .unwrap();
+
+        assert_eq!(data.raw.attachments.len(), 1);
+        assert_eq!(
+            std::fs::read(&data.raw.attachments[0].copied_path).unwrap(),
+            b"diagnostic"
+        );
     }
 }

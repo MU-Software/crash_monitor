@@ -8,6 +8,7 @@ use mach2::port::MACH_PORT_NULL;
 use mach2::port::mach_port_t;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 use crate::platform::macos::exceptions::{message_header, parse_exception_message};
 use crate::platform::macos::types::{ExceptionInfo, MachError, mach_result};
@@ -124,6 +125,7 @@ fn exception_listener(port: mach_port_t, tx: mpsc::Sender<ExceptionInfo>) {
             eprintln!("[monitor] mach_msg receive failed: {e}");
             break;
         }
+        let received_at = Instant::now();
 
         let (thread_port, task_port, exception_type, code, subcode) =
             match parse_exception_message(&msg_buf) {
@@ -143,6 +145,7 @@ fn exception_listener(port: mach_port_t, tx: mpsc::Sender<ExceptionInfo>) {
         };
 
         let info = ExceptionInfo {
+            received_at,
             thread_port,
             task_port,
             exception_type,

@@ -6,7 +6,6 @@
 
 use crate::collectors::dylib;
 use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
-use mach2::port::mach_port_t;
 use sha2::{Digest, Sha256};
 
 /// System library path prefixes — frames from these images are excluded
@@ -48,12 +47,7 @@ impl Plugin for Fingerprinter {
 }
 
 impl PreProcessor for Fingerprinter {
-    fn process(
-        &self,
-        _event: &CrashEvent,
-        _task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String> {
+    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
         // Find the crashed thread, or fall back to thread 0
         let thread = data
             .raw

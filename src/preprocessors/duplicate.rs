@@ -5,7 +5,6 @@
 //! `data.duplicate_detected = true` so the pipeline skips report writing.
 
 use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, Priority};
-use mach2::port::mach_port_t;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -40,12 +39,7 @@ impl Plugin for DuplicateDetector {
 }
 
 impl PreProcessor for DuplicateDetector {
-    fn process(
-        &self,
-        _event: &CrashEvent,
-        _task: mach_port_t,
-        data: &mut CollectedData,
-    ) -> Result<(), String> {
+    fn process(&self, _event: &CrashEvent, data: &mut CollectedData) -> Result<(), String> {
         let fp = match &data.fingerprint {
             Some(fp) => fp.clone(),
             None => return Ok(()), // No fingerprint → cannot deduplicate → pass through

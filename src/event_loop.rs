@@ -8,8 +8,12 @@ use mach2::message::mach_msg_header_t;
 use mach2::port::mach_port_t;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::pipeline::worker::{
+    BACKGROUND_DRAIN_DEADLINE, BackgroundFinalizeWorker, CAPTURE_DEADLINE, CRASH_FINALIZE_WAIT,
+    CaptureWorker, CrashFinalization, finalize_terminated_child,
+};
 use crate::pipeline::{CrashEvent, Pipeline, ReportType, TerminationReason};
 use crate::shm::SharedMemory;
 use crate::watchdog::{WatchdogState, update_watchdog_state};
@@ -22,6 +26,8 @@ use crate::watchdog::{WatchdogState, update_watchdog_state};
 pub enum MonitorEvent {
     /// Mach exception (crash).
     Crash {
+        /// Monotonic time when the listener received the Mach request.
+        received_at: Instant,
         exception_type: u32,
         code: u64,
         subcode: u64,
@@ -83,8 +89,8 @@ pub enum MonitorOutcome {
         /// Filled by the supervisor after replying to the Mach exception and
         /// reaping the child.
         termination: Option<TerminationReason>,
-        /// Final JSON or ZIP produced by the pipeline. The supervisor uses it
-        /// to persist the terminal wait status after reaping the child.
+        /// Final JSON or ZIP produced after the terminal wait status is handed
+        /// to the fatal finalization worker.
         report_path: Option<PathBuf>,
     },
     MonitorFailure(String),
@@ -103,11 +109,16 @@ impl MonitorOutcome {
         }
     }
 
-    /// Attach the terminal status observed after a Mach exception report.
+    /// Attach both pieces produced after the exception reply: the terminal
+    /// wait status and the final artifact created by the fatal worker.
     #[must_use]
-    pub fn with_crash_termination(self, reason: Option<TerminationReason>) -> Self {
+    pub fn with_crash_result(
+        self,
+        reason: Option<TerminationReason>,
+        report_path: Option<PathBuf>,
+    ) -> Self {
         match self {
-            Self::DetectedCrash { report_path, .. } => Self::DetectedCrash {
+            Self::DetectedCrash { .. } => Self::DetectedCrash {
                 termination: reason,
                 report_path,
             },
@@ -128,11 +139,30 @@ impl MonitorOutcome {
     }
 }
 
+/// Event-loop handoff. Fatal finalization is deliberately separate from the
+/// monitor outcome because it must not start expensive work before Mach reply.
+pub struct EventLoopResult {
+    pub outcome: MonitorOutcome,
+    pub crash_finalization: Option<CrashFinalization>,
+}
+
+impl EventLoopResult {
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        self.outcome.exit_code()
+    }
+
+    #[must_use]
+    pub fn report_path(&self) -> Option<&Path> {
+        self.outcome.report_path()
+    }
+}
+
 /// Convert a terminal child status into a typed report (when abnormal) and a
 /// typed monitor outcome. This is shared by startup and steady-state paths.
 #[must_use]
 pub fn handle_child_termination(
-    pipeline: &Pipeline,
+    pipeline: &Arc<Pipeline>,
     pid: u32,
     process_name: &str,
     reason: TerminationReason,
@@ -162,7 +192,7 @@ pub fn handle_child_termination(
             hang_duration_ms: None,
             termination: Some(reason),
         };
-        let _diagnostics = pipeline.handle_termination_event(&event);
+        let _diagnostics = finalize_terminated_child(pipeline.clone(), event, CRASH_FINALIZE_WAIT);
     }
 
     MonitorOutcome::ChildTerminated(reason)
@@ -179,7 +209,7 @@ const SIGKILL_NUM: i32 = 9;
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn event_loop(
     source: &mut dyn EventSource,
-    pipeline: &Pipeline,
+    pipeline: &Arc<Pipeline>,
     task: mach_port_t,
     pid: u32,
     process_name: &str,
@@ -187,7 +217,7 @@ pub fn event_loop(
     shm: Option<&Arc<SharedMemory>>,
     anr_config: Option<&AnrConfig>,
     oom_detection: bool,
-) -> MonitorOutcome {
+) -> EventLoopResult {
     // Initialize ANR state if both shm and config are available
     let mut anr_state = match (&shm, &anr_config) {
         (Some(s), Some(cfg)) => Some((
@@ -201,10 +231,13 @@ pub fn event_loop(
         _ => None,
     };
     let mut last_anr_check = Instant::now();
+    let mut capture_worker = CaptureWorker::start(pipeline.clone());
+    let background_worker = BackgroundFinalizeWorker::start(pipeline.clone());
 
     loop {
         match source.poll() {
             Some(MonitorEvent::Crash {
+                received_at,
                 exception_type,
                 code,
                 subcode,
@@ -223,14 +256,30 @@ pub fn event_loop(
                     hang_duration_ms: None,
                     termination: None,
                 };
-                let diagnostics = pipeline.handle_event(&event, task);
+                let deadline = received_at
+                    .checked_add(CAPTURE_DEADLINE)
+                    .unwrap_or(received_at);
+                let captured = match capture_worker.capture(event, task, deadline) {
+                    crate::pipeline::CaptureOutcome::Captured(captured) => Some(captured),
+                    crate::pipeline::CaptureOutcome::Skipped(_) => None,
+                };
 
                 if let Some(ref header) = reply_header {
                     reply_fn(header);
                 }
-                return MonitorOutcome::DetectedCrash {
-                    termination: None,
-                    report_path: diagnostics.report_path,
+                // No drain or join is allowed between reply and returning to
+                // the supervisor, which must destroy the exception port and
+                // begin reaping immediately.
+                capture_worker.detach();
+                background_worker.detach();
+                let crash_finalization =
+                    captured.map(|captured| CrashFinalization::start(pipeline.clone(), captured));
+                return EventLoopResult {
+                    outcome: MonitorOutcome::DetectedCrash {
+                        termination: None,
+                        report_path: None,
+                    },
+                    crash_finalization,
                 };
             }
 
@@ -247,22 +296,32 @@ pub fn event_loop(
                     hang_duration_ms: None,
                     termination: None,
                 };
-                let _diagnostics = pipeline.handle_event(&event, task);
+                if let crate::pipeline::CaptureOutcome::Captured(captured) =
+                    capture_worker.capture(event, task, Instant::now() + CAPTURE_DEADLINE)
+                {
+                    let _ = background_worker.try_submit(captured);
+                }
             }
 
             Some(MonitorEvent::ChildTerminated(reason)) => {
-                return handle_child_termination(
-                    pipeline,
-                    pid,
-                    process_name,
-                    reason,
-                    oom_detection,
-                );
+                let outcome =
+                    handle_child_termination(pipeline, pid, process_name, reason, oom_detection);
+                capture_worker.shutdown(Duration::from_millis(100));
+                background_worker.shutdown(BACKGROUND_DRAIN_DEADLINE);
+                return EventLoopResult {
+                    outcome,
+                    crash_finalization: None,
+                };
             }
 
             Some(MonitorEvent::MonitorFailure { message }) => {
                 eprintln!("[monitor] {message}");
-                return MonitorOutcome::MonitorFailure(message);
+                capture_worker.shutdown(Duration::from_millis(100));
+                background_worker.shutdown(BACKGROUND_DRAIN_DEADLINE);
+                return EventLoopResult {
+                    outcome: MonitorOutcome::MonitorFailure(message),
+                    crash_finalization: None,
+                };
             }
 
             None => {
@@ -302,7 +361,15 @@ pub fn event_loop(
                                     hang_duration_ms: Some(hang_duration_ms),
                                     termination: None,
                                 };
-                                let _diagnostics = pipeline.handle_event(&event, task);
+                                if let crate::pipeline::CaptureOutcome::Captured(captured) =
+                                    capture_worker.capture(
+                                        event,
+                                        task,
+                                        Instant::now() + CAPTURE_DEADLINE,
+                                    )
+                                {
+                                    let _ = background_worker.try_submit(captured);
+                                }
                             }
                         }
                     }
