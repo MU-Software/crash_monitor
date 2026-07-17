@@ -1,0 +1,92 @@
+[workspace]
+members = [".", "crates/crash_dialog_macos", "crates/crash_dialog_mock"]
+
+[package]
+name = "mbb_monitor"
+version = "0.1.0"
+edition = "2024"
+description = "Out-of-process crash monitor for Model Block Builder"
+
+[lib]
+name = "mbb_monitor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mbb_monitor"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+# CRITICAL: Do NOT set panic = "abort" in any profile.
+# The pipeline's run_plugin_safe() depends on catch_unwind (panic = "unwind").
+[profile.release]
+panic = "unwind"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[features]
+test-support = []
+
+[dependencies]
+mach2 = "0.6"
+nix = { version = "0.31", features = ["signal", "process", "fs", "mman", "feature", "hostname"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+png = "0.17"
+sha2 = "0.10"
+addr2line = { version = "0.24", default-features = false, features = ["std", "loader"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+# Generates the Rust mirror of the C<->Rust shm layout from crash_shm.h (SSOT).
+bindgen = "0.70"
+
+[[test]]
+name = "shm_round_trip"
+path = "tests/integration/shm_round_trip.rs"
+
+[[test]]
+name = "shm_validation_failure"
+path = "tests/integration/shm_validation_failure.rs"
+
+[[test]]
+name = "alarm_timeout"
+path = "tests/integration/alarm_timeout.rs"
+
+[[test]]
+name = "event_loop_test"
+path = "tests/integration/event_loop_test.rs"
+
+[[test]]
+name = "e2e_tests"
+path = "tests/e2e/e2e_tests.rs"
+
+[[test]]
+name = "cli_analyze_test"
+path = "tests/integration/cli_analyze_test.rs"
+
+[[test]]
+name = "cli_stack_test"
+path = "tests/integration/cli_stack_test.rs"
+
+[[test]]
+name = "cli_zip_test"
+path = "tests/integration/cli_zip_test.rs"
+
+[[test]]
+name = "cli_feedback_test"
+path = "tests/integration/cli_feedback_test.rs"
+
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"
+mbb_monitor = { path = ".", features = ["test-support"] }

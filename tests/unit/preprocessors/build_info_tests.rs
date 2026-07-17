@@ -1,0 +1,95 @@
+use crate::pipeline::{CollectedData, CrashEvent, Plugin, PreProcessor, ReportType};
+use crate::preprocessors::BuildInfoEnricher;
+use crate::shm::RawCrashContext;
+
+fn dummy_event() -> CrashEvent {
+    CrashEvent {
+        report_type: ReportType::Crash,
+        exception_type: Some(1),
+        exception_code: Some(0),
+        exception_subcode: Some(0),
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 1234,
+        process_name: "test".into(),
+        hang_duration_ms: None,
+    }
+}
+
+fn make_context() -> RawCrashContext {
+    RawCrashContext {
+        active_tool: "brush".into(),
+        region_count: 10,
+        voxel_count: 500,
+        undo_depth: 3,
+        redo_depth: 1,
+        last_action_id: 42,
+        frame_number: 100,
+        alloc_count: 200,
+        free_count: 180,
+        alloc_bytes_total: 4096,
+        thread_pool_size: 4,
+        active_batch: 0,
+        heartbeat_counter: 99,
+        session_start_ns: 0,
+        session_id: "test-session".into(),
+        tags: vec![("env".into(), "test".into())],
+        app_version: "1.2.3".into(),
+        build_number: 456,
+        git_hash: "abc123def".into(),
+        git_dirty: false,
+        build_type: "Debug".into(),
+        build_preset: "default".into(),
+        build_timestamp: "2026-04-11".into(),
+        compiler: "clang-17".into(),
+        os_version: "15.3".into(),
+    }
+}
+
+#[test]
+fn test_extracts_version_from_context() {
+    let enricher = BuildInfoEnricher;
+    let event = dummy_event();
+    let mut data = CollectedData::default();
+    data.raw.crash_context = Some(make_context());
+
+    enricher.process(&event, 0, &mut data).unwrap();
+
+    let info = data.build_info.as_ref().expect("build_info should be set");
+    assert_eq!(info.app_version, "1.2.3");
+    assert_eq!(info.build_number, 456);
+    assert_eq!(info.git_hash, "abc123def");
+}
+
+#[test]
+fn test_extracts_tags() {
+    let enricher = BuildInfoEnricher;
+    let event = dummy_event();
+    let mut data = CollectedData::default();
+    data.raw.crash_context = Some(make_context());
+
+    enricher.process(&event, 0, &mut data).unwrap();
+
+    let info = data.build_info.as_ref().unwrap();
+    assert_eq!(info.tags.len(), 1);
+    assert_eq!(info.tags[0], ("env".to_string(), "test".to_string()));
+}
+
+#[test]
+fn test_no_context_is_noop() {
+    let enricher = BuildInfoEnricher;
+    let event = dummy_event();
+    let mut data = CollectedData::default();
+    // crash_context is None
+
+    enricher.process(&event, 0, &mut data).unwrap();
+    assert!(data.build_info.is_none());
+}
+
+#[test]
+fn test_plugin_metadata() {
+    let enricher = BuildInfoEnricher;
+    assert_eq!(enricher.name(), "BuildInfoEnricher");
+    assert!(enricher.is_available());
+    assert!(enricher.depends_on().is_empty());
+}
