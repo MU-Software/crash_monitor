@@ -12,10 +12,15 @@ use crate::utils::paths::{
     validate_private_file,
 };
 use chrono::Local;
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::sync::{LazyLock, Mutex, MutexGuard, TryLockError};
+use std::thread;
+use std::time::Duration;
 
 #[cfg(test)]
 thread_local! {
@@ -24,6 +29,15 @@ thread_local! {
 }
 
 const MAX_SESSION_RECORD_BYTES: usize = 16 * 1024;
+const MAX_SESSION_LOCK_BYTES: u64 = 4 * 1024;
+const SESSION_LOG_LOCK_FILE: &str = ".sessions.lock";
+const SESSION_LOG_LOCK_POLL: Duration = Duration::from_millis(5);
+static SESSION_LOG_PROCESS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+pub(super) struct SessionLogLock {
+    _process: MutexGuard<'static, ()>,
+    _file: Flock<fs::File>,
+}
 
 pub struct SessionRecorder;
 
@@ -185,16 +199,17 @@ fn record_crash_in_dir(
 
     let json = serde_json::to_string(&record)
         .map_err(|error| format!("cannot serialize session record: {error}"))?;
+    let _log_lock = acquire_session_log_lock(dir, context)?;
     let jsonl_path = dir.join("sessions.jsonl");
-    append_session_record(&jsonl_path, &json, context)?;
+    append_session_record_locked(&jsonl_path, &json, context)?;
 
     let lock_path = dir.join("session.lock");
-    remove_private_session_lock(&lock_path)?;
+    remove_owned_session_lock(&lock_path, &session.id)?;
     context.checkpoint()?;
     Ok(())
 }
 
-fn remove_private_session_lock(path: &std::path::Path) -> Result<(), String> {
+fn remove_owned_session_lock(path: &std::path::Path, expected_owner: &str) -> Result<(), String> {
     let named = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -216,6 +231,28 @@ fn remove_private_session_lock(path: &std::path::Path) -> Result<(), String> {
             path.display()
         ));
     }
+    if opened.len() > MAX_SESSION_LOCK_BYTES {
+        return Err(format!(
+            "committed session lock exceeds {MAX_SESSION_LOCK_BYTES} bytes: '{}'",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or(0));
+    file.take(MAX_SESSION_LOCK_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read committed session lock: {error}"))?;
+    if bytes.len() as u64 > MAX_SESSION_LOCK_BYTES {
+        return Err(format!(
+            "committed session lock grew beyond {MAX_SESSION_LOCK_BYTES} bytes"
+        ));
+    }
+    let owner = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    if owner != expected_owner.as_bytes() {
+        return Ok(());
+    }
     fs::remove_file(path).map_err(|error| {
         format!(
             "cannot remove committed session lock '{}': {error}",
@@ -225,7 +262,22 @@ fn remove_private_session_lock(path: &std::path::Path) -> Result<(), String> {
     sync_parent_directory(path)
 }
 
-fn append_session_record(
+#[cfg(test)]
+pub(super) fn append_session_record(
+    path: &std::path::Path,
+    json: &str,
+    context: &PluginContext,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("session log has no parent: '{}'", path.display()))?;
+    ensure_private_directory(parent)
+        .map_err(|error| format!("cannot prepare private session directory: {error}"))?;
+    let _log_lock = acquire_session_log_lock(parent, context)?;
+    append_session_record_locked(path, json, context)
+}
+
+fn append_session_record_locked(
     path: &std::path::Path,
     json: &str,
     context: &PluginContext,
@@ -252,6 +304,87 @@ fn append_session_record(
         sync_parent_directory(path)?;
     }
     context.checkpoint()
+}
+
+pub(super) fn acquire_session_log_lock(
+    dir: &std::path::Path,
+    context: &PluginContext,
+) -> Result<SessionLogLock, String> {
+    let process = loop {
+        context.checkpoint()?;
+        match SESSION_LOG_PROCESS_LOCK.try_lock() {
+            Ok(lock) => break lock,
+            Err(TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => thread::sleep(SESSION_LOG_LOCK_POLL),
+        }
+    };
+
+    let lock_path = dir.join(SESSION_LOG_LOCK_FILE);
+    let (mut file, created) = open_session_log_lock_file(&lock_path)?;
+    if created {
+        sync_parent_directory(&lock_path)?;
+    }
+    loop {
+        context.checkpoint()?;
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(file_lock) => {
+                return Ok(SessionLogLock {
+                    _process: process,
+                    _file: file_lock,
+                });
+            }
+            Err((returned_file, Errno::EWOULDBLOCK)) => {
+                file = returned_file;
+                thread::sleep(SESSION_LOG_LOCK_POLL);
+            }
+            Err((_returned_file, error)) => {
+                return Err(format!(
+                    "cannot acquire session log lock '{}': {error}",
+                    lock_path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn open_session_log_lock_file(path: &std::path::Path) -> Result<(fs::File, bool), String> {
+    let open_existing = || {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(path)
+    };
+    let (file, created) = match open_existing() {
+        Ok(file) => (file, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match create_private_file(path) {
+                Ok(file) => (file, true),
+                Err(create_error) => (
+                    open_existing().map_err(|open_error| {
+                        format!(
+                            "cannot create private session log lock '{}': {create_error}; retry open failed: {open_error}",
+                            path.display()
+                        )
+                    })?,
+                    false,
+                ),
+            }
+        }
+        Err(error) => {
+            return Err(format!(
+                "cannot open session log lock '{}': {error}",
+                path.display()
+            ));
+        }
+    };
+    validate_private_file(&file, path).map_err(|error| {
+        format!(
+            "cannot validate session log lock '{}': {error}",
+            path.display()
+        )
+    })?;
+    Ok((file, created))
 }
 
 fn open_private_session_log(path: &std::path::Path) -> Result<(fs::File, bool), String> {

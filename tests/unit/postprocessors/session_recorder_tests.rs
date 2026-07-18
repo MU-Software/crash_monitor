@@ -49,7 +49,11 @@ fn test_session_record_contains_committed_identity_and_paths() {
     let report_context = Arc::new(crate::pipeline::ReportContext::new(&event, dir.path()));
     let context = PluginContext::without_deadline().with_report_context(report_context);
 
-    std::fs::write(dir.path().join("session.lock"), b"locked").unwrap();
+    std::fs::write(
+        dir.path().join("session.lock"),
+        format!("{}\n{}\n", session.id, session.start),
+    )
+    .unwrap();
     record_crash_in_dir(
         &session,
         &committed,
@@ -68,6 +72,34 @@ fn test_session_record_contains_committed_identity_and_paths() {
         committed.manifest_path.to_string_lossy().as_ref()
     );
     assert!(!dir.path().join("session.lock").exists());
+}
+
+#[test]
+fn session_recorder_preserves_another_instances_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = SessionReport {
+        id: "this-monitor".to_string(),
+        start: "2026-03-29T10:00:00+09:00".to_string(),
+        duration_s: 120,
+    };
+    let event = make_crash_event();
+    let committed = committed(&event, &dir.path().join(event.report_id.as_str()));
+    let lock_path = dir.path().join("session.lock");
+    std::fs::write(&lock_path, b"other-monitor\n2026-03-29T10:00:00+09:00\n").unwrap();
+
+    record_crash_in_dir(
+        &session,
+        &committed,
+        Some("report.json"),
+        dir.path(),
+        &PluginContext::without_deadline(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(lock_path).unwrap(),
+        "other-monitor\n2026-03-29T10:00:00+09:00\n"
+    );
 }
 
 #[test]

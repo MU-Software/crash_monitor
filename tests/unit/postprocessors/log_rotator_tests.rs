@@ -207,7 +207,27 @@ fn test_threshold_at_input_overage_still_rotates() {
 }
 
 #[test]
-fn test_line_and_count_limits_preserve_original() {
+fn test_corrupt_line_is_skipped_without_discarding_valid_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("sessions.jsonl");
+    let rotator = LogRotator::with_path(0, log_path.clone());
+
+    let mut input = vec![b'x'; super::MAX_LOG_LINE_BYTES + 1];
+    input.extend_from_slice(b"\nvalid-tail-1\nvalid-tail-2\n");
+    std::fs::write(&log_path, input).unwrap();
+    rotator
+        .process(
+            &dummy_event(),
+            &mut dummy_result(),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(&log_path).unwrap(), b"valid-tail-2\n");
+    assert_no_rotation_temp(dir.path());
+}
+
+#[test]
+fn test_unrecoverable_and_excessive_line_counts_preserve_original() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("sessions.jsonl");
     let rotator = LogRotator::with_path(0, log_path.clone());
@@ -221,7 +241,7 @@ fn test_line_and_count_limits_preserve_original() {
             &PluginContext::without_deadline(),
         )
         .unwrap_err();
-    assert!(error.contains("line larger"));
+    assert!(error.contains("no recoverable records"));
     assert_eq!(std::fs::read_to_string(&log_path).unwrap(), oversized_line);
 
     let too_many_lines = "x\n".repeat(super::MAX_LOG_LINES + 1);
@@ -236,6 +256,59 @@ fn test_line_and_count_limits_preserve_original() {
     assert!(error.contains("line-count limit"));
     assert_eq!(std::fs::read_to_string(&log_path).unwrap(), too_many_lines);
     assert_no_rotation_temp(dir.path());
+}
+
+#[test]
+fn test_rotation_is_byte_safe_for_non_utf8_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("sessions.jsonl");
+    std::fs::write(&log_path, [b"old\xff\n".as_slice(), b"tail\xfe\n"].concat()).unwrap();
+
+    LogRotator::with_path(0, log_path.clone())
+        .process(
+            &dummy_event(),
+            &mut dummy_result(),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert_eq!(std::fs::read(log_path).unwrap(), b"tail\xfe\n");
+}
+
+#[test]
+fn concurrent_append_and_rotation_do_not_lose_the_new_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("sessions.jsonl");
+    std::fs::write(&log_path, b"old-1\nold-2\n").unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let append_path = log_path.clone();
+    let append_barrier = barrier.clone();
+    let append = std::thread::spawn(move || {
+        append_barrier.wait();
+        super::super::session_recorder::append_session_record(
+            &append_path,
+            r#"{"id":"new-record"}"#,
+            &PluginContext::without_deadline(),
+        )
+    });
+    let rotate_path = log_path.clone();
+    let rotate = std::thread::spawn(move || {
+        barrier.wait();
+        LogRotator::with_path(0, rotate_path).process(
+            &dummy_event(),
+            &mut dummy_result(),
+            &PluginContext::without_deadline(),
+        )
+    });
+
+    append.join().unwrap().unwrap();
+    rotate.join().unwrap().unwrap();
+    assert!(
+        std::fs::read_to_string(log_path)
+            .unwrap()
+            .contains("new-record")
+    );
 }
 
 #[test]

@@ -10,7 +10,7 @@ use crate::utils::paths::{
     create_private_file, ensure_private_directory, open_private_directory, open_private_file,
 };
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Seek, Write};
 use std::path::{Path, PathBuf};
 
 // Rotation may read at most this much beyond the configured trigger. This keeps
@@ -95,8 +95,9 @@ impl PostProcessor for LogRotator {
             .ok_or_else(|| format!("sessions.jsonl has no parent: '{}'", log_path.display()))?;
         ensure_private_directory(log_dir)
             .map_err(|error| format!("cannot prepare private session directory: {error}"))?;
+        let _log_lock = super::session_recorder::acquire_session_log_lock(log_dir, context)?;
 
-        let mut file = match fs::symlink_metadata(&log_path) {
+        let file = match fs::symlink_metadata(&log_path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(format!("cannot inspect sessions.jsonl: {error}")),
             Ok(_) => open_private_file(&log_path)
@@ -120,76 +121,98 @@ impl PostProcessor for LogRotator {
                 "sessions.jsonl exceeds configured threshold plus rotation overage ({max_rotation_bytes} bytes)"
             ));
         }
-        let max_rotation_bytes = usize::try_from(max_rotation_bytes)
-            .map_err(|_| "configured log threshold does not fit usize".to_string())?;
-
-        // The byte vector is explicitly bounded, including a cap+1 growth
-        // probe. Each read boundary observes cooperative cancellation.
-        let bytes = read_bounded_log(&mut file, max_rotation_bytes, context)?;
-        if bytes
-            .split(|byte| *byte == b'\n')
-            .any(|line| line.len() > MAX_LOG_LINE_BYTES)
-        {
-            return Err(format!(
-                "sessions.jsonl contains a line larger than {MAX_LOG_LINE_BYTES} bytes"
-            ));
+        let mut reader = BufReader::with_capacity(LOG_IO_CHUNK_BYTES, file);
+        let valid_lines = scan_valid_lines(&mut reader, context)?;
+        if valid_lines == 0 {
+            return Err("sessions.jsonl contains no recoverable records".to_string());
         }
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|error| format!("sessions.jsonl is not UTF-8: {error}"))?;
-        let mut lines = Vec::new();
-        for line in text.lines() {
-            context.checkpoint()?;
-            if lines.len() == MAX_LOG_LINES {
-                return Err(format!(
-                    "sessions.jsonl exceeds line-count limit ({MAX_LOG_LINES})"
-                ));
-            }
-            lines.push(line);
-        }
-
-        let keep_from = lines.len() / 2;
-        let kept = &lines[keep_from..];
-        replace_log_atomically(&log_path, kept, context)
+        reader
+            .rewind()
+            .map_err(|error| format!("cannot rewind sessions.jsonl: {error}"))?;
+        replace_log_atomically(&log_path, &mut reader, valid_lines / 2, context)
     }
 }
 
-fn read_bounded_log(
-    file: &mut File,
-    max_rotation_bytes: usize,
+enum BoundedLine {
+    Valid(Vec<u8>),
+    Corrupt,
+}
+
+fn scan_valid_lines(
+    reader: &mut BufReader<File>,
     context: &PluginContext,
-) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; LOG_IO_CHUNK_BYTES];
+) -> Result<usize, String> {
+    let mut valid = 0_usize;
+    let mut observed = 0_usize;
     loop {
         context.checkpoint()?;
-        let remaining = max_rotation_bytes
-            .saturating_add(1)
-            .saturating_sub(bytes.len());
-        if remaining == 0 {
+        let Some(line) = read_bounded_line(reader, context)? else {
+            return Ok(valid);
+        };
+        if observed == MAX_LOG_LINES {
             return Err(format!(
-                "sessions.jsonl exceeds rotation input limit ({max_rotation_bytes} bytes)"
+                "sessions.jsonl exceeds line-count limit ({MAX_LOG_LINES})"
             ));
         }
-        let slice_len = remaining.min(chunk.len());
-        match file.read(&mut chunk[..slice_len]) {
-            Ok(0) => return Ok(bytes),
-            Ok(read) => {
-                bytes.extend_from_slice(&chunk[..read]);
-                if bytes.len() > max_rotation_bytes {
-                    return Err(format!(
-                        "sessions.jsonl exceeds rotation input limit ({max_rotation_bytes} bytes)"
-                    ));
-                }
+        observed += 1;
+        if matches!(line, BoundedLine::Valid(_)) {
+            valid += 1;
+        }
+    }
+}
+
+fn read_bounded_line(
+    reader: &mut BufReader<File>,
+    context: &PluginContext,
+) -> Result<Option<BoundedLine>, String> {
+    let mut bytes = Vec::new();
+    let mut corrupt = false;
+    let mut saw_bytes = false;
+    loop {
+        context.checkpoint()?;
+        let available = reader
+            .fill_buf()
+            .map_err(|error| format!("cannot read sessions.jsonl: {error}"))?;
+        if available.is_empty() {
+            return if saw_bytes {
+                Ok(Some(if corrupt {
+                    BoundedLine::Corrupt
+                } else {
+                    BoundedLine::Valid(bytes)
+                }))
+            } else {
+                Ok(None)
+            };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        let terminated = available[take - 1] == b'\n';
+        saw_bytes = true;
+        if !corrupt {
+            if bytes.len().saturating_add(take) > MAX_LOG_LINE_BYTES {
+                bytes.clear();
+                corrupt = true;
+            } else {
+                bytes.extend_from_slice(&available[..take]);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(format!("cannot read sessions.jsonl: {error}")),
+        }
+        reader.consume(take);
+        if terminated {
+            return Ok(Some(if corrupt {
+                BoundedLine::Corrupt
+            } else {
+                BoundedLine::Valid(bytes)
+            }));
         }
     }
 }
 
 fn replace_log_atomically(
     log_path: &Path,
-    lines: &[&str],
+    reader: &mut BufReader<File>,
+    keep_from: usize,
     context: &PluginContext,
 ) -> Result<(), String> {
     let file_name = log_path
@@ -204,15 +227,18 @@ fn replace_log_atomically(
     let mut tmp = create_private_file(&tmp_path)
         .map_err(|error| format!("cannot create rotation tmp: {error}"))?;
     let write_result = (|| {
-        for line in lines {
-            for chunk in line.as_bytes().chunks(LOG_IO_CHUNK_BYTES) {
-                context.checkpoint()?;
-                tmp.write_all(chunk)
-                    .map_err(|error| format!("rotation write failed: {error}"))?;
+        let mut valid_index = 0_usize;
+        while let Some(line) = read_bounded_line(reader, context)? {
+            if let BoundedLine::Valid(bytes) = line {
+                if valid_index >= keep_from {
+                    for chunk in bytes.chunks(LOG_IO_CHUNK_BYTES) {
+                        context.checkpoint()?;
+                        tmp.write_all(chunk)
+                            .map_err(|error| format!("rotation write failed: {error}"))?;
+                    }
+                }
+                valid_index += 1;
             }
-            context.checkpoint()?;
-            tmp.write_all(b"\n")
-                .map_err(|error| format!("rotation write failed: {error}"))?;
         }
         tmp.flush()
             .map_err(|error| format!("rotation flush failed: {error}"))?;

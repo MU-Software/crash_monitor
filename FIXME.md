@@ -433,11 +433,11 @@
 
 ### P1-31. session 기록과 log rotation을 다중 instance에 안전하게 만든다
 
-- [ ] `sessions.jsonl`, rotation temp, `session.lock`에 process-safe locking 또는 monitor별 namespace를 사용한다.
-- [ ] 한 instance가 다른 살아 있는 instance의 lock을 삭제하지 않게 owner/token을 확인한다.
-- [ ] append와 rotation 사이 데이터 유실을 막고 temp filename을 unique하게 만든다.
-- [ ] log를 통째로 메모리에 읽지 않고, 손상 line 하나 때문에 이후 정상 tail을 버리지 않는 byte-safe recovery를 구현한다.
-- [ ] read 결과가 비정상일 때 빈/절단 파일로 원본을 교체하지 않는다.
+- [x] `sessions.jsonl`, rotation temp, `session.lock`에 process-safe locking 또는 monitor별 namespace를 사용한다.
+- [x] 한 instance가 다른 살아 있는 instance의 lock을 삭제하지 않게 owner/token을 확인한다.
+- [x] append와 rotation 사이 데이터 유실을 막고 temp filename을 unique하게 만든다.
+- [x] log를 통째로 메모리에 읽지 않고, 손상 line 하나 때문에 이후 정상 tail을 버리지 않는 byte-safe recovery를 구현한다.
+- [x] read 결과가 비정상일 때 빈/절단 파일로 원본을 교체하지 않는다.
 
 범위: `src/postprocessors/session_recorder.rs`, `src/postprocessors/log_rotator.rs`.
 
