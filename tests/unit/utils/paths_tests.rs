@@ -317,6 +317,111 @@ fn exclusive_publication_has_one_winner_and_never_clobbers() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn source_swap_after_validation_is_detected_and_quarantined_before_success() {
+    let root = tempfile::tempdir().unwrap();
+    ensure_private_directory(root.path()).unwrap();
+    let source = root.path().join("source.tmp");
+    let validated_backup = root.path().join("validated.backup");
+    let destination = root.path().join("report.json");
+    create_private_file(&source)
+        .unwrap()
+        .write_all(b"validated")
+        .unwrap();
+
+    let error = publish_private_path_with_hook(&source, &destination, || {
+        std::fs::rename(&source, &validated_backup).unwrap();
+        create_private_file(&source)
+            .unwrap()
+            .write_all(b"replacement")
+            .unwrap();
+    })
+    .unwrap_err();
+
+    assert!(error.contains("changed after validation"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&validated_backup).unwrap(), b"validated");
+    assert!(!source.exists());
+    let quarantine = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with(".publish-"))
+        .expect("replacement should be quarantined");
+    assert_eq!(std::fs::read(quarantine.path()).unwrap(), b"replacement");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn destination_swap_before_identity_check_is_contained_without_following_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    ensure_private_directory(root.path()).unwrap();
+    let source = root.path().join("source.tmp");
+    let destination = root.path().join("report.json");
+    let published_backup = root.path().join("published.backup");
+    let outside = root.path().join("outside.txt");
+    create_private_file(&source)
+        .unwrap()
+        .write_all(b"validated")
+        .unwrap();
+    create_private_file(&outside)
+        .unwrap()
+        .write_all(b"outside")
+        .unwrap();
+
+    let error = publish_private_path_with_hooks(
+        &source,
+        &destination,
+        || {},
+        || {
+            std::fs::rename(&destination, &published_backup).unwrap();
+            std::os::unix::fs::symlink(&outside, &destination).unwrap();
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("changed after validation"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&published_backup).unwrap(), b"validated");
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    assert!(!source.exists());
+    let quarantine = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with(".publish-"))
+        .expect("symlink should be quarantined");
+    assert!(quarantine.file_type().unwrap().is_symlink());
+    assert_eq!(std::fs::read_link(quarantine.path()).unwrap(), outside);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn destination_permission_drift_before_final_check_is_contained() {
+    let root = tempfile::tempdir().unwrap();
+    ensure_private_directory(root.path()).unwrap();
+    let source = root.path().join("source.tmp");
+    let destination = root.path().join("report.json");
+    create_private_file(&source)
+        .unwrap()
+        .write_all(b"validated")
+        .unwrap();
+
+    let error = publish_private_path_with_hooks(
+        &source,
+        &destination,
+        || {},
+        || {
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o644)).unwrap();
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("permissions changed"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), b"validated");
+    assert_eq!(mode(&source), PRIVATE_FILE_MODE);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn extended_acl_directory_and_publish_source_are_rejected() {
     let root = tempfile::tempdir().unwrap();
     ensure_private_directory(root.path()).unwrap();

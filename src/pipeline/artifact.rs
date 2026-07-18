@@ -31,8 +31,10 @@ const STAGING_PREFIX: &str = ".report-";
 const STAGING_SUFFIX: &str = ".pending";
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_RECOVERY_ROOT_ENTRIES: usize = 10_000;
-const MAX_RECOVERY_REPORT_ENTRIES: usize = 10_000;
 const MAX_RECOVERY_ARTIFACTS: usize = 10_000;
+// Directory scans include the committed manifest in addition to every
+// registered artifact, so reserve one entry without reducing the artifact cap.
+const MAX_RECOVERY_REPORT_ENTRIES: usize = MAX_RECOVERY_ARTIFACTS + 1;
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Reports that have been published but are still being consumed by
@@ -581,6 +583,14 @@ impl ArtifactTransaction {
             Err(error) => return Err(format!("cannot inspect report destination: {error}")),
         }
         before_directory_publish();
+        revalidate_prepared_report(
+            self.staging_dir(),
+            &registered,
+            &manifest,
+            &manifest_json,
+            MAX_RECOVERY_REPORT_ENTRIES,
+            None,
+        )?;
         publish_private_path(self.staging_dir(), &report_dir).map_err(|error| {
             format!(
                 "cannot publish report directory '{}' as '{}': {error}",
@@ -853,14 +863,14 @@ fn recover_prepared_entry_with_hook(
         ));
     }
     let registered = manifest_registry(&manifest)?;
-    validate_exact_directory_bounded(
+    revalidate_prepared_report(
         &entry.path(),
         &registered,
-        true,
+        &manifest,
+        &manifest_bytes,
         limits.report_entries,
         Some(deadline),
     )?;
-    validate_manifest_sizes(&entry.path(), &manifest, Some(deadline))?;
     let destination_root = destination_from_policy(output_root, &manifest.destination)?;
     ensure_real_directory(&destination_root)?;
     let destination = destination_root.join(report_id);
@@ -876,6 +886,14 @@ fn recover_prepared_entry_with_hook(
     }
     ensure_before_deadline(Some(deadline))?;
     before_directory_publish(&destination);
+    revalidate_prepared_report(
+        &entry.path(),
+        &registered,
+        &manifest,
+        &manifest_bytes,
+        limits.report_entries,
+        Some(deadline),
+    )?;
     publish_private_path(&entry.path(), &destination).map_err(|error| {
         format!(
             "cannot publish prepared directory as '{}': {error}",
@@ -1116,6 +1134,27 @@ fn validate_manifest_sizes(
         }
     }
     Ok(())
+}
+
+fn revalidate_prepared_report(
+    directory: &Path,
+    registered: &BTreeMap<String, ArtifactKind>,
+    manifest: &ReportManifest,
+    expected_manifest_bytes: &[u8],
+    max_entries: usize,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    ensure_before_deadline(deadline)?;
+    let manifest_path = directory.join(MANIFEST_FILE_NAME);
+    let current_manifest = read_manifest_file(&manifest_path).map_err(|error| match error {
+        ManifestReadError::NotFound => "prepared report has no manifest".to_string(),
+        ManifestReadError::Unsafe(error) => error,
+    })?;
+    if current_manifest != expected_manifest_bytes {
+        return Err("prepared report manifest changed before publication".to_string());
+    }
+    validate_exact_directory_bounded(directory, registered, true, max_entries, deadline)?;
+    validate_manifest_sizes(directory, manifest, deadline)
 }
 
 enum ManifestReadError {
@@ -1437,6 +1476,49 @@ mod tests {
     }
 
     #[test]
+    fn recovery_revalidates_exact_set_after_pre_publish_hook() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = root.path().join("pending");
+        let sent = root.path().join("sent");
+        std::fs::create_dir(&pending).unwrap();
+        let event = event();
+        let report_id = event.report_id.clone();
+        let transaction = ArtifactTransaction::begin(ReportContext::new(&event, &pending)).unwrap();
+        transaction.set_destination_root(&sent).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        transaction
+            .commit_with_hook(|| Err("pause after prepare".into()))
+            .unwrap_err();
+        let staging = transaction.staging_dir().to_path_buf();
+        drop(transaction);
+        let entry = std::fs::read_dir(&pending)
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.path() == staging)
+            .unwrap();
+
+        let error = recover_prepared_entry_with_hook(
+            &pending,
+            &entry,
+            Instant::now() + Duration::from_secs(1),
+            RecoveryLimits::default(),
+            |_| {
+                create_private_file(&staging.join("unregistered.bin"))
+                    .unwrap()
+                    .write_all(b"extra")
+                    .unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("artifact set differs"), "{error}");
+        assert!(!sent.join(report_id.as_str()).exists());
+        assert!(staging.join(MANIFEST_FILE_NAME).is_file());
+    }
+
+    #[test]
     fn manifest_rename_is_preserved_when_staging_directory_sync_fails() {
         let root = tempfile::tempdir().unwrap();
         let event = event();
@@ -1593,6 +1675,11 @@ mod tests {
     }
 
     #[test]
+    fn recovery_report_entry_limit_reserves_the_manifest_slot() {
+        assert_eq!(MAX_RECOVERY_REPORT_ENTRIES, MAX_RECOVERY_ARTIFACTS + 1);
+    }
+
+    #[test]
     fn uncommitted_partial_report_is_never_visible() {
         let root = tempfile::tempdir().unwrap();
         let event = event();
@@ -1622,6 +1709,97 @@ mod tests {
 
         let error = transaction.commit().unwrap_err();
         assert!(error.contains("artifact set differs"), "{error}");
+        assert!(!root.path().join(event.report_id.as_str()).exists());
+    }
+
+    #[test]
+    fn commit_revalidates_exact_set_after_pre_publish_hook() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let extra = transaction.staging_dir().join("unregistered.bin");
+
+        let error = transaction
+            .commit_with_all_hooks(
+                || {},
+                || Ok(()),
+                || {
+                    create_private_file(&extra)
+                        .unwrap()
+                        .write_all(b"extra")
+                        .unwrap();
+                },
+                || {},
+            )
+            .unwrap_err();
+
+        assert!(error.contains("artifact set differs"), "{error}");
+        assert!(!root.path().join(event.report_id.as_str()).exists());
+    }
+
+    #[test]
+    fn commit_revalidates_artifact_size_after_pre_publish_hook() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let report = transaction.staging_dir().join("report.json");
+
+        let error = transaction
+            .commit_with_all_hooks(
+                || {},
+                || Ok(()),
+                || {
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&report)
+                        .unwrap()
+                        .write_all(b"changed")
+                        .unwrap();
+                },
+                || {},
+            )
+            .unwrap_err();
+
+        assert!(error.contains("manifest size mismatch"), "{error}");
+        assert!(!root.path().join(event.report_id.as_str()).exists());
+    }
+
+    #[test]
+    fn commit_revalidates_manifest_bytes_after_pre_publish_hook() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let manifest = transaction.staging_dir().join(MANIFEST_FILE_NAME);
+
+        let error = transaction
+            .commit_with_all_hooks(
+                || {},
+                || Ok(()),
+                || {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&manifest)
+                        .unwrap()
+                        .write_all(b"[")
+                        .unwrap();
+                },
+                || {},
+            )
+            .unwrap_err();
+
+        assert!(error.contains("manifest changed"), "{error}");
         assert!(!root.path().join(event.report_id.as_str()).exists());
     }
 

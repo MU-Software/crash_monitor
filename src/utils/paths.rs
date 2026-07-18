@@ -261,11 +261,33 @@ pub(crate) fn open_private_file_optional(path: &Path) -> Result<Option<File>, St
 /// Atomically publish a new private file or directory without replacing an
 /// existing destination.
 ///
-/// On macOS this uses `renameatx_np(RENAME_EXCL)` with both parents opened
-/// through the same fd-relative, no-follow traversal used for creation. A
-/// plain preflight existence check is deliberately insufficient because it
-/// leaves a clobber race before `rename`.
+/// On macOS this uses `renameatx_np(RENAME_EXCL|RENAME_NOFOLLOW_ANY)` with both
+/// parents opened through the same fd-relative, no-follow traversal used for
+/// creation. The source is held open across rename and the destination inode
+/// and private permissions are revalidated before success is returned. A
+/// detected validation-to-rename swap is removed from the final name and
+/// quarantined. The normal path remains one atomic rename, with no additional
+/// pre-publication crash state. Both parents are exact-mode private
+/// directories, so arbitrary code running as the same effective UID remains
+/// inside the filesystem trust boundary rather than an isolation target.
 pub(crate) fn publish_private_path(source: &Path, destination: &Path) -> Result<(), String> {
+    publish_private_path_with_hook(source, destination, || {})
+}
+
+fn publish_private_path_with_hook(
+    source: &Path,
+    destination: &Path,
+    after_source_validation: impl FnOnce(),
+) -> Result<(), String> {
+    publish_private_path_with_hooks(source, destination, after_source_validation, || {})
+}
+
+fn publish_private_path_with_hooks(
+    source: &Path,
+    destination: &Path,
+    after_source_validation: impl FnOnce(),
+    after_publish: impl FnOnce(),
+) -> Result<(), String> {
     let (source_parent, source_name, source_resolved) = secure_parent(source)?;
     let (destination_parent, destination_name, destination_resolved) = secure_parent(destination)?;
     let source_parent_path = source_resolved
@@ -290,8 +312,9 @@ pub(crate) fn publish_private_path(source: &Path, destination: &Path) -> Result<
         true,
     )?;
 
-    let _source_handle =
+    let (source_handle, source_kind) =
         open_validated_publish_source(&source_parent, &source_name, &source_resolved)?;
+    after_source_validation();
 
     publish_private_path_at(
         &source_parent,
@@ -305,14 +328,161 @@ pub(crate) fn publish_private_path(source: &Path, destination: &Path) -> Result<
             source.display(),
             destination.display()
         )
-    })
+    })?;
+    after_publish();
+
+    match publish_entry_matches_handle(
+        &destination_parent,
+        &destination_name,
+        &source_handle,
+        destination,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            let containment = quarantine_publish_entry(&destination_parent, &destination_name);
+            return Err(format!(
+                "private publish source changed after validation: '{}'{containment}",
+                source.display()
+            ));
+        }
+        Err(error) => {
+            let containment = quarantine_publish_entry(&destination_parent, &destination_name);
+            return Err(format!(
+                "cannot verify private publish destination '{}': {error}{containment}",
+                destination.display()
+            ));
+        }
+    }
+
+    if let Err(error) = validate_private_handle(&source_handle, destination, source_kind, false) {
+        let containment =
+            match validate_private_handle(&source_handle, destination, source_kind, true) {
+                Ok(())
+                    if publish_entry_matches_handle(
+                        &destination_parent,
+                        &destination_name,
+                        &source_handle,
+                        destination,
+                    )
+                    .is_ok_and(|matches| matches) =>
+                {
+                    restore_validated_or_quarantine_publish_entry(
+                        &destination_parent,
+                        &destination_name,
+                        &source_parent,
+                        &source_name,
+                    )
+                }
+                Ok(()) => quarantine_publish_entry(&destination_parent, &destination_name),
+                Err(repair_error) => format!(
+                    "; private permission repair failed ({repair_error}){}",
+                    quarantine_publish_entry(&destination_parent, &destination_name)
+                ),
+            };
+        return Err(format!(
+            "private publish source permissions changed during publication: {error}{containment}"
+        ));
+    }
+    Ok(())
+}
+
+fn private_publish_pending_name() -> OsString {
+    OsString::from(format!(
+        ".publish-{}.pending",
+        uuid::Uuid::new_v4().simple()
+    ))
+}
+
+fn restore_validated_or_quarantine_publish_entry(
+    current_parent: &File,
+    current_name: &OsString,
+    source_parent: &File,
+    source_name: &OsString,
+) -> String {
+    match restore_private_path_at(current_parent, current_name, source_parent, source_name) {
+        Ok(()) => sync_publish_rollback_parents(current_parent, source_parent),
+        Err(restore_error) => {
+            format!(
+                "; source restoration failed ({restore_error}){}",
+                quarantine_publish_entry(current_parent, current_name)
+            )
+        }
+    }
+}
+
+fn quarantine_publish_entry(current_parent: &File, current_name: &OsString) -> String {
+    let quarantine_name = private_publish_pending_name();
+    match restore_private_path_at(
+        current_parent,
+        current_name,
+        current_parent,
+        &quarantine_name,
+    ) {
+        Ok(()) => {
+            let sync = current_parent
+                .sync_all()
+                .err()
+                .map_or_else(String::new, |error| {
+                    format!("; quarantine directory sync failed ({error})")
+                });
+            format!(
+                "; entry was contained as '{}'{sync}",
+                quarantine_name.to_string_lossy()
+            )
+        }
+        Err(quarantine_error) => match remove_untrusted_publish_entry(current_parent, current_name)
+        {
+            Ok(()) => {
+                let sync = current_parent
+                    .sync_all()
+                    .err()
+                    .map_or_else(String::new, |error| {
+                        format!("; containment directory sync failed ({error})")
+                    });
+                format!("; quarantine rename failed ({quarantine_error}); entry was unlinked{sync}")
+            }
+            Err(remove_error) => format!(
+                "; quarantine rename failed ({quarantine_error}) and containment unlink failed ({remove_error})"
+            ),
+        },
+    }
+}
+
+fn remove_untrusted_publish_entry(parent: &File, name: &OsString) -> Result<(), String> {
+    let metadata = match fstatat(parent, name.as_os_str(), AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(metadata) => metadata,
+        Err(nix::errno::Errno::ENOENT) => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect raced publish entry: {error}")),
+    };
+    let flags = if metadata.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR {
+        UnlinkatFlags::RemoveDir
+    } else {
+        UnlinkatFlags::NoRemoveDir
+    };
+    unlinkat(parent, name.as_os_str(), flags)
+        .map_err(|error| format!("cannot unlink raced publish entry: {error}"))
+}
+
+fn sync_publish_rollback_parents(current_parent: &File, source_parent: &File) -> String {
+    let mut errors = Vec::new();
+    if let Err(error) = current_parent.sync_all() {
+        errors.push(format!("published-parent sync failed ({error})"));
+    }
+    if let Err(error) = source_parent.sync_all() {
+        errors.push(format!("source-parent sync failed ({error})"));
+    }
+    if errors.is_empty() {
+        String::new()
+    } else {
+        format!("; source restored but {}", errors.join("; "))
+    }
 }
 
 fn open_validated_publish_source(
     parent: &File,
     name: &OsString,
     path: &Path,
-) -> Result<File, String> {
+) -> Result<(File, PrivateNodeKind), String> {
     let initial = fstatat(parent, name.as_os_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
         .map_err(|error| format!("cannot inspect private publish source: {error}"))?;
     let file_type = initial.st_mode & nix::libc::S_IFMT;
@@ -337,20 +507,32 @@ fn open_validated_publish_source(
     };
     validate_private_handle(&handle, path, kind, false)?;
 
-    let named = fstatat(parent, name.as_os_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
-        .map_err(|error| format!("cannot re-inspect private publish source: {error}"))?;
-    let opened = handle
-        .metadata()
-        .map_err(|error| format!("cannot inspect opened private publish source: {error}"))?;
-    let named_device = u64::try_from(named.st_dev)
-        .map_err(|_| "private publish source device is negative".to_string())?;
-    if opened.dev() != named_device || opened.ino() != named.st_ino {
+    if !publish_entry_matches_handle(parent, name, &handle, path)? {
         return Err(format!(
             "private publish source changed during validation: '{}'",
             path.display()
         ));
     }
-    Ok(handle)
+    Ok((handle, kind))
+}
+
+fn publish_entry_matches_handle(
+    parent: &File,
+    name: &OsString,
+    handle: &File,
+    path: &Path,
+) -> Result<bool, String> {
+    let named = fstatat(parent, name.as_os_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map_err(|error| format!("cannot inspect private publish entry: {error}"))?;
+    let opened = handle.metadata().map_err(|error| {
+        format!(
+            "cannot inspect opened private publish source '{}': {error}",
+            path.display()
+        )
+    })?;
+    let named_device = u64::try_from(named.st_dev)
+        .map_err(|_| "private publish source device is negative".to_string())?;
+    Ok(opened.dev() == named_device && opened.ino() == named.st_ino)
 }
 
 #[cfg(target_os = "macos")]
@@ -361,7 +543,46 @@ fn publish_private_path_at(
     destination_name: &OsString,
 ) -> Result<(), std::io::Error> {
     const RENAME_EXCL: u32 = 0x0000_0004;
+    const RENAME_NOFOLLOW_ANY: u32 = 0x0000_0010;
 
+    rename_private_path_at(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        RENAME_EXCL | RENAME_NOFOLLOW_ANY,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn restore_private_path_at(
+    source_parent: &File,
+    source_name: &OsString,
+    destination_parent: &File,
+    destination_name: &OsString,
+) -> Result<(), std::io::Error> {
+    const RENAME_EXCL: u32 = 0x0000_0004;
+
+    // The parents are already validated descriptors and both names are single
+    // components. Omitting NOFOLLOW_ANY here lets containment move a raced
+    // final-component symlink itself; Darwin rename never follows that link.
+    rename_private_path_at(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        RENAME_EXCL,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn rename_private_path_at(
+    source_parent: &File,
+    source_name: &OsString,
+    destination_parent: &File,
+    destination_name: &OsString,
+    flags: u32,
+) -> Result<(), std::io::Error> {
     unsafe extern "C" {
         fn renameatx_np(
             from_fd: nix::libc::c_int,
@@ -377,15 +598,15 @@ fn publish_private_path_at(
     let destination = std::ffi::CString::new(destination_name.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     // SAFETY: both descriptors are live directory handles, both C strings are
-    // NUL-terminated and borrow for the duration of the call, and the flag is
-    // Darwin's documented `RENAME_EXCL` value.
+    // NUL-terminated and borrowed for the duration of the call, and `flags` is
+    // assembled only from Darwin's documented renameatx_np values.
     let status = unsafe {
         renameatx_np(
             source_parent.as_raw_fd(),
             source.as_ptr(),
             destination_parent.as_raw_fd(),
             destination.as_ptr(),
-            RENAME_EXCL,
+            flags,
         )
     };
     if status == 0 {
@@ -397,6 +618,19 @@ fn publish_private_path_at(
 
 #[cfg(not(target_os = "macos"))]
 fn publish_private_path_at(
+    _source_parent: &File,
+    _source_name: &OsString,
+    _destination_parent: &File,
+    _destination_name: &OsString,
+) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "exclusive private publication is only implemented for macOS",
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_private_path_at(
     _source_parent: &File,
     _source_name: &OsString,
     _destination_parent: &File,
