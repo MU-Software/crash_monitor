@@ -30,6 +30,8 @@ const MONITOR_INTERNAL_FAILURE_EXIT_CODE: i32 = 70;
 const CHILD_FAILURE_EXIT_CODE: i32 = 80;
 const DETECTED_CRASH_EXIT_CODE: i32 = 81;
 const SIGABRT_NUMBER: i32 = 6;
+const SIGILL_NUMBER: i32 = 4;
+const SIGKILL_NUMBER: i32 = 9;
 const SIGSEGV_NUMBER: i32 = 11;
 const SIGTERM_NUMBER: i32 = 15;
 const REPORT_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -385,6 +387,52 @@ fn read_report_json(path: &Path) -> serde_json::Value {
     }
 }
 
+fn assert_report_identity(path: &Path, report: &serde_json::Value, report_type: &str) {
+    let report_id = report["header"]["report_id"]
+        .as_str()
+        .expect("report header has a report_id");
+    assert!(is_report_id(report_id), "invalid report id: {report_id}");
+    assert_eq!(
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str()),
+        Some(report_id),
+        "final artifact directory must be the immutable report id"
+    );
+    assert_eq!(report["header"]["type"], report_type);
+}
+
+fn write_oom_config(data_dir: &Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::create_dir_all(data_dir).expect("create E2E data dir");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options
+        .open(data_dir.join("crash_reporter.json"))
+        .expect("create private E2E config");
+    std::io::Write::write_all(
+        &mut file,
+        br#"{"triggers":{"oom_detection":{"enabled":true}}}"#,
+    )
+    .expect("write OOM config");
+}
+
+fn wait_for_report(dir: &Path, report_type: &str, deadline: Instant) -> Vec<PathBuf> {
+    loop {
+        let reports = find_reports(dir, report_type);
+        if !reports.is_empty() {
+            return reports;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {report_type} report in {}",
+            dir.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn test_manifest(
     report_id: &str,
     report_type: &str,
@@ -619,6 +667,7 @@ fn test_e2e_crash_sigsegv() {
 
     // Verify JSON content (may be inside a ZIP archive)
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "crash");
     assert_eq!(json["header"]["type"], "crash");
     assert!(json["exception"].is_object(), "expected exception field");
     let raw_codes = json["exception"]["raw_codes"]
@@ -719,6 +768,7 @@ fn test_e2e_crash_sigabrt() {
     assert!(!reports.is_empty(), "expected crash report");
 
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "crash");
     assert_eq!(json["header"]["type"], "crash");
     assert_eq!(json["termination"]["kind"], "signaled");
     assert_eq!(json["termination"]["signal"], SIGABRT_NUMBER);
@@ -787,6 +837,7 @@ fn test_e2e_nonzero_exit_reports_termination() {
         "expected exactly one exit-failure report in {archive:?}"
     );
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "exit_failure");
     assert_eq!(json["header"]["type"], "exit_failure");
     assert_eq!(json["termination"]["kind"], "exited");
     assert_eq!(json["termination"]["exit_code"], 42);
@@ -823,6 +874,7 @@ fn test_e2e_sigterm_preserves_signal_semantics() {
         "expected exactly one signal-failure report in {archive:?}"
     );
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "signal_failure");
     assert_eq!(json["header"]["type"], "signal_failure");
     assert_eq!(json["termination"]["kind"], "signaled");
     assert_eq!(json["termination"]["signal"], SIGTERM_NUMBER);
@@ -888,6 +940,97 @@ fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
         artifacts.is_empty(),
         "uninstrumented child must not leave ANR or termination artifacts: {artifacts:?}"
     );
+}
+
+#[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
+fn test_e2e_sigusr1_snapshot_uses_the_real_signal_pipe() {
+    if !require_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+    let mut monitor = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("wait")
+        .spawn()
+        .expect("spawn crash_monitor");
+
+    std::thread::sleep(Duration::from_millis(250));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(monitor.id()).expect("pid fits i32")),
+        nix::sys::signal::Signal::SIGUSR1,
+    )
+    .expect("send real SIGUSR1 to monitor");
+    let reports = wait_for_report(
+        &archive,
+        "snapshot",
+        Instant::now() + Duration::from_secs(10),
+    );
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(monitor.id()).expect("pid fits i32")),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("request monitor shutdown");
+    let status = monitor.wait().expect("reap monitor");
+    assert_eq!(status.code(), Some(128 + SIGTERM_NUMBER));
+
+    assert_eq!(reports.len(), 1);
+    let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "snapshot");
+    assert!(json.get("termination").is_none() || json["termination"].is_null());
+}
+
+#[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
+fn test_e2e_sigkill_is_classified_as_possible_oom_when_enabled() {
+    if !require_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    write_oom_config(data_dir.path());
+    let archive = archive_dir(data_dir.path());
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("sigkill")
+        .output()
+        .expect("run crash_monitor");
+
+    assert_eq!(output.status.code(), Some(128 + SIGKILL_NUMBER));
+    let reports = find_reports(&archive, "oom");
+    assert_eq!(reports.len(), 1);
+    let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "oom");
+    assert_eq!(json["header"]["termination_evidence"], "possible_oom");
+    assert_eq!(json["termination"]["signal"], SIGKILL_NUMBER);
+}
+
+#[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
+fn test_e2e_other_fatal_signal_preserves_sigill() {
+    if !require_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("sigill")
+        .output()
+        .expect("run crash_monitor");
+
+    assert_eq!(output.status.code(), Some(DETECTED_CRASH_EXIT_CODE));
+    let reports = find_reports(&archive, "crash");
+    assert_eq!(reports.len(), 1);
+    let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "crash");
+    assert_eq!(json["termination"]["signal"], SIGILL_NUMBER);
 }
 
 #[test]

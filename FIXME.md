@@ -806,10 +806,10 @@
 
 ### P2-18. 실제 OS signal 경로를 E2E로 검증한다
 
-- [ ] 실제 SIGUSR1 snapshot을 통해 signal handler, self-pipe, event loop, report 생성까지 검증한다.
-- [ ] child SIGKILL을 통해 waitpid와 `PossibleOom` 분류를 검증한다.
-- [ ] SIGSEGV, SIGABRT, clean exit, nonzero exit, 다른 fatal signal을 각각 검증한다.
-- [ ] report type, termination metadata, unique ID, 최종 artifact 위치까지 단언한다.
+- [x] 실제 SIGUSR1 snapshot을 통해 signal handler, self-pipe, event loop, report 생성까지 검증한다.
+- [x] child SIGKILL을 통해 waitpid와 `PossibleOom` 분류를 검증한다.
+- [x] SIGSEGV, SIGABRT, clean exit, nonzero exit, 다른 fatal signal을 각각 검증한다.
+- [x] report type, termination metadata, unique ID, 최종 artifact 위치까지 단언한다.
 
 범위: `tests/e2e/e2e_tests.rs`, crash fixture.
 

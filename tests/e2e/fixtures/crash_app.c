@@ -6,10 +6,13 @@
  * region from $CRASH_MONITOR_SHM, publishes a breadcrumb + minimal context via
  * the schema's release/seqlock contract, then triggers the requested scenario.
  *
- * Usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean|uninstrumented>
+ * Usage: crash_app <sigsegv|sigabrt|sigill|sigkill|wait|exit42|anr|clean|uninstrumented>
  *   sigsegv       — NULL pointer dereference
  *   sigabrt       — abort()
  *   sigterm       — terminate via an uncaught SIGTERM
+ *   sigill        — terminate via an uncaught SIGILL
+ *   sigkill       — terminate via SIGKILL (possible-OOM policy fixture)
+ *   wait          — remain alive for externally delivered monitor signals
  *   exit42        — immediate non-zero exit (42)
  *   anr           — hang forever after publishing one heartbeat (ANR)
  *   clean         — normal exit (no report expected)
@@ -147,7 +150,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         fprintf(stderr,
                 "usage: crash_app "
-                "<sigsegv|sigabrt|sigterm|exit42|anr|clean|uninstrumented>\n");
+                "<sigsegv|sigabrt|sigterm|sigill|sigkill|wait|exit42|anr|clean|uninstrumented>\n");
         return 1;
     }
     const char* scenario = argv[1];
@@ -177,6 +180,20 @@ int main(int argc, char* argv[]) {
             _Exit(125);
         }
         _Exit(125); /* SIGTERM unexpectedly returned instead of terminating. */
+    } else if (strcmp(scenario, "sigill") == 0) {
+        if (signal(SIGILL, SIG_DFL) == SIG_ERR || raise(SIGILL) != 0) {
+            _Exit(125);
+        }
+        _Exit(125);
+    } else if (strcmp(scenario, "sigkill") == 0) {
+        if (raise(SIGKILL) != 0) {
+            _Exit(125);
+        }
+        _Exit(125);
+    } else if (strcmp(scenario, "wait") == 0) {
+        for (;;) {
+            pause();
+        }
     } else if (strcmp(scenario, "exit42") == 0) {
         return 42;
     } else if (strcmp(scenario, "anr") == 0) {
