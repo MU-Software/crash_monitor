@@ -6,6 +6,8 @@ use crate::pipeline::{
 };
 use mach2::port::mach_port_t;
 use nix::sys::utsname::uname;
+use std::ffi::CString;
+use std::sync::Arc;
 
 /// Sensitive environment variable name patterns (case-insensitive).
 const SENSITIVE_PATTERNS: &[&str] = &["TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "AUTH"];
@@ -19,12 +21,55 @@ pub struct RawEnvironment {
     pub env_vars: Vec<(String, String)>,
 }
 
-pub struct EnvironmentCollector;
+/// Immutable byte-for-byte snapshot of the environment passed to the child.
+///
+/// Keeping the POSIX `key=value` entries as bytes preserves the exact spawn
+/// input. The JSON-oriented collector safely skips entries that cannot be
+/// represented as UTF-8 instead of accidentally reporting the monitor's own
+/// environment or corrupting the child's values.
+#[derive(Debug, Clone, Default)]
+pub struct ChildEnvironmentSnapshot {
+    entries: Vec<Vec<u8>>,
+}
+
+impl ChildEnvironmentSnapshot {
+    #[must_use]
+    pub fn from_c_strings(environment: &[CString]) -> Self {
+        Self {
+            entries: environment
+                .iter()
+                .map(|entry| entry.as_bytes().to_vec())
+                .collect(),
+        }
+    }
+
+    fn reportable_entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries.iter().filter_map(|entry| {
+            let separator = entry.iter().position(|byte| *byte == b'=')?;
+            let key = std::str::from_utf8(&entry[..separator]).ok()?;
+            let value = std::str::from_utf8(&entry[separator + 1..]).ok()?;
+            Some((key, value))
+        })
+    }
+}
+
+pub struct EnvironmentCollector {
+    child_environment: Option<Arc<ChildEnvironmentSnapshot>>,
+}
 
 impl EnvironmentCollector {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            child_environment: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_child_environment(environment: Arc<ChildEnvironmentSnapshot>) -> Self {
+        Self {
+            child_environment: Some(environment),
+        }
     }
 }
 
@@ -64,10 +109,21 @@ impl Collector for EnvironmentCollector {
 
         context.checkpoint()?;
         let mut env_vars = Vec::new();
-        for (key, value) in std::env::vars() {
-            context.checkpoint()?;
-            if !is_sensitive(&key) {
-                env_vars.push((key, value));
+        if let Some(environment) = &self.child_environment {
+            for (key, value) in environment.reportable_entries() {
+                context.checkpoint()?;
+                if !is_sensitive(key) {
+                    env_vars.push((key.to_string(), value.to_string()));
+                }
+            }
+        } else {
+            // Retained for library callers and unit tests that do not spawn a
+            // child. Production injects the final posix_spawn environment.
+            for (key, value) in std::env::vars() {
+                context.checkpoint()?;
+                if !is_sensitive(&key) {
+                    env_vars.push((key, value));
+                }
             }
         }
 

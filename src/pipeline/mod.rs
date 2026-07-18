@@ -1360,6 +1360,18 @@ pub fn default_macos_pipeline_from_config(
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
     validated: &crate::config::ValidatedConfig,
 ) -> Result<Pipeline, crate::config::ConfigValidationError> {
+    default_macos_pipeline_from_config_with_environment(shm, validated, None)
+}
+
+/// Build the default pipeline while injecting the exact environment that will
+/// be supplied to the monitored child.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_lines)]
+pub fn default_macos_pipeline_from_config_with_environment(
+    shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
+    validated: &crate::config::ValidatedConfig,
+    child_environment: Option<std::sync::Arc<crate::collectors::ChildEnvironmentSnapshot>>,
+) -> Result<Pipeline, crate::config::ConfigValidationError> {
     use crate::collectors::{
         DylibCollector, EnvironmentCollector, MemoryCollector, ThreadCollector,
     };
@@ -1457,7 +1469,10 @@ pub fn default_macos_pipeline_from_config(
     }
 
     if on("EnvironmentCollector") {
-        collectors.push(Box::new(EnvironmentCollector::new()));
+        collectors.push(Box::new(child_environment.map_or_else(
+            EnvironmentCollector::new,
+            EnvironmentCollector::with_child_environment,
+        )));
     }
 
     // ── Pre-processors (order matters: dependencies must come first) ──

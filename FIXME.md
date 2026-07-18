@@ -219,7 +219,7 @@
 - [x] `std::env::vars()` 대신 non-UTF-8을 보존하거나 안전하게 건너뛸 수 있는 `vars_os()` 기반 경로를 사용한다.
 - [x] 상속된 `CRASH_MONITOR_SHM`을 제거한 뒤 새 값 하나만 넣는다.
 - [x] SHM 생성 실패 시 `CRASH_MONITOR_SHM=1`을 보내지 말고 key를 생략하거나 명시적 disabled protocol을 사용한다.
-- [ ] child에 전달한 최종 environment snapshot을 report collector에 주입한다.
+- [x] child에 전달한 최종 environment snapshot을 report collector에 주입한다.
 
 범위: `src/main.rs`, `src/collectors/environment.rs`.
 

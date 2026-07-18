@@ -435,28 +435,6 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         None
     };
 
-    // Build and validate the complete runtime registry before posix_spawn. A
-    // later factory failure could otherwise leave an unmonitored child alive.
-    let pl = match pipeline::default_macos_pipeline_from_config(
-        shared_memory.clone(),
-        &validated_config,
-    ) {
-        Ok(pipeline) => Arc::new(pipeline),
-        Err(error) => {
-            eprintln!("[monitor] Invalid plugin pipeline: {error}");
-            return event_loop::EXIT_MONITOR_INTERNAL;
-        }
-    };
-    match pl.recover_prepared_artifacts() {
-        Ok(recovered) if recovered != 0 => {
-            eprintln!("[monitor] recovered {recovered} prepared report transaction(s)");
-        }
-        Ok(_) => {}
-        Err(error) => {
-            eprintln!("[monitor] artifact recovery failed during startup: {error}");
-        }
-    }
-
     // Build argv and envp for posix_spawn
     let Ok(c_path) = CString::new(app_path) else {
         eprintln!("[monitor] app_path contains null byte");
@@ -485,6 +463,33 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         }
     };
     let c_envp: Vec<&std::ffi::CStr> = env_strings.iter().map(AsRef::as_ref).collect();
+
+    // Build the runtime registry from the same immutable environment bytes
+    // that posix_spawn receives. This prevents EnvironmentCollector from
+    // accidentally reporting the monitor's environment.
+    let child_environment = Arc::new(collectors::ChildEnvironmentSnapshot::from_c_strings(
+        &env_strings,
+    ));
+    let pl = match pipeline::default_macos_pipeline_from_config_with_environment(
+        shared_memory.clone(),
+        &validated_config,
+        Some(child_environment),
+    ) {
+        Ok(pipeline) => Arc::new(pipeline),
+        Err(error) => {
+            eprintln!("[monitor] Invalid plugin pipeline: {error}");
+            return event_loop::EXIT_MONITOR_INTERNAL;
+        }
+    };
+    match pl.recover_prepared_artifacts() {
+        Ok(recovered) if recovered != 0 => {
+            eprintln!("[monitor] recovered {recovered} prepared report transaction(s)");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("[monitor] artifact recovery failed during startup: {error}");
+        }
+    }
 
     // Spawn child with exception port pre-configured (survives exec)
     // Start the runtime clock before entering posix_spawn so a child that

@@ -13,7 +13,7 @@ pub use attachment::{AttachmentCollector, AttachmentCopier};
 pub use breadcrumb::BreadcrumbCollector;
 pub use context::ContextCollector;
 pub use dylib::DylibCollector;
-pub use environment::EnvironmentCollector;
+pub use environment::{ChildEnvironmentSnapshot, EnvironmentCollector};
 pub use memory::MemoryCollector;
 pub use screenshot::ScreenshotCollector;
 pub use thread::ThreadCollector;

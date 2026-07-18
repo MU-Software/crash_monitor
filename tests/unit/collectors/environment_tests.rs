@@ -1,6 +1,8 @@
-use crate::collectors::environment::EnvironmentCollector;
+use crate::collectors::environment::{ChildEnvironmentSnapshot, EnvironmentCollector};
 use crate::pipeline::traits::Collector;
 use crate::pipeline::{CollectedData, CrashEvent, Plugin, PluginContext, ReportType};
+use std::ffi::CString;
+use std::sync::Arc;
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
@@ -85,4 +87,32 @@ fn test_plugin_metadata() {
     let collector = EnvironmentCollector::new();
     assert_eq!(collector.name(), "EnvironmentCollector");
     assert!(collector.is_available());
+}
+
+#[test]
+fn injected_child_environment_is_used_and_non_utf8_is_skipped() {
+    let environment = [
+        CString::new("CHILD_VISIBLE=child-value").unwrap(),
+        CString::new("CHILD_SECRET=hidden").unwrap(),
+        CString::new(vec![b'N', b'O', b'N', b'=', 0xff]).unwrap(),
+    ];
+    let collector = EnvironmentCollector::with_child_environment(Arc::new(
+        ChildEnvironmentSnapshot::from_c_strings(&environment),
+    ));
+    let mut data = CollectedData::default();
+
+    collector
+        .collect(
+            &dummy_event(),
+            0,
+            &mut data,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    let env = &data.raw.environment.as_ref().unwrap().env_vars;
+    assert_eq!(
+        env,
+        &vec![("CHILD_VISIBLE".to_string(), "child-value".to_string())]
+    );
 }
