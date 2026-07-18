@@ -544,6 +544,7 @@ fn find_reports_rejects_traversal_duplicates_and_non_regular_artifacts() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_crash_sigsegv() {
     if !check_prerequisites() {
         return;
@@ -607,6 +608,7 @@ fn test_e2e_crash_sigsegv() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_producer_rejects_schema_mismatch_without_writing() {
     let child = crash_app_path();
     if !child.exists() {
@@ -648,6 +650,7 @@ fn test_e2e_producer_rejects_schema_mismatch_without_writing() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_crash_sigabrt() {
     if !check_prerequisites() {
         return;
@@ -681,6 +684,7 @@ fn test_e2e_crash_sigabrt() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_fast_clean_exit() {
     if !check_prerequisites() {
         return;
@@ -711,6 +715,7 @@ fn test_e2e_fast_clean_exit() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_nonzero_exit_reports_termination() {
     if !check_prerequisites() {
         return;
@@ -746,6 +751,7 @@ fn test_e2e_nonzero_exit_reports_termination() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_sigterm_preserves_signal_semantics() {
     if !check_prerequisites() {
         return;
@@ -782,6 +788,7 @@ fn test_e2e_sigterm_preserves_signal_semantics() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_nonexistent_executable_is_monitor_failure() {
     if !check_prerequisites() {
         return;
@@ -810,6 +817,7 @@ fn test_e2e_nonexistent_executable_is_monitor_failure() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
     if !check_prerequisites() {
         return;
@@ -840,6 +848,7 @@ fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_anr() {
     if !check_prerequisites() {
         return;
@@ -893,6 +902,7 @@ fn test_e2e_anr() {
 /// immediately with a clear error instead of hanging or producing a confusing
 /// `task_for_pid` failure.
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_unsigned_binary_fails_fast() {
     let child = crash_app_path();
     if !child.exists() {

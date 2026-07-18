@@ -787,10 +787,10 @@
 
 ### P2-16. macOS CI와 privileged E2E gate를 만든다
 
-- [ ] macOS ARM64 fast job에서 format, strict Clippy, unit, integration, schema drift를 실행한다.
-- [ ] entitlement/signing이 준비된 required E2E job을 별도로 둔다.
-- [ ] privileged prerequisite가 없는 일반 CI에서는 E2E를 명시적으로 ignored로 표시한다.
-- [ ] release branch에서는 required E2E 미실행을 성공으로 간주하지 않는다.
+- [x] macOS ARM64 fast job에서 format, strict Clippy, unit, integration, schema drift를 실행한다.
+- [x] entitlement/signing이 준비된 required E2E job을 별도로 둔다.
+- [x] privileged prerequisite가 없는 일반 CI에서는 E2E를 명시적으로 ignored로 표시한다.
+- [x] release branch에서는 required E2E 미실행을 성공으로 간주하지 않는다.
 
 범위: CI workflow, Makefile/Cargo commands.
 

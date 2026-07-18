@@ -39,8 +39,9 @@ LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
 #   platform/mod.rs  — FFI delegation wrappers
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
-.PHONY: build e2e-build lint test unit-test integration-test e2e-test e2e-child shm-atomic-test \
-        coverage unit-coverage integration-coverage e2e-coverage clean
+.PHONY: build e2e-build lint test unit-test integration-test e2e-test e2e-required \
+        e2e-child shm-atomic-test schema-check ci-fast coverage unit-coverage \
+        integration-coverage e2e-coverage clean
 
 # ── Build (release + codesign) ────────────────────────────────
 build:
@@ -60,6 +61,11 @@ lint:
 	cargo fmt -- --check
 	cargo clippy -- -D warnings -A dead_code
 
+ci-fast: schema-check
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	cargo test --workspace --all-targets
+
 # ── E2E child (compiled from the shm schema alone) ────────────
 $(E2E_CHILD): $(E2E_SRC) schema/crash_shm.h schema/crash_shm_atomic.h
 	cc -std=c11 -Wall -Wextra -Werror -I schema -o $@ $<
@@ -73,6 +79,9 @@ $(SHM_ATOMIC_TEST): $(SHM_ATOMIC_TEST_SRC) schema/crash_shm.h schema/crash_shm_a
 shm-atomic-test: $(SHM_ATOMIC_TEST)
 	./$(SHM_ATOMIC_TEST)
 
+schema-check: shm-atomic-test
+	cargo check --workspace --all-targets
+
 # ── Tests ─────────────────────────────────────────────────────
 unit-test: shm-atomic-test
 	cargo test --lib
@@ -85,6 +94,12 @@ integration-test:
 e2e-test: e2e-build $(E2E_CHILD)
 	cargo build
 	cargo test --test e2e_tests
+
+# Privileged release gate. The dedicated runner must provide a signing identity
+# capable of granting com.apple.security.cs.debugger.
+e2e-required: e2e-build $(E2E_CHILD)
+	cargo build
+	E2E_REQUIRED=1 cargo test --test e2e_tests -- --ignored
 
 test: unit-test integration-test e2e-test
 
