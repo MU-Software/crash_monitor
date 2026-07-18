@@ -954,6 +954,38 @@ fn test_e2e_nonzero_exit_reports_termination() {
 
 #[test]
 #[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
+fn test_e2e_exit_one_reports_exact_termination_metadata() {
+    if !require_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("exit1")
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
+        .expect("failed to run crash_monitor");
+
+    assert_eq!(
+        output.status.code(),
+        Some(CHILD_FAILURE_EXIT_CODE),
+        "exit(1) should use the child-failure namespace; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reports = find_reports(&archive, "exit_failure");
+    assert_eq!(reports.len(), 1, "expected exactly one exit(1) report");
+    let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "exit_failure");
+    assert_eq!(json["termination"]["kind"], "exited");
+    assert_eq!(json["termination"]["exit_code"], 1);
+    assert!(json["termination"]["runtime_ms"].as_u64().is_some());
+}
+
+#[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_sigterm_preserves_signal_semantics() {
     if !require_prerequisites() {
         return;
