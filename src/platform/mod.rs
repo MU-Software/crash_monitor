@@ -13,6 +13,7 @@ mod task_control;
 pub use task_control::{
     RESUME_ATTEMPT_LIMIT, RetainedTaskPort, SupervisorHealth, SuspendFailurePolicy,
     TaskControlFailure, TaskControlFailureSink, TaskRecoveryAction, TaskSuspendGuard,
+    contain_task_without_resume,
 };
 
 use mach2::port::mach_port_t;
@@ -23,6 +24,12 @@ use crate::pipeline::PluginContext;
 /// Abstraction over Mach kernel APIs used by collectors and pipeline.
 /// Enables mock-based unit testing without real child processes.
 pub trait PlatformOps: Send + Sync {
+    /// Whether production capture must use the exec-based task collector
+    /// helper. Test platforms default to the in-process deterministic worker.
+    fn supports_capture_isolation(&self) -> bool {
+        false
+    }
+
     // ── Task control ──
 
     /// Suspend all threads in the target task.
@@ -144,6 +151,10 @@ pub struct MacOsPlatform {
 
 #[cfg(target_os = "macos")]
 impl PlatformOps for MacOsPlatform {
+    fn supports_capture_isolation(&self) -> bool {
+        true
+    }
+
     fn suspend_task(&self, task: mach_port_t) -> Result<(), String> {
         macos::suspend_task(task).map_err(|e| e.to_string())
     }

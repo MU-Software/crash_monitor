@@ -52,6 +52,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Internal killable boundary for task-facing collectors.
+    #[command(hide = true)]
+    CaptureHelper {
+        #[arg(long)]
+        request_json: String,
+    },
     /// Run the monitor with a child process
     Run {
         /// Path to the child executable
@@ -666,6 +672,15 @@ fn main() {
     let cli = Cli::parse();
 
     let exit_code = match cli.command {
+        Some(Commands::CaptureHelper { request_json }) => {
+            match pipeline::capture_isolation::run_capture_helper(&request_json) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("[capture-helper] {error}");
+                    1
+                }
+            }
+        }
         Some(Commands::Run { app_path, args }) => run_monitor(&app_path, &args),
         Some(Commands::Analyze { report }) => cli::analyze::run(&report),
         Some(Commands::Stack { report, thread }) => cli::stack::run(&report, thread),

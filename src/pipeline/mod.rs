@@ -3,6 +3,7 @@
 //! Design: `docs/plans/crash_reporter.md` L1493-1867
 
 pub mod artifact;
+pub mod capture_isolation;
 pub mod report;
 pub mod safety;
 pub mod traits;
@@ -29,13 +30,13 @@ pub use safety::{
     run_plugin_catching_panics, run_plugin_cooperative, run_plugin_subprocess,
 };
 pub use traits::{
-    Collector, Filter, Notifier, Plugin, PluginExecution, PostProcessor, PostProcessorPhase,
-    PreProcessor,
+    Collector, CollectorAccess, Filter, Notifier, Plugin, PluginExecution, PostProcessor,
+    PostProcessorPhase, PreProcessor,
 };
 pub use types::{
     CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, DependencyKind,
-    Diagnostics, PluginCategory, PluginStatus, Priority, RawShmSnapshot, ReportResult, ReportType,
-    TerminationReason,
+    Diagnostics, PluginCategory, PluginDiagnostic, PluginStatus, Priority, RawShmSnapshot,
+    ReportResult, ReportType, TerminationReason,
 };
 
 /// Immutable per-trigger report policy installed in a [`Pipeline`].
@@ -422,6 +423,18 @@ impl Pipeline {
         shm_snapshot: Option<&Arc<crate::shm::OwnedShmSnapshot>>,
         report_context: &Arc<ReportContext>,
     ) -> CapturePayload {
+        self.collect_snapshot_by_access(event, task, cancelled, shm_snapshot, report_context, None)
+    }
+
+    fn collect_snapshot_by_access(
+        &self,
+        event: &CrashEvent,
+        task: mach_port_t,
+        cancelled: &Arc<AtomicBool>,
+        shm_snapshot: Option<&Arc<crate::shm::OwnedShmSnapshot>>,
+        report_context: &Arc<ReportContext>,
+        access: Option<CollectorAccess>,
+    ) -> CapturePayload {
         if !self.report_enabled(event.report_type) {
             return CapturePayload {
                 data: CollectedData::default(),
@@ -434,6 +447,9 @@ impl Pipeline {
         // ── Collectors ──
         let mut data = CollectedData::default();
         for c in &self.collectors {
+            if access.is_some_and(|access| c.access() != access) {
+                continue;
+            }
             if cancelled.load(Ordering::Acquire) {
                 diagnostics.record_immediate("CaptureDeadline", PluginStatus::TimedOut);
                 break;
@@ -496,6 +512,23 @@ impl Pipeline {
         self.collect_snapshot(event, task, cancelled, shm_snapshot, report_context)
     }
 
+    pub(super) fn collect_owned_snapshot_for_worker(
+        &self,
+        event: &CrashEvent,
+        cancelled: &Arc<AtomicBool>,
+        shm_snapshot: Option<&Arc<crate::shm::OwnedShmSnapshot>>,
+        report_context: &Arc<ReportContext>,
+    ) -> CapturePayload {
+        self.collect_snapshot_by_access(
+            event,
+            mach2::port::MACH_PORT_NULL,
+            cancelled,
+            shm_snapshot,
+            report_context,
+            Some(CollectorAccess::OwnedSnapshot),
+        )
+    }
+
     pub(super) fn finalize_captured_for_worker(&self, captured: CapturedEvent) -> Diagnostics {
         self.finalize_captured(captured)
     }
@@ -507,6 +540,8 @@ impl Pipeline {
             return Diagnostics::new();
         }
         let report_context = captured.report_context.take();
+        let owned_shm_snapshot = captured.owned_shm_snapshot.take();
+        let owned_collectors_deferred = captured.owned_collectors_deferred;
         let event = &captured.event;
         let data = &mut captured.data;
         let diagnostics = &mut captured.diagnostics;
@@ -526,6 +561,17 @@ impl Pipeline {
             };
             Arc::new(ReportContext::new(event, &pending))
         };
+        if owned_collectors_deferred {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut owned = self.collect_owned_snapshot_for_worker(
+                event,
+                &cancelled,
+                owned_shm_snapshot.as_ref(),
+                &report_context,
+            );
+            merge_owned_collected_data(data, &mut owned.data);
+            diagnostics.plugins.append(&mut owned.diagnostics.plugins);
+        }
         let transaction = match ArtifactTransaction::begin_shared(report_context) {
             Ok(transaction) => transaction,
             Err(error) => {
@@ -1174,6 +1220,25 @@ impl Pipeline {
             }
         }
         Ok(())
+    }
+}
+
+fn merge_owned_collected_data(target: &mut CollectedData, owned: &mut CollectedData) {
+    target.raw.breadcrumbs.append(&mut owned.raw.breadcrumbs);
+    if target.raw.crash_context.is_none() {
+        target.raw.crash_context = owned.raw.crash_context.take();
+    }
+    if target.raw.settings_snapshot.is_none() {
+        target.raw.settings_snapshot = owned.raw.settings_snapshot.take();
+    }
+    target.raw.attachments.append(&mut owned.raw.attachments);
+    target
+        .raw
+        .attachment_registrations
+        .append(&mut owned.raw.attachment_registrations);
+    target.raw.screenshots.append(&mut owned.raw.screenshots);
+    if target.raw.environment.is_none() {
+        target.raw.environment = owned.raw.environment.take();
     }
 }
 

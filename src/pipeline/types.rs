@@ -116,7 +116,7 @@ pub enum TerminationReason {
 }
 
 /// Event data produced by a trigger. Owns all data (no lifetimes).
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CrashEvent {
     /// Identity allocated once by the trigger and preserved by every clone and
     /// capture/finalization handoff for this logical event.
@@ -161,7 +161,7 @@ pub enum Priority {
 //  Diagnostics
 // ═══════════════════════════════════════════════════
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum PluginStatus {
     Ok,
     Error(String),
@@ -170,6 +170,7 @@ pub enum PluginStatus {
     Skipped(String),
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct PluginDiagnostic {
     pub name: String,
     pub status: PluginStatus,
@@ -274,6 +275,11 @@ pub struct CapturedEvent {
     pub(crate) report_context: Option<std::sync::Arc<super::ReportContext>>,
     pub(crate) data: Box<CollectedData>,
     pub(crate) raw_shm: Option<RawShmSnapshot>,
+    /// Immutable SHM bytes for collectors that run only after resume/reply.
+    pub(crate) owned_shm_snapshot: Option<std::sync::Arc<crate::shm::OwnedShmSnapshot>>,
+    /// Distinguishes deferred collection without SHM from ordinary capture
+    /// paths that already ran every collector in-process.
+    pub(crate) owned_collectors_deferred: bool,
     pub(crate) diagnostics: Diagnostics,
 }
 
@@ -287,6 +293,8 @@ impl CapturedEvent {
             report_context: None,
             data: Box::new(payload.data),
             raw_shm: payload.raw_shm,
+            owned_shm_snapshot: None,
+            owned_collectors_deferred: false,
             diagnostics: payload.diagnostics,
         }
     }
@@ -304,12 +312,22 @@ impl CapturedEvent {
             report_context: Some(report_context),
             data: Box::new(payload.data),
             raw_shm: payload.raw_shm,
+            owned_shm_snapshot: None,
+            owned_collectors_deferred: false,
             diagnostics: payload.diagnostics,
         }
     }
 
     pub fn set_termination(&mut self, reason: Option<TerminationReason>) {
         self.event.termination = reason;
+    }
+
+    pub(crate) fn attach_owned_shm_snapshot(
+        &mut self,
+        snapshot: Option<std::sync::Arc<crate::shm::OwnedShmSnapshot>>,
+    ) {
+        self.owned_shm_snapshot = snapshot;
+        self.owned_collectors_deferred = true;
     }
 }
 

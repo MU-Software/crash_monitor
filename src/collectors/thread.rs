@@ -5,11 +5,13 @@
 //! thread registers.
 
 use crate::pipeline::{
-    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+    CollectedData, Collector, CollectorAccess, CrashEvent, Plugin, PluginContext, PluginExecution,
+    Priority,
 };
 use crate::platform;
 use crate::platform::PlatformOps;
 use mach2::port::mach_port_t;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ const MAX_CAPTURED_THREADS: usize = 512;
 // ═══════════════════════════════════════════════════
 
 /// Raw thread data collected during suspension.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct RawThreadData {
     pub thread_port: u32,
     pub name: Option<String>,
@@ -33,6 +35,7 @@ pub struct RawThreadData {
 }
 
 /// Raw stack memory captured from SP upward.
+#[derive(Serialize, Deserialize)]
 pub struct RawStackCapture {
     pub sp: u64,
     pub bytes: Vec<u8>,
@@ -69,6 +72,10 @@ impl Plugin for ThreadCollector {
 }
 
 impl Collector for ThreadCollector {
+    fn access(&self) -> CollectorAccess {
+        CollectorAccess::IsolatedTask
+    }
+
     fn collect(
         &self,
         event: &CrashEvent,

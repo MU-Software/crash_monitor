@@ -66,7 +66,7 @@ impl Default for PrivacyConfig {
 /// Collector registration, live task reads, shared-memory copying, and raw
 /// persistence all derive from this one normalized value. Individual toggles
 /// can narrow a privacy profile but can never widen it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // one bit per independent evidence boundary
 pub struct CollectionPolicy {
     pub capture_stack_memory: bool,

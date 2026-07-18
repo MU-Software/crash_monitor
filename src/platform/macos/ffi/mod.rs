@@ -12,6 +12,7 @@
 //! Importing from `crate::pipeline`, `crate::collectors`, etc. is
 //! forbidden. This is enforced by `test_ffi_import_boundary` in the test suite.
 
+pub mod capture_spawn;
 pub mod exceptions;
 pub mod memory;
 pub mod shm;

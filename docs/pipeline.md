@@ -14,10 +14,10 @@ memory.
 Mach request received (record monotonic timestamp)
    │
    ├─ live-task critical phase ─────────────────────────────────────────┐
-   │  retain task send right → suspend → collectors + owned SHM copy   │
-   │                                      → resume → reply             │
-   │  timeout: retire worker; quarantine late result; drop right       │
-   │                                      when worker actually exits   │
+   │  suspend → owned SHM copy → exec capture helper                  │
+   │          → task-facing collectors → wait/reap helper             │
+   │          → resume → reply                                        │
+   │  timeout: SIGKILL helper → reap → resume/reply                    │
    └────────────────────────────────────────────────────────────────────┘
                               │
                               ▼ owned CapturedSnapshot (no task port)
@@ -35,27 +35,25 @@ For a Mach exception, the supervisor uses one absolute five-second wait budget
 measured from the listener's Mach receive timestamp. The budget is not reset
 for each collector. On the successful path, task suspension, capture collectors,
 copying required shared-memory payload into owned data, and releasing
-event-scoped thread/image rights all finish before task resume. The capture
-worker's independent task send-right reference remains owned for the worker's
-lifetime. At budget expiry, unfinished worker
-state is quarantined as described below. Cooperative cancellation cannot
-preempt an in-flight Mach call, so that one call may return after resume. The
-retired worker owns an independent task send-right reference until its thread
-actually exits; this prevents the raw Mach name from being deallocated and
-reused underneath the worker. It cannot start another collector after the next
-cancellation checkpoint, and its late mutable result is discarded. Eliminating
-the in-flight post-resume call itself still requires a killable capture boundary
-and remains tracked by P0-02. The Mach reply is attempted immediately after
-resume; no queue operation, filter, report write, or user interaction is allowed
-between resume and reply.
+event-scoped thread/image rights all finish in a freshly executed capture-helper
+process. An ordinary handoff channel crosses `exec`; the target task and
+optional crashed-thread rights are then transferred in a bounded Mach message.
+They are never borrowed from a detached Rust thread. The supervisor resumes the
+target only after `waitpid` proves the helper has exited. At budget expiry it
+kills and reaps the helper before resume. If helper cleanup cannot be proven,
+the monitor fails closed by terminating the target without releasing its
+suspension count and records a supervisor task-control failure. Thus no
+task-facing Mach call can complete after resume. The Mach reply is attempted
+immediately after resume; no queue operation, filter, report write, or user
+interaction is allowed between resume and reply.
 
-The finalization entry point receives no task port and reads the owned SHM byte
-copy stored in `CapturedEvent`; it never invokes the collector set. (The shared
-`Pipeline` owner still contains the capture-only collectors and SHM handle, so
-this is an enforced call-path boundary rather than a Rust capability type
-boundary.) Filters, pre-processors (including symbolication), Stage-1 and
-Stage-2 writes, feedback, PNG conversion, ZIP creation, relocation, retention,
-and notifications therefore cannot delay task resume or the Mach reply.
+The finalization entry point receives no task port. It runs only collectors
+declared `OwnedSnapshot` against the immutable SHM byte copy stored in
+`CapturedEvent`; task-facing collectors are declared `IsolatedTask` and can run
+only in the exec helper. Filters, pre-processors (including symbolication),
+Stage-1 and Stage-2 writes, feedback, PNG conversion, ZIP creation, relocation,
+retention, and notifications therefore cannot delay task resume or the Mach
+reply.
 Task-independent exit/signal reports use a dedicated bounded-wait finalizer as
 well, so report serialization and notification code never runs on the event
 loop thread.
@@ -70,8 +68,8 @@ plugins and notifiers receive the committed descriptor.
 
 | Phase | Child state/capability | Typical work |
 |-------|------------------------|--------------|
-| **Critical capture** | suspended for the bounded capture window; a timed-out in-flight Mach call may finish under the worker-owned send right after resume, but its result is quarantined | thread registers/backtraces, dylibs, owned breadcrumbs/context, and policy-authorized stack bytes, memory + heap, screenshots, or attachment registration |
-| **Finalization worker** | no task/SHM argument; capture collectors are not invoked | filters, session, symbolication, fingerprint, raw/JSON/PNG writes, feedback, ZIP, move-to-sent, log rotation, retention, notifications |
+| **Critical capture** | suspended for the bounded capture window; task rights exist only in a killable helper that must be reaped before resume | thread registers/backtraces, dylibs, policy-authorized stack bytes, memory + heap, and copying authorized SHM sections into owned bytes |
+| **Finalization worker** | no task port or live SHM view; only `OwnedSnapshot` collectors are invoked | breadcrumbs/context, screenshots and attachment registration from owned bytes, filters, session, symbolication, fingerprint, raw/JSON/PNG writes, feedback, ZIP, move-to-sent, log rotation, retention, notifications |
 
 (The exact roster is what the default pipeline registers; treat the source as
 the authority, not this list.)
@@ -101,7 +99,7 @@ boundary below.
 
 | Boundary | Deadline / bound | Expiry policy |
 |----------|------------------|---------------|
-| Mach live-task capture | 5 s absolute from request receipt | publish cancellation, resume/reply, retire worker, finalize minimum event metadata |
+| Mach live-task capture | 5 s absolute from request receipt | kill and reap the capture helper, then resume/reply and finalize minimum event metadata; terminate without resume if cleanup cannot be proven |
 | Snapshot/ANR queue submission | non-blocking, capacity 2 | log and drop when full/disconnected |
 | Background shutdown drain | 2 s | detach any worker still running |
 | Fatal termination handoff | no independent timer | wait for the supervisor's explicit reason/`None`, or channel disconnect; never write JSON/ZIP first |
@@ -137,14 +135,12 @@ and timeout) is cached, constant-time state; metadata access performs no I/O.
   exception port for every containment outcome and, if task termination also
   fails, escalates once with `SIGKILL` rather than continuing with an
   unresponsive child.
-- If capture reaches its outer absolute deadline, or the capture thread panics
-  or disconnects, the monitor discards its unfinished mutable worker state,
-  creates an immutable minimum crash payload, and immediately proceeds to
-  resume and reply. The timed-out worker is retired and cannot accept another
-  capture. Its independently retained task send right remains owned until the
-  worker actually exits, preventing a detached worker from using a deallocated
-  and subsequently reused Mach name. Cooperative cancellation still cannot
-  stop a Mach call already in flight.
+- If capture reaches its outer absolute deadline, the monitor sends `SIGKILL`
+  to the capture helper and reaps it before it creates an immutable minimum
+  crash payload, resumes, and replies. A cleanup
+  failure is a containment failure: the target is terminated without resume,
+  and supervisor health prevents continued monitoring. No detached in-process
+  worker retains or uses a production task right.
 - A manual snapshot or ANR that requires a consistent suspended snapshot is
   skipped when task suspension fails. It is not finalized from inconsistent
   live data.
@@ -179,8 +175,10 @@ also share the supervisor's absolute cancellation flag, so expiry stops the
 next checkpoint rather than starting another task-facing operation.
 
 This cooperative mechanism diagnoses expiry at checkpoints and after the
-plugin returns; it cannot preempt a syscall, Mach call, codec call, lock wait,
-or CPU loop while execution is between checkpoints. A plugin whose
+plugin returns; it cannot preempt a syscall, codec call, lock wait, or CPU loop
+while execution is between checkpoints. Task-facing collectors have the
+additional outer exec-helper deadline, which can preempt an in-flight Mach call
+by terminating and reaping the helper before resume. A finalization plugin whose
 uncheckpointed work can remain unbounded must not be classified
 `Cooperative`. Built-in cooperative plugins checkpoint their loops and apply
 stage-specific caps where available (VM enumeration also has independent query
@@ -198,15 +196,10 @@ an individual synchronous filesystem, kernel, or codec call remains
 non-preemptible, and artifact formats without a streaming byte budget can run
 past the deadline before returning. Finalization isolation keeps that work away
 from task resume and the Mach reply, but a detached in-process worker may keep
-running. Likewise, a task-facing Mach call already in flight may return after
-the outer capture supervisor resumes/replies at its absolute deadline. The
-worker-owned send right prevents Mach-name lifetime/ABA hazards and the late
-mutable result is quarantined, but strict no-access-after-resume isolation is
-not yet provided. `task_suspend` and
-`task_resume` themselves are synchronous kernel calls too. The Stage-1/Stage-2
-five-second setting has the same cooperative semantics: it diagnoses an
-overrun after serialization or a synchronous write returns; it is not a hard
-I/O preemption boundary.
+running. `task_suspend` and `task_resume` themselves are synchronous kernel
+calls too. The Stage-1/Stage-2 five-second setting has the same cooperative
+semantics: it diagnoses an overrun after serialization or a synchronous write
+returns; it is not a hard I/O preemption boundary.
 
 Payloads deliberately designed to wait (the feedback UI and system notifier
 helper) run through an `exec`-based subprocess supervisor; the trusted adapter

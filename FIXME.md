@@ -32,7 +32,7 @@
 - [x] snapshot/finalize 각 단계의 deadline과 failure policy를 문서화한다.
 - [x] timeout 후 detach될 수 있는 capture worker가 task send right를 독립 소유하게 해 supervisor handle drop 뒤 Mach port name 재사용을 막는다.
 - [x] fatal finalizer thread spawn이 연속 실패해도 plugin을 실행하지 않는 동기 emergency transaction으로 Stage-1 raw/SHM과 best-effort JSON을 보존한다.
-- [ ] cooperative collector의 in-flight Mach 호출까지 resume 전에 종료하거나 kill 가능한 경계로 격리해 resume 이후 task-port 접근 자체를 제거한다.
+- [x] cooperative collector의 in-flight Mach 호출까지 resume 전에 종료하거나 kill 가능한 경계로 격리해 resume 이후 task-port 접근 자체를 제거한다.
 
 범위: `src/event_loop.rs`, `src/pipeline`, `src/postprocessors`, `src/notifiers`.
 

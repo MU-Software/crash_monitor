@@ -11,7 +11,9 @@ use super::{
     CaptureOutcome, CapturePayload, CapturedEvent, Diagnostics, Pipeline, PluginStatus,
     TerminationReason, suspend_failure_policy,
 };
-use crate::platform::{RetainedTaskPort, TaskControlFailureSink, TaskSuspendGuard};
+use crate::platform::{
+    RetainedTaskPort, TaskControlFailureSink, TaskSuspendGuard, contain_task_without_resume,
+};
 
 /// One absolute capture budget, measured from Mach request receipt for crashes.
 pub const CAPTURE_DEADLINE: Duration = Duration::from_secs(5);
@@ -40,11 +42,13 @@ struct CaptureJob {
     result_tx: SyncSender<CapturePayload>,
 }
 
-/// Single-consumer capture worker. Once a capture times out, the worker is
-/// retired rather than accepting another task while the old collector may
+/// Production capture uses a killable exec helper. The in-process worker is a
+/// compatibility boundary for deterministic mock platforms; once it times out
+/// it is retired rather than accepting another task while an old collector may
 /// still be running.
 pub(crate) struct CaptureWorker {
     pipeline: Arc<Pipeline>,
+    isolated: bool,
     sender: Option<SyncSender<CaptureJob>>,
     done_rx: Receiver<()>,
     handle: Option<JoinHandle<()>>,
@@ -58,6 +62,22 @@ impl CaptureWorker {
         if !pipeline.enabled {
             return Self {
                 pipeline,
+                isolated: false,
+                sender: None,
+                done_rx,
+                handle: None,
+                unavailable_reason: None,
+            };
+        }
+        if pipeline.platform.supports_capture_isolation() {
+            // Production task-facing collectors run in a killable exec helper.
+            // Dropping both channel ends makes shutdown a no-op for this mode.
+            drop(sender);
+            drop(receiver);
+            drop(done_tx);
+            return Self {
+                pipeline,
+                isolated: true,
                 sender: None,
                 done_rx,
                 handle: None,
@@ -69,6 +89,7 @@ impl CaptureWorker {
             Err(error) => {
                 return Self {
                     pipeline,
+                    isolated: false,
                     sender: None,
                     done_rx,
                     handle: None,
@@ -108,6 +129,7 @@ impl CaptureWorker {
         match spawn {
             Ok(handle) => Self {
                 pipeline,
+                isolated: false,
                 sender: Some(sender),
                 done_rx,
                 handle: Some(handle),
@@ -115,6 +137,7 @@ impl CaptureWorker {
             },
             Err(error) => Self {
                 pipeline,
+                isolated: false,
                 sender: None,
                 done_rx,
                 handle: None,
@@ -147,16 +170,60 @@ impl CaptureWorker {
             }
         };
         if Instant::now() >= deadline {
-            return timed_out_capture(
-                event,
-                report_context,
-                "absolute capture deadline already elapsed",
+            return defer_owned_if_isolated(
+                timed_out_capture(
+                    event,
+                    report_context,
+                    "absolute capture deadline already elapsed",
+                ),
+                self.isolated,
+                None,
             );
         }
 
         if let Some(reason) = &self.unavailable_reason {
             return failed_capture(event, report_context, reason);
         }
+
+        // Allocate and validate every helper-side resource before suspending
+        // the target. The suspended interval then contains only SHM copying,
+        // helper execution, and bounded helper cleanup.
+        let isolated_job = if self.isolated {
+            let request = match super::capture_isolation::TaskCaptureRequest::from_pipeline(
+                &self.pipeline,
+                &event,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    return defer_owned_if_isolated(
+                        failed_capture(event, report_context, &error),
+                        true,
+                        None,
+                    );
+                }
+            };
+            let result_file = if request.is_some() {
+                match tempfile::tempfile() {
+                    Ok(file) => Some(file),
+                    Err(error) => {
+                        return defer_owned_if_isolated(
+                            failed_capture(
+                                event,
+                                report_context,
+                                &format!("cannot create capture-helper result file: {error}"),
+                            ),
+                            true,
+                            None,
+                        );
+                    }
+                }
+            } else {
+                None
+            };
+            Some((request, result_file))
+        } else {
+            None
+        };
 
         let failure_sink = TaskControlFailureSink::new();
         let mut suspend_error = None;
@@ -185,24 +252,22 @@ impl CaptureWorker {
 
         if Instant::now() >= deadline {
             finish_suspend(&mut suspend_guard);
-            return with_task_control_diagnostics(
+            let outcome = defer_owned_if_isolated(
                 timed_out_capture(
                     event,
                     report_context,
                     "absolute capture deadline elapsed during suspend",
                 ),
-                suspend_error,
+                self.isolated,
                 None,
-                &failure_sink,
             );
+            return with_task_control_diagnostics(outcome, suspend_error, None, &failure_sink);
         }
 
-        // The guard-owning event-loop thread snapshots every SHM payload
-        // section before the capture job can run. A timed-out worker may keep
-        // parsing those owned bytes without reading the resumed task's SHM
-        // mapping. Direct task-port collectors are separate: an in-flight Mach
-        // call can return after resume, so the worker owns a retained send
-        // right until it actually exits and its late result is quarantined.
+        // The guard-owning event-loop thread snapshots every authorized SHM
+        // payload section before either capture backend can run. Production
+        // task collectors then execute in the killable helper; mock platforms
+        // retain the legacy in-process worker for deterministic unit tests.
         let mut snapshot_error = None;
         let shm_snapshot = if suspend_guard.is_some() {
             match self.pipeline.snapshot_shm_while_suspended(Some(deadline)) {
@@ -221,7 +286,7 @@ impl CaptureWorker {
 
         if Instant::now() >= deadline {
             finish_suspend(&mut suspend_guard);
-            return with_task_control_diagnostics(
+            let outcome = defer_owned_if_isolated(
                 timed_out_capture_with_snapshot(
                     event,
                     report_context,
@@ -229,6 +294,107 @@ impl CaptureWorker {
                     shm_snapshot.as_deref(),
                     self.pipeline.collection_policy.persist_raw_shm,
                 ),
+                self.isolated,
+                shm_snapshot,
+            );
+            return with_task_control_diagnostics(
+                outcome,
+                suspend_error,
+                snapshot_error,
+                &failure_sink,
+            );
+        }
+
+        if let Some((request, mut result_file)) = isolated_job {
+            let isolated_outcome = match (request.as_ref(), result_file.as_mut()) {
+                (Some(request), Some(result_file)) => {
+                    super::capture_isolation::run_isolated_capture(
+                        request,
+                        result_file,
+                        task,
+                        deadline,
+                    )
+                }
+                (None, None) => super::capture_isolation::IsolatedCaptureOutcome::Completed(
+                    super::capture_isolation::TaskCaptureData::default(),
+                    Vec::new(),
+                ),
+                _ => unreachable!("capture-helper request and result file must be paired"),
+            };
+
+            let fallback_snapshot = shm_snapshot.clone();
+            let outcome = match isolated_outcome {
+                super::capture_isolation::IsolatedCaptureOutcome::Completed(data, plugins) => {
+                    // A successful waitpid proves the helper and all of its Mach
+                    // rights are gone before the task is resumed.
+                    finish_suspend(&mut suspend_guard);
+                    let mut diagnostics = Diagnostics::new();
+                    diagnostics.plugins = plugins;
+                    let mut collected = super::CollectedData::default();
+                    collected.raw.threads = data.threads;
+                    collected.raw.images = data.images;
+                    collected.raw.memory_map = data.memory_map;
+                    collected.raw.heap = data.heap;
+                    let payload = CapturePayload {
+                        data: collected,
+                        raw_shm: raw_shm_from_snapshot(
+                            fallback_snapshot.as_deref(),
+                            self.pipeline.collection_policy.persist_raw_shm,
+                        ),
+                        diagnostics,
+                    };
+                    CaptureOutcome::Captured(Box::new(CapturedEvent::with_report_context(
+                        event,
+                        report_context,
+                        payload,
+                    )))
+                }
+                super::capture_isolation::IsolatedCaptureOutcome::TimedOut => {
+                    finish_suspend(&mut suspend_guard);
+                    timed_out_capture_with_snapshot(
+                        event,
+                        report_context,
+                        "capture helper exceeded absolute deadline",
+                        fallback_snapshot.as_deref(),
+                        self.pipeline.collection_policy.persist_raw_shm,
+                    )
+                }
+                super::capture_isolation::IsolatedCaptureOutcome::Failed(error) => {
+                    finish_suspend(&mut suspend_guard);
+                    failed_capture_with_snapshot(
+                        event,
+                        report_context,
+                        &error,
+                        fallback_snapshot.as_deref(),
+                        self.pipeline.collection_policy.persist_raw_shm,
+                    )
+                }
+                super::capture_isolation::IsolatedCaptureOutcome::CleanupUnproven(error) => {
+                    let reason = format!(
+                        "capture-helper cleanup could not be proven; refusing to resume: {error}"
+                    );
+                    if let Some(guard) = suspend_guard.take() {
+                        guard.contain_without_resume(reason.clone());
+                    } else {
+                        contain_task_without_resume(
+                            &self.pipeline.platform,
+                            task,
+                            &failure_sink,
+                            reason.clone(),
+                        );
+                    }
+                    failed_capture_with_snapshot(
+                        event,
+                        report_context,
+                        &reason,
+                        fallback_snapshot.as_deref(),
+                        self.pipeline.collection_policy.persist_raw_shm,
+                    )
+                }
+            };
+            let outcome = attach_owned_snapshot(outcome, fallback_snapshot);
+            return with_task_control_diagnostics(
+                outcome,
                 suspend_error,
                 snapshot_error,
                 &failure_sink,
@@ -347,6 +513,28 @@ impl CaptureWorker {
 fn finish_suspend(guard: &mut Option<TaskSuspendGuard>) {
     if let Some(guard) = guard.take() {
         guard.finish();
+    }
+}
+
+fn attach_owned_snapshot(
+    mut outcome: CaptureOutcome,
+    snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
+) -> CaptureOutcome {
+    if let CaptureOutcome::Captured(captured) = &mut outcome {
+        captured.attach_owned_shm_snapshot(snapshot);
+    }
+    outcome
+}
+
+fn defer_owned_if_isolated(
+    outcome: CaptureOutcome,
+    isolated: bool,
+    snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
+) -> CaptureOutcome {
+    if isolated {
+        attach_owned_snapshot(outcome, snapshot)
+    } else {
+        outcome
     }
 }
 
@@ -834,7 +1022,7 @@ mod tests {
         CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution,
         PostProcessor, Priority, ReportResult, ReportType, TriggerPolicy,
     };
-    use crate::platform::mock::MockPlatform;
+    use crate::platform::{PlatformOps, mock::MockPlatform};
     use nix::libc;
     use std::sync::Condvar;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -894,6 +1082,36 @@ mod tests {
     struct BlockingCaptureCollector {
         entered_tx: SyncSender<()>,
         release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    struct CountingOwnedCollector(Arc<AtomicUsize>);
+
+    impl Plugin for CountingOwnedCollector {
+        fn name(&self) -> &'static str {
+            "CountingOwnedCollector"
+        }
+
+        fn execution(&self) -> PluginExecution {
+            PluginExecution::Cooperative
+        }
+
+        fn priority(&self) -> Priority {
+            Priority::Low
+        }
+    }
+
+    impl Collector for CountingOwnedCollector {
+        fn collect(
+            &self,
+            _event: &CrashEvent,
+            task: mach_port_t,
+            _data: &mut CollectedData,
+            _context: &PluginContext,
+        ) -> Result<(), String> {
+            assert_eq!(task, mach2::port::MACH_PORT_NULL);
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     impl Plugin for BlockingCaptureCollector {
@@ -1208,6 +1426,105 @@ mod tests {
         assert_eq!(platform.retain_task_port_count(), 0);
         assert_eq!(platform.deallocate_task_port_count(), 0);
         assert!(std::fs::read_dir(tempdir.path()).unwrap().next().is_none());
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn isolated_capture_resumes_only_after_helper_completion() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(MockPlatform::default().with_capture_isolation());
+        let owned_calls = Arc::new(AtomicUsize::new(0));
+        let pipeline = Arc::new(Pipeline {
+            enabled: true,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
+            filters: vec![],
+            collectors: vec![
+                Box::new(crate::collectors::DylibCollector::new(platform.clone())),
+                Box::new(CountingOwnedCollector(owned_calls.clone())),
+            ],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: None,
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+        let observed = platform.clone();
+        let _reset = super::super::capture_isolation::inject_test_outcome(move || {
+            assert_eq!(
+                observed.resume_count(),
+                0,
+                "the task must remain suspended while the helper owns task rights"
+            );
+            super::super::capture_isolation::IsolatedCaptureOutcome::Completed(
+                super::super::capture_isolation::TaskCaptureData::default(),
+                Vec::new(),
+            )
+        });
+
+        let mut worker = CaptureWorker::start(pipeline.clone(), 90);
+        let outcome = worker.capture(
+            captured(90).event,
+            90,
+            Instant::now() + Duration::from_secs(1),
+        );
+
+        let CaptureOutcome::Captured(captured) = outcome else {
+            panic!("isolated capture should produce an owned event");
+        };
+        assert_eq!(owned_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(platform.suspend_count(), 1);
+        assert_eq!(platform.resume_count(), 1);
+        assert_eq!(platform.terminate_count(), 0);
+        assert_eq!(platform.retain_task_port_count(), 0);
+        let _ = pipeline.finalize_captured_for_worker(*captured);
+        assert_eq!(owned_calls.load(Ordering::SeqCst), 1);
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn unproven_helper_cleanup_terminates_without_resume() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(MockPlatform::default().with_capture_isolation());
+        let pipeline = Arc::new(Pipeline {
+            enabled: true,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
+            filters: vec![],
+            collectors: vec![Box::new(crate::collectors::DylibCollector::new(
+                platform.clone(),
+            ))],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: None,
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+        let _reset = super::super::capture_isolation::inject_test_outcome(|| {
+            super::super::capture_isolation::IsolatedCaptureOutcome::CleanupUnproven(
+                "injected waitpid failure".into(),
+            )
+        });
+
+        let mut worker = CaptureWorker::start(pipeline, 91);
+        let outcome = worker.capture(
+            captured(91).event,
+            91,
+            Instant::now() + Duration::from_secs(1),
+        );
+        let CaptureOutcome::Captured(captured) = outcome else {
+            panic!("cleanup containment should retain a minimum payload");
+        };
+
+        assert_eq!(platform.suspend_count(), 1);
+        assert_eq!(platform.resume_count(), 0);
+        assert_eq!(platform.terminate_count(), 1);
+        assert!(captured.diagnostics.plugins.iter().any(|entry| {
+            entry.name == "TaskResume" && matches!(entry.status, PluginStatus::Error(_))
+        }));
+        assert!(!platform.supervisor_health().requires_escalation());
         worker.shutdown(Duration::from_secs(1));
     }
 

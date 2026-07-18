@@ -27,8 +27,11 @@ pub struct MockThread {
 ///
 /// Tracks invocations of key methods (suspend, resume, deallocate) so tests
 /// can verify the pipeline called them correctly.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::struct_excessive_bools)]
 pub struct MockPlatform {
+    /// Route capture through the exec-isolation supervisor. This is disabled
+    /// by default and exists for deterministic worker-boundary tests.
+    pub capture_isolation: bool,
     pub threads: Vec<MockThread>,
     /// Memory map: address → bytes. `vm_read` returns matching range.
     pub memory: BTreeMap<u64, Vec<u8>>,
@@ -57,6 +60,13 @@ pub struct MockPlatform {
 
 #[allow(dead_code)]
 impl MockPlatform {
+    /// Enable the production-style capture isolation supervisor for a test.
+    #[must_use]
+    pub fn with_capture_isolation(mut self) -> Self {
+        self.capture_isolation = true;
+        self
+    }
+
     /// Number of times `suspend_task` was called.
     pub fn suspend_count(&self) -> usize {
         self.suspend_count.load(Ordering::SeqCst)
@@ -101,6 +111,7 @@ impl MockPlatform {
 impl Default for MockPlatform {
     fn default() -> Self {
         Self {
+            capture_isolation: false,
             threads: Vec::new(),
             memory: BTreeMap::new(),
             regions: Vec::new(),
@@ -123,6 +134,10 @@ impl Default for MockPlatform {
 }
 
 impl PlatformOps for MockPlatform {
+    fn supports_capture_isolation(&self) -> bool {
+        self.capture_isolation
+    }
+
     fn suspend_task(&self, _task: mach_port_t) -> Result<(), String> {
         self.suspend_count.fetch_add(1, Ordering::SeqCst);
         if self.suspend_fails {

@@ -6,6 +6,15 @@ use std::path::Path;
 use super::safety::PluginContext;
 use super::types::{CollectedData, CrashEvent, Priority, ReportResult};
 
+/// Capability boundary used by live-task capture isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectorAccess {
+    /// Requires a live task port and therefore must run in the killable helper.
+    IsolatedTask,
+    /// Consumes only owned SHM bytes or monitor-local state.
+    OwnedSnapshot,
+}
+
 /// Required execution boundary for a registered plugin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginExecution {
@@ -73,6 +82,11 @@ pub trait Plugin: Send + Sync {
 
 /// Collector — gathers data while the child is suspended.
 pub trait Collector: Plugin {
+    /// Declare whether this collector may receive a live task port.
+    fn access(&self) -> CollectorAccess {
+        CollectorAccess::OwnedSnapshot
+    }
+
     /// Collect introspection data from the target process.
     ///
     /// # Errors

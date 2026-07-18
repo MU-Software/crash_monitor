@@ -5,11 +5,13 @@
 //! `malloc_get_all_zones()` is in-process only — not usable from the monitor.
 
 use crate::pipeline::{
-    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+    CollectedData, Collector, CollectorAccess, CrashEvent, Plugin, PluginContext, PluginExecution,
+    Priority,
 };
 use crate::platform::{PlatformOps, TaskVmSummary, VmRegionEnumerationQuality, VmRegionInfo};
 use crate::utils::vm_tags;
 use mach2::port::mach_port_t;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -18,7 +20,7 @@ use std::sync::Arc;
 // ═══════════════════════════════════════════════════
 
 /// Aggregated heap data for the target process.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct RawHeapData {
     #[allow(dead_code)] // Phase 4+: will be included in report for phys_footprint etc.
     pub vm_summary: Option<TaskVmSummary>,
@@ -26,6 +28,7 @@ pub struct RawHeapData {
 }
 
 /// Per-zone (tag) statistics derived from VM regions.
+#[derive(Serialize, Deserialize)]
 pub struct RawMallocZone {
     pub name: String,
     pub region_count: u32,
@@ -61,6 +64,10 @@ impl Plugin for MemoryCollector {
 }
 
 impl Collector for MemoryCollector {
+    fn access(&self) -> CollectorAccess {
+        CollectorAccess::IsolatedTask
+    }
+
     fn collect(
         &self,
         _event: &CrashEvent,

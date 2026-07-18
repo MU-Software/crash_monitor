@@ -7,17 +7,19 @@
 use std::sync::Arc;
 
 use crate::pipeline::{
-    CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
+    CollectedData, Collector, CollectorAccess, CrashEvent, Plugin, PluginContext, PluginExecution,
+    Priority,
 };
 use crate::platform::PlatformOps;
 use mach2::port::mach_port_t;
+use serde::{Deserialize, Serialize};
 
 // ═══════════════════════════════════════════════════
 //  Raw data types
 // ═══════════════════════════════════════════════════
 
 /// Information about a loaded dynamic library / image.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawImageData {
     pub path: String,
     pub base_address: u64,
@@ -51,6 +53,10 @@ impl Plugin for DylibCollector {
 }
 
 impl Collector for DylibCollector {
+    fn access(&self) -> CollectorAccess {
+        CollectorAccess::IsolatedTask
+    }
+
     fn collect(
         &self,
         _event: &CrashEvent,

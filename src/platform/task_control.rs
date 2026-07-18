@@ -160,6 +160,31 @@ impl TaskControlFailureSink {
     }
 }
 
+/// Terminate a task without releasing a suspension count when isolation can no
+/// longer prove that every task-facing helper has exited. Resuming in that
+/// state would allow an untracked helper to inspect a live task.
+pub fn contain_task_without_resume(
+    platform: &Arc<dyn PlatformOps>,
+    task: mach_port_t,
+    failure_sink: &TaskControlFailureSink,
+    reason: String,
+) {
+    let (recovery, termination_error) = match platform.terminate_task(task) {
+        Ok(()) => (TaskRecoveryAction::Terminated, None),
+        Err(error) => (TaskRecoveryAction::EscalationRequired, Some(error)),
+    };
+    let failure = TaskControlFailure {
+        task,
+        resume_attempts: 0,
+        resume_errors: vec![reason],
+        recovery,
+        termination_error,
+    };
+    eprintln!("[monitor] {failure}");
+    failure_sink.record(failure.clone());
+    platform.record_task_control_failure(failure);
+}
+
 /// Owns exactly one successful `suspend_task` operation.
 ///
 /// Construction is impossible after a failed suspend. `finish` and `Drop`
@@ -194,6 +219,14 @@ impl TaskSuspendGuard {
     /// capture boundary. Dropping the consumed guard is then a no-op.
     pub fn finish(mut self) {
         self.release();
+    }
+
+    /// Consume the guard without resuming and terminate the target instead.
+    /// This is the fail-closed path for an isolation helper whose exit cannot
+    /// be proven.
+    pub fn contain_without_resume(mut self, reason: String) {
+        self.active = false;
+        contain_task_without_resume(&self.platform, self.task, &self.failure_sink, reason);
     }
 
     fn release(&mut self) {
@@ -398,6 +431,25 @@ mod tests {
         assert_eq!(
             health.task_control_failures[0].recovery,
             TaskRecoveryAction::Resumed
+        );
+    }
+
+    #[test]
+    fn isolation_cleanup_failure_terminates_without_resuming() {
+        let platform = Arc::new(MockPlatform::default());
+        let sink = TaskControlFailureSink::new();
+
+        acquire(platform.clone(), sink.clone())
+            .contain_without_resume("helper cleanup unproven".into());
+
+        assert_eq!(platform.resume_count(), 0);
+        assert_eq!(platform.terminate_count(), 1);
+        let health = platform.supervisor_health();
+        assert_eq!(health.task_control_failures.len(), 1);
+        assert_eq!(health.task_control_failures[0].resume_attempts, 0);
+        assert_eq!(
+            health.task_control_failures[0].recovery,
+            TaskRecoveryAction::Terminated
         );
     }
 }
