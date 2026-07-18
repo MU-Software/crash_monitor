@@ -182,9 +182,9 @@
 
 ### P1-03. exception 구독 범위와 종료 의미를 명시한다
 
-- [ ] `EXC_BREAKPOINT`, `EXC_RESOURCE`, `EXC_GUARD`를 capture할지 ignore할지 정책을 정한다.
-- [ ] 구독하는 각 exception type에 report type, severity, signal mapping, raw-code 보존 규칙을 둔다.
-- [ ] fatal crash 후 monitor가 무조건 1을 반환하지 않고 원 child signal/termination 의미를 보존한다.
+- [x] `EXC_BREAKPOINT`, `EXC_RESOURCE`, `EXC_GUARD`를 capture할지 ignore할지 정책을 정한다.
+- [x] 구독하는 각 exception type에 report type, severity, signal mapping, raw-code 보존 규칙을 둔다.
+- [x] fatal crash 후 monitor가 무조건 1을 반환하지 않고 원 child signal/termination 의미를 보존한다.
 
 범위: `src/platform/macos/types.rs`, `src/event_loop.rs`, report schema.
 

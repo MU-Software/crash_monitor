@@ -127,10 +127,15 @@ the child, the supervisor hands the actual wait status to the fatal finalizer;
 the original JSON and ZIP are therefore written with `termination` already
 present rather than patched afterward.
 
-For Mach crashes, `exception.raw_codes` preserves the complete MIG
+For subscribed Mach crashes, `exception.raw_codes` preserves the complete MIG
 `mach_exception_data_t` array as hexadecimal bit patterns and therefore also
 preserves its original element count. `code` and `subcode` remain the
 human-readable first- and second-element projections used by existing tools.
+`exception.severity` is `fatal`. `EXC_BREAKPOINT` is subscribed as a fatal
+`crash` mapped to `SIGTRAP`, and `EXC_GUARD` as a fatal `crash` mapped to
+`SIGKILL`; both retain every raw code. `EXC_RESOURCE` is deliberately not
+subscribed because it can be advisory/non-fatal, so it has no report severity
+and no raw-code artifact.
 
 ## Monitor process exit status
 
@@ -142,13 +147,14 @@ stable CLI statuses:
 | `0` | child completed normally |
 | `70` | monitor-internal failure (including synchronous spawn/exec setup failure) |
 | `80` | child exited non-zero; the original code is in `termination.exit_code` |
-| `81` | a fatal Mach exception was detected and reported |
-| `128 + signal` | child terminated from an otherwise-unreported signal |
+| `81` | a fatal Mach exception was detected but no signal termination was available |
+| `128 + signal` | child terminated by a signal, including after a captured Mach exception |
 
-A Unix process status cannot carry every child exit code and separate monitor
-namespaces at once. The JSON report is therefore authoritative for the original
-exit code, signal, core-dump flag, and runtime; the monitor status communicates
-the outcome category.
+A captured Mach exception keeps its typed outcome and report while the CLI exit
+status follows the actual reaped signal (`128 + signal`). A subsequent non-zero
+child exit uses status `80`; a recovered/zero exit keeps status `81` so a
+captured fatal incident is never presented as success. The JSON report remains
+authoritative for the exact exit code, signal, core-dump flag, and runtime.
 
 Application/domain state lives under `crash_context.annotations` as string
 key-value pairs (the monitor does not interpret them — see

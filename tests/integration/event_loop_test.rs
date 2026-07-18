@@ -12,8 +12,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crash_monitor::event_loop::{
-    AnrConfig, EXIT_CHILD_FAILURE, EXIT_DETECTED_CRASH, EXIT_MONITOR_INTERNAL, EventSource,
-    MonitorEvent, MonitorOutcome, event_loop,
+    AnrConfig, EXIT_CHILD_FAILURE, EXIT_MONITOR_INTERNAL, EventSource, MonitorEvent,
+    MonitorOutcome, event_loop,
 };
 use crash_monitor::pipeline::{
     CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PluginContext,
@@ -838,6 +838,52 @@ fn test_disabled_crash_trigger_replies_without_worker_capture_or_artifacts() {
 }
 
 #[test]
+fn ignored_resource_exception_replies_and_keeps_monitoring_until_child_exit() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline(tempdir.path());
+    let expected_termination = TerminationReason::Exited {
+        exit_code: 0,
+        runtime_ms: 17,
+    };
+    let mut source = TestEventSource::new(vec![
+        MonitorEvent::Crash {
+            received_at: std::time::Instant::now(),
+            exception_type: 11,
+            code: 0xCAFE,
+            subcode: 0xBABE,
+            raw_codes: vec![0xCAFE, 0xBABE],
+            request: test_request(),
+        },
+        MonitorEvent::ChildTerminated(expected_termination),
+    ]);
+    let replies = AtomicUsize::new(0);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        123,
+        9999,
+        "test_app",
+        &|_| {
+            replies.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+        None,
+        None,
+    );
+
+    assert_eq!(
+        result.outcome,
+        MonitorOutcome::ChildTerminated(expected_termination)
+    );
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(replies.load(Ordering::SeqCst), 1);
+    assert!(result.crash_finalization.is_none());
+    assert!(!result.crash_cleanup_required);
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
 fn test_reply_failure_is_monitor_failure_with_finalization_ticket_and_cleanup() {
     let tempdir = tempfile::tempdir().unwrap();
     let pipeline = make_test_pipeline(tempdir.path());
@@ -974,7 +1020,15 @@ fn test_crash_event_produces_report_and_exits() {
     };
     assert!(report_path.exists());
     assert_eq!(outcome.report_path(), Some(report_path.as_path()));
-    assert_eq!(outcome.exit_code(), EXIT_DETECTED_CRASH);
+    assert_eq!(outcome.exit_code(), 139);
+
+    let report = read_only_report(tempdir.path());
+    assert_eq!(report["exception"]["severity"], "fatal");
+    assert_eq!(report["exception"]["signal"], "SIGSEGV");
+    assert_eq!(
+        report["exception"]["raw_codes"],
+        serde_json::json!(["0xdead", "0xbeef"])
+    );
 
     assert!(
         count_json_files(tempdir.path()) >= 1,

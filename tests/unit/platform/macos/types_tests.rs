@@ -67,10 +67,49 @@ fn test_exception_to_signal_all() {
     assert_eq!(exception_to_signal(3), "SIGFPE");
     assert_eq!(exception_to_signal(6), "SIGTRAP");
     assert_eq!(exception_to_signal(10), "SIGABRT");
+    assert_eq!(exception_to_signal(11), "SIGUNKNOWN");
+    assert_eq!(exception_to_signal(12), "SIGKILL");
     assert_eq!(exception_to_signal(0), "SIGUNKNOWN");
     assert_eq!(exception_to_signal(4), "SIGUNKNOWN");
     assert_eq!(exception_to_signal(5), "SIGUNKNOWN");
     assert_eq!(exception_to_signal(99), "SIGUNKNOWN");
+}
+
+#[test]
+fn exception_subscription_policy_is_explicit_for_optional_classes() {
+    let breakpoint = exception_policy(6);
+    assert!(breakpoint.subscribed);
+    assert_eq!(breakpoint.report_kind, Some(ExceptionReportKind::Crash));
+    assert_eq!(breakpoint.severity, Some(ExceptionSeverity::Fatal));
+    assert_eq!(breakpoint.signal, "SIGTRAP");
+    assert!(breakpoint.preserves_raw_codes);
+
+    let resource = exception_policy(11);
+    assert!(!resource.subscribed);
+    assert_eq!(resource.report_kind, None);
+    assert_eq!(resource.severity, None);
+    assert_eq!(resource.signal, "SIGUNKNOWN");
+    assert!(!resource.preserves_raw_codes);
+
+    let guard = exception_policy(12);
+    assert!(guard.subscribed);
+    assert_eq!(guard.report_kind, Some(ExceptionReportKind::Crash));
+    assert_eq!(guard.severity, Some(ExceptionSeverity::Fatal));
+    assert_eq!(guard.signal, "SIGKILL");
+    assert!(guard.preserves_raw_codes);
+
+    assert_eq!(
+        CRASH_EXCEPTION_MASK & mach2::exception_types::EXC_MASK_RESOURCE,
+        0
+    );
+    assert_ne!(
+        CRASH_EXCEPTION_MASK & mach2::exception_types::EXC_MASK_BREAKPOINT,
+        0
+    );
+    assert_ne!(
+        CRASH_EXCEPTION_MASK & mach2::exception_types::EXC_MASK_GUARD,
+        0
+    );
 }
 
 #[test]

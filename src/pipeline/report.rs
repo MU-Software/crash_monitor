@@ -129,6 +129,8 @@ pub struct ExceptionReport {
     /// Raw MIG exception code array, preserving its original element count.
     #[serde(default)]
     pub raw_codes: Vec<String>,
+    #[serde(default)]
+    pub severity: crate::platform::ExceptionSeverity,
     pub signal: String,
     pub fault_address: String,
 }
@@ -638,6 +640,7 @@ pub fn build_report(
     let header = ReportHeader::new(event);
 
     let exception = if event.is_crash() {
+        let policy = platform::exception_policy(event.exception_type.unwrap_or(0));
         Some(ExceptionReport {
             exc_type: platform::exception_type_name(event.exception_type.unwrap_or(0)).into(),
             code: platform::kern_return_name(event.exception_code.unwrap_or(0)).into(),
@@ -647,6 +650,9 @@ pub fn build_report(
                 .iter()
                 .map(|code| format!("{code:#x}"))
                 .collect(),
+            severity: policy
+                .severity
+                .unwrap_or(platform::ExceptionSeverity::Fatal),
             signal: platform::exception_to_signal(event.exception_type.unwrap_or(0)).into(),
             fault_address: format!("{:#x}", event.exception_subcode.unwrap_or(0)),
         })

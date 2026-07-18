@@ -1,7 +1,8 @@
 //! Core types, constants, and name-mapping helpers for macOS Mach APIs.
 
 use mach2::exception_types::{
-    EXC_MASK_ARITHMETIC, EXC_MASK_BAD_ACCESS, EXC_MASK_BAD_INSTRUCTION, EXC_MASK_CRASH,
+    EXC_MASK_ARITHMETIC, EXC_MASK_BAD_ACCESS, EXC_MASK_BAD_INSTRUCTION, EXC_MASK_BREAKPOINT,
+    EXC_MASK_CRASH, EXC_MASK_GUARD,
 };
 use mach2::kern_return::KERN_SUCCESS;
 use serde::{Deserialize, Serialize};
@@ -13,9 +14,15 @@ use crate::platform::macos::ffi::exceptions::ReceivedMachMessage;
 //  Constants
 // ═══════════════════════════════════════════════════
 
-/// Exception mask covering crash-like exceptions.
-pub const CRASH_EXCEPTION_MASK: u32 =
-    EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_ARITHMETIC | EXC_MASK_CRASH;
+/// Exception mask covering exception classes that the monitor treats as fatal
+/// crash reports. Resource exceptions are intentionally omitted: they may be
+/// advisory/non-fatal and have no stable POSIX termination mapping.
+pub const CRASH_EXCEPTION_MASK: u32 = EXC_MASK_BAD_ACCESS
+    | EXC_MASK_BAD_INSTRUCTION
+    | EXC_MASK_ARITHMETIC
+    | EXC_MASK_BREAKPOINT
+    | EXC_MASK_CRASH
+    | EXC_MASK_GUARD;
 
 /// ARM64 thread state flavor.
 pub const ARM_THREAD_STATE64: i32 = 6;
@@ -114,6 +121,79 @@ pub struct TaskVmSummary {
 //  Name mapping helpers (pure, no unsafe)
 // ═══════════════════════════════════════════════════
 
+/// Report category selected for a subscribed Mach exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExceptionReportKind {
+    Crash,
+}
+
+/// Severity written into the exception report schema.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExceptionSeverity {
+    #[default]
+    Fatal,
+}
+
+/// Complete subscription and reporting policy for one Mach exception class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExceptionPolicy {
+    pub subscribed: bool,
+    pub report_kind: Option<ExceptionReportKind>,
+    pub severity: Option<ExceptionSeverity>,
+    pub signal: &'static str,
+    pub preserves_raw_codes: bool,
+}
+
+const fn fatal_crash(signal: &'static str) -> ExceptionPolicy {
+    ExceptionPolicy {
+        subscribed: true,
+        report_kind: Some(ExceptionReportKind::Crash),
+        severity: Some(ExceptionSeverity::Fatal),
+        signal,
+        preserves_raw_codes: true,
+    }
+}
+
+const fn ignored_resource() -> ExceptionPolicy {
+    ExceptionPolicy {
+        subscribed: false,
+        report_kind: None,
+        severity: None,
+        signal: "SIGUNKNOWN",
+        preserves_raw_codes: false,
+    }
+}
+
+const fn unknown_exception() -> ExceptionPolicy {
+    ExceptionPolicy {
+        subscribed: false,
+        report_kind: None,
+        severity: None,
+        signal: "SIGUNKNOWN",
+        preserves_raw_codes: false,
+    }
+}
+
+/// Return the explicit monitor policy for a Mach exception type.
+///
+/// `EXC_BREAKPOINT` and `EXC_GUARD` are fatal crash subscriptions. The monitor
+/// deliberately ignores `EXC_RESOURCE`; treating an advisory resource event as
+/// terminal would stop supervision before the child has actually exited.
+#[must_use]
+pub const fn exception_policy(exc_type: u32) -> ExceptionPolicy {
+    match exc_type {
+        1 => fatal_crash("SIGSEGV"),
+        2 => fatal_crash("SIGILL"),
+        3 => fatal_crash("SIGFPE"),
+        6 => fatal_crash("SIGTRAP"),
+        10 => fatal_crash("SIGABRT"),
+        11 => ignored_resource(),
+        12 => fatal_crash("SIGKILL"),
+        _ => unknown_exception(),
+    }
+}
+
 /// Map an exception type code to its human-readable name.
 #[must_use]
 pub fn exception_type_name(exc_type: u32) -> &'static str {
@@ -144,14 +224,7 @@ pub fn kern_return_name(code: u64) -> &'static str {
 /// Map an exception type code to the equivalent POSIX signal name.
 #[must_use]
 pub fn exception_to_signal(exc_type: u32) -> &'static str {
-    match exc_type {
-        1 => "SIGSEGV",
-        2 => "SIGILL",
-        3 => "SIGFPE",
-        6 => "SIGTRAP",
-        10 => "SIGABRT",
-        _ => "SIGUNKNOWN",
-    }
+    exception_policy(exc_type).signal
 }
 
 // ═══════════════════════════════════════════════════

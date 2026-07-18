@@ -117,9 +117,20 @@ impl MonitorOutcome {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::ChildTerminated(TerminationReason::Exited { exit_code: 0, .. }) => 0,
-            Self::ChildTerminated(TerminationReason::Exited { .. }) => EXIT_CHILD_FAILURE,
-            Self::ChildTerminated(TerminationReason::Signaled { signal, .. }) => 128 + signal,
-            Self::DetectedCrash { .. } => EXIT_DETECTED_CRASH,
+            Self::ChildTerminated(TerminationReason::Signaled { signal, .. })
+            | Self::DetectedCrash {
+                termination: Some(TerminationReason::Signaled { signal, .. }),
+                ..
+            } => 128 + signal,
+            Self::DetectedCrash {
+                termination: Some(TerminationReason::Exited { exit_code: 0, .. }) | None,
+                ..
+            } => EXIT_DETECTED_CRASH,
+            Self::ChildTerminated(TerminationReason::Exited { .. })
+            | Self::DetectedCrash {
+                termination: Some(TerminationReason::Exited { .. }),
+                ..
+            } => EXIT_CHILD_FAILURE,
             Self::MonitorFailure(_) => EXIT_MONITOR_INTERNAL,
         }
     }
@@ -372,6 +383,23 @@ pub fn event_loop(
                 raw_codes,
                 mut request,
             }) => {
+                let exception_policy = crate::platform::exception_policy(exception_type);
+                if !exception_policy.subscribed {
+                    let reply_result = reply_fn(&mut request);
+                    drop(request);
+                    if let Err(error) = reply_result {
+                        capture_worker.detach();
+                        background_worker.detach();
+                        return EventLoopResult {
+                            outcome: MonitorOutcome::MonitorFailure(format!(
+                                "failed to reject ignored Mach exception: {error}"
+                            )),
+                            crash_finalization: None,
+                            crash_cleanup_required: true,
+                        };
+                    }
+                    continue;
+                }
                 let thread_port = request.thread_port();
                 let captured = if pipeline.report_enabled(ReportType::Crash) {
                     let event = CrashEvent {
