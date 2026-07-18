@@ -201,11 +201,11 @@ impl PlatformOps for MockPlatform {
     }
 
     fn get_thread_name(&self, thread: mach_port_t) -> Result<Option<String>, String> {
-        Ok(self
-            .threads
+        self.threads
             .iter()
             .find(|t| t.port == thread)
-            .and_then(|t| t.name.clone()))
+            .ok_or_else(|| format!("mock: thread_info for unknown thread {thread}"))
+            .map(|thread| thread.name.clone())
     }
 
     fn get_thread_identifier(&self, thread: mach_port_t) -> Result<u64, String> {
@@ -236,10 +236,13 @@ impl PlatformOps for MockPlatform {
     ) -> Result<Vec<u8>, VmReadError> {
         // Find the memory region that contains this address
         for (&base, data) in &self.memory {
-            let Ok(diff) = usize::try_from(address.wrapping_sub(base)) else {
+            let Some(relative) = address.checked_sub(base) else {
                 continue;
             };
-            if address >= base && diff < data.len() {
+            let Ok(diff) = usize::try_from(relative) else {
+                continue;
+            };
+            if diff < data.len() {
                 let available = data.len() - diff;
                 let returned = size.min(available);
                 return classify_vm_read(data[diff..diff + returned].to_vec(), size);
@@ -251,10 +254,17 @@ impl PlatformOps for MockPlatform {
     }
 
     fn vm_region_query(&self, _task: mach_port_t, address: u64) -> Result<VmRegionInfo, String> {
-        // Find first region at or after address
+        // mach_vm_region selects the lowest-address region containing or
+        // following the query, independent of fixture insertion order.
         self.regions
             .iter()
-            .find(|r| r.address + r.size > address)
+            .filter(|region| {
+                region
+                    .address
+                    .checked_add(region.size)
+                    .is_some_and(|end| end > address)
+            })
+            .min_by_key(|region| region.address)
             .cloned()
             .ok_or_else(|| format!("mock: no region at {address:#x}"))
     }
@@ -412,6 +422,23 @@ mod tests {
     }
 
     #[test]
+    fn test_mock_thread_name_distinguishes_unnamed_from_unknown() {
+        let mut mock = MockPlatform::default();
+        mock.threads.push(MockThread {
+            port: 10,
+            name: None,
+            state: vec![0; 68],
+        });
+
+        assert_eq!(mock.get_thread_name(10).unwrap(), None);
+        assert!(
+            mock.get_thread_name(11)
+                .unwrap_err()
+                .contains("unknown thread 11")
+        );
+    }
+
+    #[test]
     fn test_mock_vm_read_distinguishes_exact_short_and_empty_results() {
         let mut mock = MockPlatform::default();
         mock.memory.insert(0x1000, vec![1, 2, 3, 4]);
@@ -431,5 +458,29 @@ mod tests {
                 bytes: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn test_mock_vm_region_query_selects_lowest_suitable_address() {
+        let region = |address, size| crate::platform::VmRegionInfo {
+            address,
+            size,
+            protection: 0,
+            user_tag: 0,
+            share_mode: 0,
+            pages_resident: 0,
+            pages_swapped_out: 0,
+        };
+        let mut mock = MockPlatform::default();
+        mock.regions = vec![
+            region(0x5000, 0x1000),
+            region(u64::MAX - 3, 8),
+            region(0x3000, 0x1000),
+        ];
+
+        assert_eq!(mock.vm_region_query(0, 0x1000).unwrap().address, 0x3000);
+        assert_eq!(mock.vm_region_query(0, 0x3800).unwrap().address, 0x3000);
+        assert_eq!(mock.vm_region_query(0, 0x4000).unwrap().address, 0x5000);
+        assert!(mock.vm_region_query(0, 0x6000).is_err());
     }
 }

@@ -5,8 +5,10 @@
 //!
 //! **Dependency rule**: Code in this module may only import from:
 //! - `crate::platform::macos::*` (parent: testable types and pure functions)
+//! - `crate::platform::{...}` (shared typed platform contracts)
+//! - `crate::shm::types::*` (generated SHM ABI constants/types, in `shm.rs` only)
 //! - `super::*` (sibling FFI modules within ffi/)
-//! - External crates (`std`, `mach2`, `nix`, `libc`)
+//! - External crates (`std`, `mach2`, `nix`, `libc`, `uuid`)
 //!
 //! Importing from `crate::pipeline`, `crate::collectors`, etc. is
 //! forbidden. This is enforced by `test_ffi_import_boundary` in the test suite.
@@ -26,8 +28,10 @@ mod tests {
     ///
     /// Allowed `use` patterns:
     /// - `use std::` / `use core::` — standard library
-    /// - `use mach2::` / `use nix::` / `use libc` — external FFI crates
+    /// - `use mach2::` / `use nix::` / `use libc` / `use uuid::` — external crates
     /// - `use crate::platform::macos::` — parent testable module
+    /// - `use crate::platform::{` — shared typed platform contracts
+    /// - `use crate::shm::types::` — generated SHM ABI used by `ffi/shm.rs`
     /// - `use super::` — sibling FFI modules
     ///
     /// Forbidden: any other `use crate::` path (pipeline, collectors, shm, etc.)
@@ -61,9 +65,12 @@ mod tests {
                     || trimmed.starts_with("use mach2::")
                     || trimmed.starts_with("use nix::")
                     || trimmed.starts_with("use libc")
+                    || trimmed.starts_with("use uuid::")
                     || trimmed.starts_with("use super::")
                     || trimmed.starts_with("use crate::platform::macos::")
-                    || trimmed.starts_with("use crate::shm::")
+                    || trimmed.starts_with("use crate::platform::{")
+                    || trimmed.starts_with("use crate::platform::ArmThreadState64")
+                    || trimmed.starts_with("use crate::shm::types::")
                 {
                     continue;
                 }
@@ -75,7 +82,8 @@ mod tests {
         assert!(
             violations.is_empty(),
             "FFI import boundary violated — ffi/ files may only import from \
-             std, mach2, nix, super::, or crate::platform::macos::\n\
+             std/core, mach2/nix/libc/uuid, super::, crate::platform::macos::, \
+             shared crate::platform contracts, or crate::shm::types::\n\
              Violations:\n{}",
             violations.join("\n")
         );

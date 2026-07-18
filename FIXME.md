@@ -339,9 +339,9 @@
 
 ### P1-21. FFI 경계 문서와 mock contract를 실제 구현에 맞춘다
 
-- [ ] FFI module allowlist, 경계 테스트 주석, assertion message를 일치시킨다.
-- [ ] mock의 unknown thread, task-info buffer, thread name 오류 의미를 macOS 구현과 맞춘다.
-- [ ] mock VM region query는 insertion order가 아니라 가장 낮은 적합 주소를 선택하고 checked arithmetic을 사용한다.
+- [x] FFI module allowlist, 경계 테스트 주석, assertion message를 일치시킨다.
+- [x] mock의 unknown thread, task-info buffer, thread name 오류 의미를 macOS 구현과 맞춘다.
+- [x] mock VM region query는 insertion order가 아니라 가장 낮은 적합 주소를 선택하고 checked arithmetic을 사용한다.
 
 범위: `src/platform/macos/ffi/mod.rs`, `src/platform/mock/mod.rs`.
 
