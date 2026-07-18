@@ -426,6 +426,7 @@ mod tests {
         let mut mock = MockPlatform::default();
         mock.threads.push(MockThread {
             port: 10,
+            stable_id: 10,
             name: None,
             state: vec![0; 68],
         });
@@ -471,12 +472,14 @@ mod tests {
             pages_resident: 0,
             pages_swapped_out: 0,
         };
-        let mut mock = MockPlatform::default();
-        mock.regions = vec![
-            region(0x5000, 0x1000),
-            region(u64::MAX - 3, 8),
-            region(0x3000, 0x1000),
-        ];
+        let mock = MockPlatform {
+            regions: vec![
+                region(0x5000, 0x1000),
+                region(u64::MAX - 3, 8),
+                region(0x3000, 0x1000),
+            ],
+            ..MockPlatform::default()
+        };
 
         assert_eq!(mock.vm_region_query(0, 0x1000).unwrap().address, 0x3000);
         assert_eq!(mock.vm_region_query(0, 0x3800).unwrap().address, 0x3000);
