@@ -13,6 +13,8 @@ use nix::fcntl::{AtFlags, OFlag, openat};
 use nix::sys::stat::{FchmodatFlags, Mode, fchmodat, fstatat, mkdirat};
 use nix::unistd::{UnlinkatFlags, unlinkat};
 
+use crate::errors::PathError;
+
 /// Exact mode for every crash-monitor data and report directory.
 pub(crate) const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 
@@ -47,7 +49,7 @@ const DEFAULT_DATA_DIR_NAME: &str = match option_env!("CRASH_MONITOR_DATA_DIR_NA
 
 /// Base directory for crash reporter data: `$CRASH_MONITOR_DATA_DIR` if set,
 /// else `~/.crash_monitor/`.
-pub fn data_dir_path() -> Result<PathBuf, String> {
+pub fn data_dir_path() -> Result<PathBuf, PathError> {
     #[cfg(test)]
     {
         static TEST_DATA_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -72,27 +74,29 @@ pub fn data_dir_path() -> Result<PathBuf, String> {
 fn data_dir_path_from_environment(
     override_path: Option<OsString>,
     home: Option<OsString>,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, PathError> {
     match override_path {
-        Some(path) if path.is_empty() => Err(format!("{DATA_DIR_OVERRIDE_ENV} is set but empty")),
+        Some(path) if path.is_empty() => Err(PathError::new(format!(
+            "{DATA_DIR_OVERRIDE_ENV} is set but empty"
+        ))),
         Some(path) => Ok(PathBuf::from(path)),
         None => home
             .map(PathBuf::from)
             .map(|path| path.join(DEFAULT_DATA_DIR_NAME))
-            .ok_or_else(|| "HOME not set".to_string()),
+            .ok_or_else(|| PathError::new("HOME not set")),
     }
 }
 
-pub fn data_dir() -> Result<PathBuf, String> {
+pub fn data_dir() -> Result<PathBuf, PathError> {
     let dir = data_dir_path()?;
-    ensure_private_directory(&dir)?;
+    ensure_private_directory(&dir).map_err(PathError::from)?;
     Ok(dir)
 }
 
 /// Resolve the pending report root without touching the filesystem. Capture
 /// paths use this pure helper so directory I/O cannot extend task suspension
 /// or the Mach exception reply deadline.
-pub fn pending_dir_path() -> Result<PathBuf, String> {
+pub fn pending_dir_path() -> Result<PathBuf, PathError> {
     Ok(data_dir_path()?.join("crashes").join("pending"))
 }
 
@@ -100,24 +104,24 @@ pub fn pending_dir_path() -> Result<PathBuf, String> {
 /// The pipeline writes Stage 1 raw dumps, Stage 2 JSON, and intermediate
 /// files here. The `MoveToSent` post-processor relocates finished reports
 /// to `sent_dir()`.
-pub fn pending_dir() -> Result<PathBuf, String> {
+pub fn pending_dir() -> Result<PathBuf, PathError> {
     let data = data_dir()?;
     let crashes = data.join("crashes");
-    ensure_private_directory(&crashes)?;
+    ensure_private_directory(&crashes).map_err(PathError::from)?;
     let dir = crashes.join("pending");
-    ensure_private_directory(&dir)?;
+    ensure_private_directory(&dir).map_err(PathError::from)?;
     Ok(dir)
 }
 
 /// Archive directory for completed reports: `<data_dir>/crashes/sent/`.
 /// `MoveToSent` populates it after the post-processor chain finishes, and
 /// `RetentionManager` prunes it by count/size/age.
-pub fn sent_dir() -> Result<PathBuf, String> {
+pub fn sent_dir() -> Result<PathBuf, PathError> {
     let data = data_dir()?;
     let crashes = data.join("crashes");
-    ensure_private_directory(&crashes)?;
+    ensure_private_directory(&crashes).map_err(PathError::from)?;
     let dir = crashes.join("sent");
-    ensure_private_directory(&dir)?;
+    ensure_private_directory(&dir).map_err(PathError::from)?;
     Ok(dir)
 }
 

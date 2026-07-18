@@ -322,7 +322,7 @@ fn region_label(region: &VmRegionInfo, images: &[RawImageData]) -> String {
 }
 
 // ═══════════════════════════════════════════════════
-//  Breadcrumb formatting (Phase 4)
+//  Breadcrumb formatting
 // ═══════════════════════════════════════════════════
 
 /// Map category enum to string (matches `sut_crumb_category_t` order).
@@ -369,7 +369,7 @@ fn format_breadcrumbs(crumbs: &[crate::shm::RawBreadcrumb]) -> Vec<BreadcrumbRep
 }
 
 // ═══════════════════════════════════════════════════
-//  Crash context formatting (Phase 4)
+//  Crash context formatting
 // ═══════════════════════════════════════════════════
 
 /// Format crash context, build info, and settings snapshot.
@@ -425,7 +425,7 @@ fn format_settings(
 }
 
 // ═══════════════════════════════════════════════════
-//  Attachment formatting (Phase 4b)
+//  Attachment formatting
 // ═══════════════════════════════════════════════════
 
 fn format_attachments(

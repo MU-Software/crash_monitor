@@ -68,7 +68,7 @@ fn session_data_dir() -> Result<std::path::PathBuf, String> {
         return Ok(path);
     }
 
-    paths::data_dir()
+    paths::data_dir().map_err(|error| error.to_string())
 }
 
 impl Plugin for SessionRecorder {

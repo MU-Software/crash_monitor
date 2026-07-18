@@ -413,7 +413,7 @@ fn kill_and_reap_timed_out_helper(helper: &mut CaptureHelperProcess) -> Isolated
 fn plugin_status<T>(outcome: &PluginRunResult<T>) -> PluginStatus {
     match outcome {
         PluginRunResult::Completed(_) => PluginStatus::Ok,
-        PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
+        PluginRunResult::Failed(error) => PluginStatus::Error(error.to_string()),
         PluginRunResult::Panicked(message) => PluginStatus::Panic(message.clone()),
         PluginRunResult::TimedOut => PluginStatus::TimedOut,
     }

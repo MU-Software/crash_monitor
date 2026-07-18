@@ -363,7 +363,7 @@ pub enum ReportValueSource {
 }
 
 // ═══════════════════════════════════════════════════
-//  Report loading (Phase 5 — CLI analysis commands)
+//  Report loading for CLI analysis commands
 // ═══════════════════════════════════════════════════
 
 /// Maximum report file size to read (256 MB). Prevents OOM on garbage input.

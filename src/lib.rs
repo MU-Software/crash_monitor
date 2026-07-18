@@ -1,5 +1,11 @@
 //! macOS capture engine used by the thin `crash_monitor` binary.
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        tracing::event!(target: "crash_monitor::operational", tracing::Level::WARN, message = %format_args!($($arg)*))
+    };
+}
+
 #[cfg(not(target_os = "macos"))]
 compile_error!("crash_monitor requires macOS (Mach kernel APIs)");
 #[cfg(not(target_arch = "aarch64"))]
@@ -15,6 +21,7 @@ compile_error!(
 pub mod cli;
 mod collectors;
 pub mod config;
+pub mod errors;
 pub mod event_loop;
 pub mod event_source;
 mod filters;
@@ -24,6 +31,7 @@ pub mod platform;
 mod postprocessors;
 mod preprocessors;
 pub mod shm;
+pub mod telemetry;
 mod utils;
 mod watchdog;
 

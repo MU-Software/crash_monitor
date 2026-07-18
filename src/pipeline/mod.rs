@@ -1,6 +1,7 @@
 //! Plugin pipeline architecture for crash/snapshot report generation.
 //!
 //! The implemented stage ordering and failure policy are documented in `docs/pipeline.md`.
+//! Runtime composition for bounded capture and asynchronous finalization.
 
 pub mod artifact;
 pub mod capture_isolation;
@@ -121,7 +122,6 @@ pub struct Pipeline {
     pub collectors: Vec<Box<dyn Collector>>,
     pub pre_processors: Vec<Box<dyn PreProcessor>>,
     pub post_processors: Vec<Box<dyn PostProcessor>>,
-    #[allow(dead_code)] // Phase 4+
     pub notifiers: Vec<Box<dyn Notifier>>,
     /// Live shared-memory mapping used only to create an owned snapshot while
     /// this monitor owns the task suspension (None if shm is unavailable).
@@ -308,7 +308,7 @@ fn enforce_execution_boundary<T>(
         let error =
             format!("plugin {name} declared Subprocess but did not use the subprocess supervisor");
         eprintln!("[monitor] {error}");
-        PluginRunResult::Failed(error)
+        PluginRunResult::Failed(error.into())
     } else {
         result
     }
@@ -317,7 +317,7 @@ fn enforce_execution_boundary<T>(
 fn plugin_status<T>(result: &PluginRunResult<T>) -> PluginStatus {
     match result {
         PluginRunResult::Completed(_) => PluginStatus::Ok,
-        PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
+        PluginRunResult::Failed(error) => PluginStatus::Error(error.to_string()),
         PluginRunResult::Panicked(message) => PluginStatus::Panic(message.clone()),
         PluginRunResult::TimedOut => PluginStatus::TimedOut,
     }
@@ -329,7 +329,7 @@ fn filter_status(name: &str, result: &PluginRunResult<bool>) -> PluginStatus {
         PluginRunResult::Completed(false) => {
             PluginStatus::Rejected(format!("{name} rejected the event"))
         }
-        PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
+        PluginRunResult::Failed(error) => PluginStatus::Error(error.to_string()),
         PluginRunResult::Panicked(message) => PluginStatus::Panic(message.clone()),
         PluginRunResult::TimedOut => PluginStatus::TimedOut,
     }
@@ -381,9 +381,10 @@ impl Pipeline {
     }
 
     fn resolved_output_root(&self) -> Result<PathBuf, String> {
-        self.output_dir
-            .clone()
-            .map_or_else(crate::utils::paths::pending_dir_path, Ok)
+        match &self.output_dir {
+            Some(path) => Ok(path.clone()),
+            None => crate::utils::paths::pending_dir_path().map_err(|error| error.to_string()),
+        }
     }
 
     /// Recover manifest-complete transactions once during monitor startup.
@@ -398,7 +399,7 @@ impl Pipeline {
             return Ok(0);
         }
         let output_root = self.resolved_output_root()?;
-        recover_prepared_reports(&output_root)
+        recover_prepared_reports(&output_root).map_err(|error| error.to_string())
     }
 
     /// Recover manifest-complete transactions, then delete only old,
@@ -414,8 +415,10 @@ impl Pipeline {
             return Ok(StartupRecovery::default());
         }
         let output_root = self.resolved_output_root()?;
-        let recovered = recover_prepared_reports(&output_root)?;
-        let scavenged = scavenge_stale_pending(&output_root, STARTUP_STALE_ARTIFACT_AGE)?;
+        let recovered =
+            recover_prepared_reports(&output_root).map_err(|error| error.to_string())?;
+        let scavenged = scavenge_stale_pending(&output_root, STARTUP_STALE_ARTIFACT_AGE)
+            .map_err(|error| error.to_string())?;
         Ok(StartupRecovery {
             recovered,
             scavenged,
@@ -495,6 +498,15 @@ impl Pipeline {
     /// callers and unit tests that explicitly want synchronous completion.
     #[must_use]
     pub fn handle_event(&self, event: &CrashEvent, task: mach_port_t) -> Diagnostics {
+        let _span = tracing::info_span!(
+            target: "crash_monitor::pipeline",
+            "report_pipeline",
+            report_id = %event.report_id,
+            pid = event.pid,
+            stage = "pipeline",
+            report_type = ?event.report_type
+        )
+        .entered();
         if !self.report_enabled(event.report_type) {
             return Diagnostics::new();
         }
@@ -1109,7 +1121,8 @@ impl Pipeline {
         let transaction = match ArtifactTransaction::begin(ReportContext::new(event, &pending)) {
             Ok(transaction) => transaction,
             Err(error) => {
-                diagnostics.record_immediate("ArtifactBegin", PluginStatus::Error(error));
+                diagnostics
+                    .record_immediate("ArtifactBegin", PluginStatus::Error(error.to_string()));
                 return diagnostics;
             }
         };

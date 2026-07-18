@@ -221,7 +221,9 @@ impl PlatformOps for MockPlatform {
             .iter()
             .find(|t| t.port == thread)
             .ok_or_else(|| format!("mock: thread {thread} not found"))
-            .and_then(|thread| ArmThreadState64::try_from_words(&thread.state))
+            .and_then(|thread| {
+                ArmThreadState64::try_from_words(&thread.state).map_err(|error| error.to_string())
+            })
     }
 
     fn deallocate_thread_port(&self, thread: mach_port_t) {

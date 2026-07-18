@@ -27,7 +27,7 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
     let mut report = match report::load_report(Path::new(report_path)) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            std::eprintln!("error: {e}");
             return 1;
         }
     };
@@ -36,7 +36,7 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
     {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: {e}");
+            std::eprintln!("error: {e}");
             return 1;
         }
     };
@@ -44,7 +44,7 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
     // Validate file size before loading
     match std::fs::metadata(&dwarf_path) {
         Ok(m) if m.len() > MAX_DSYM_SIZE => {
-            eprintln!(
+            std::eprintln!(
                 "error: DWARF binary too large ({} bytes, max {} bytes)",
                 m.len(),
                 MAX_DSYM_SIZE
@@ -52,7 +52,7 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
             return 1;
         }
         Err(e) => {
-            eprintln!("error: cannot stat '{}': {e}", dwarf_path.display());
+            std::eprintln!("error: cannot stat '{}': {e}", dwarf_path.display());
             return 1;
         }
         _ => {}
@@ -61,7 +61,7 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
     let loader = match addr2line::Loader::new(&dwarf_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!(
+            std::eprintln!(
                 "error: failed to load DWARF from '{}': {e}",
                 dwarf_path.display()
             );
@@ -120,7 +120,7 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
         }
     }
 
-    eprintln!("[symbolicate] resolved {resolved_count} source locations");
+    std::eprintln!("[symbolicate] resolved {resolved_count} source locations");
 
     if let Some(out_path) = output {
         match write_report(&report, Path::new(out_path)) {
@@ -132,7 +132,7 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
                 0
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                std::eprintln!("error: {e}");
                 1
             }
         }

@@ -200,7 +200,7 @@ impl PostProcessor for FeedbackPostProcessor {
                         |partial| format!("feedback dialog timed out; {partial}"),
                     ));
             }
-            PluginRunResult::Failed(error) => return Err(error),
+            PluginRunResult::Failed(error) => return Err(error.to_string()),
             PluginRunResult::Panicked(message) => {
                 return Err(format!(
                     "feedback subprocess supervisor panicked: {message}"

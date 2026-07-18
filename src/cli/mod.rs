@@ -1,4 +1,4 @@
-//! CLI analysis subcommands (Phase 5).
+//! Offline report-inspection CLI subcommands.
 //!
 //! Offline tools for inspecting crash/snapshot reports:
 //! - `analyze`: human-readable summary

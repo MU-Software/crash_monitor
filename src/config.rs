@@ -334,7 +334,7 @@ impl std::error::Error for ConfigValidationError {}
 /// requirement can never disappear through fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigLoadError {
-    DataDirectory(String),
+    DataDirectory(crate::errors::PathError),
     Read { path: PathBuf, error: String },
     UnsafeFile { path: PathBuf, reason: String },
     Parse { path: PathBuf, error: String },
@@ -367,7 +367,15 @@ impl std::fmt::Display for ConfigLoadError {
     }
 }
 
-impl std::error::Error for ConfigLoadError {}
+impl std::error::Error for ConfigLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DataDirectory(error) => Some(error),
+            Self::Validation(error) => Some(error),
+            Self::Read { .. } | Self::UnsafeFile { .. } | Self::Parse { .. } => None,
+        }
+    }
+}
 
 impl From<ConfigValidationError> for ConfigLoadError {
     fn from(error: ConfigValidationError) -> Self {

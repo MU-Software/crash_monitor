@@ -95,7 +95,6 @@ pub enum ExceptionListenerEvent {
 
 /// Information about a single VM region.
 #[derive(Clone, Serialize, Deserialize)]
-#[allow(dead_code)] // share_mode, pages_swapped_out reserved for Phase 4+ analysis
 pub struct VmRegionInfo {
     pub address: u64,
     pub size: u64,
@@ -108,7 +107,6 @@ pub struct VmRegionInfo {
 
 /// High-level VM statistics for a task.
 #[derive(Clone, Serialize, Deserialize)]
-#[allow(dead_code)] // fields available for Phase 4+ report enrichment
 pub struct TaskVmSummary {
     pub virtual_size: u64,
     pub resident_size: u64,

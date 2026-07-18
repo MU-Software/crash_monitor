@@ -5,6 +5,12 @@
 //!
 //! macOS only — uses Mach kernel APIs (exception ports, `vm_read`, `task_for_pid`).
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        tracing::event!(target: "crash_monitor::operational", tracing::Level::WARN, message = %format_args!($($arg)*))
+    };
+}
+
 #[cfg(not(target_os = "macos"))]
 compile_error!("crash_monitor requires macOS (Mach kernel APIs)");
 #[cfg(not(target_arch = "aarch64"))]
@@ -20,6 +26,7 @@ compile_error!(
 use clap::{Parser, Subcommand};
 use crash_monitor::{
     ChildEnvironmentSnapshot, cli, config, event_loop, event_source, pipeline, platform, shm,
+    telemetry,
 };
 use mach2::port::mach_port_t;
 use nix::sys::wait::{WaitPidFlag, waitpid};
@@ -710,7 +717,12 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let validated_config = match config::load_validated_config() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("[monitor] Invalid crash monitor configuration: {error}");
+            tracing::error!(
+                target: "crash_monitor::config",
+                stage = "startup",
+                error = %error,
+                "invalid crash monitor configuration"
+            );
             return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };
@@ -718,7 +730,12 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         eprintln!("[monitor] Configuration: {diagnostic}");
     }
 
-    eprintln!("[monitor] Starting: {app_path}");
+    tracing::info!(
+        target: "crash_monitor::supervisor",
+        stage = "startup",
+        executable = app_path,
+        "starting monitored process"
+    );
 
     // Set up SIGUSR1 signal pipe
     let signal_read_fd = match event_source::setup_signal_pipe() {
@@ -856,7 +873,12 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         }
     };
 
-    eprintln!("[monitor] Child PID: {child_pid}");
+    tracing::info!(
+        target: "crash_monitor::supervisor",
+        stage = "spawn",
+        pid = child_pid_raw,
+        "monitored child started"
+    );
 
     // Extract process name from app_path for reports.
     let process_name = std::path::Path::new(app_path)
@@ -906,7 +928,12 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Start exception listener thread AFTER task port is acquired
     let exc_rx = platform::start_listener(exception_port.raw());
 
-    eprintln!("[monitor] Monitoring active. Send SIGUSR1 for a manual snapshot.");
+    tracing::info!(
+        target: "crash_monitor::supervisor",
+        stage = "monitoring",
+        pid = child_pid_raw,
+        "monitoring active"
+    );
 
     // ANR watchdog config (used inline by event_loop, no dedicated thread).
     // Configuration alone does not arm it: the child must publish its first
@@ -1105,6 +1132,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
 // ═══════════════════════════════════════════════════
 
 fn main() {
+    telemetry::init();
     let cli = Cli::parse();
 
     let exit_code = match cli.command {
@@ -1136,7 +1164,7 @@ fn main() {
                     0
                 }
                 Err(error) => {
-                    eprintln!("invalid configuration: {error}");
+                    std::eprintln!("invalid configuration: {error}");
                     2
                 }
             }

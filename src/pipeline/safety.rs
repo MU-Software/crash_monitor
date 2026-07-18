@@ -297,7 +297,7 @@ impl PluginContext {
 #[derive(Debug)]
 pub enum PluginRunResult<T> {
     Completed(T),
-    Failed(String),
+    Failed(crate::errors::PluginError),
     Panicked(String),
     TimedOut,
 }
@@ -325,6 +325,21 @@ pub fn run_plugin_cooperative<T>(
     context: &PluginContext,
     f: impl FnOnce(&PluginContext) -> Result<T, String>,
 ) -> PluginRunResult<T> {
+    let report_id = context
+        .report_context()
+        .map_or("unscoped", |report| report.report_id().as_str());
+    let pid = context
+        .report_context()
+        .map_or(0, super::artifact::ReportContext::pid);
+    let _span = tracing::info_span!(
+        target: "crash_monitor::plugin",
+        "plugin_run",
+        report_id,
+        pid,
+        stage = "plugin",
+        plugin_id = name
+    )
+    .entered();
     if context.is_timed_out() {
         eprintln!("[monitor] plugin {name} timed out before it started");
         return PluginRunResult::TimedOut;
@@ -337,7 +352,7 @@ pub fn run_plugin_cooperative<T>(
     // only safe to report after the direct child has been reaped.
     if let Some(error) = context.subprocess_cleanup_failure() {
         eprintln!("[monitor] plugin {name} subprocess cleanup failed: {error}");
-        return PluginRunResult::Failed(error.to_string());
+        return PluginRunResult::Failed(error.to_string().into());
     }
 
     // A plugin may discover expiry at a checkpoint and return an ordinary
@@ -354,7 +369,7 @@ pub fn run_plugin_cooperative<T>(
                 "[monitor] plugin {name}: {}",
                 crate::utils::terminal::escape_terminal(&error)
             );
-            PluginRunResult::Failed(error)
+            PluginRunResult::Failed(error.into())
         }
         Err(payload) => {
             let message = panic_payload_message(payload.as_ref());
@@ -662,7 +677,7 @@ fn failed_for_context<T>(
     if context.is_timed_out() {
         PluginRunResult::TimedOut
     } else {
-        PluginRunResult::Failed(message.into())
+        PluginRunResult::Failed(crate::errors::PluginError::new(message.into()))
     }
 }
 
@@ -677,7 +692,7 @@ fn failed_with_cleanup<T>(
         Err(cleanup_error) => {
             let failure = format!("{message}; cleanup failed: {cleanup_error}");
             context.record_subprocess_cleanup_failure(failure.clone());
-            PluginRunResult::Failed(failure)
+            PluginRunResult::Failed(failure.into())
         }
     }
 }
@@ -721,7 +736,7 @@ pub fn run_plugin_subprocess(
             let _ = child.wait();
             let message = format!("plugin pid does not fit pid_t: {error}");
             eprintln!("[monitor] plugin {name}: {message}");
-            return PluginRunResult::Failed(message);
+            return PluginRunResult::Failed(message.into());
         }
     };
     let pgid = nix::unistd::Pid::from_raw(raw_pid);
@@ -793,7 +808,7 @@ pub fn run_plugin_subprocess(
                 Err(error) => {
                     let failure = format!("plugin timed out but cleanup failed: {error}");
                     context.record_subprocess_cleanup_failure(failure.clone());
-                    Err(PluginRunResult::Failed(failure))
+                    Err(PluginRunResult::Failed(failure.into()))
                 }
             };
         }
@@ -808,16 +823,16 @@ pub fn run_plugin_subprocess(
                     (Ok(()), Ok(status)) => break Ok(status),
                     (Err(cleanup_error), Ok(_)) => {
                         context.record_subprocess_cleanup_failure(cleanup_error.clone());
-                        break Err(PluginRunResult::Failed(cleanup_error));
+                        break Err(PluginRunResult::Failed(cleanup_error.into()));
                     }
                     (Ok(()), Err(reap_error)) => {
                         context.record_subprocess_cleanup_failure(reap_error.clone());
-                        break Err(PluginRunResult::Failed(reap_error));
+                        break Err(PluginRunResult::Failed(reap_error.into()));
                     }
                     (Err(cleanup_error), Err(reap_error)) => {
                         let failure = format!("{cleanup_error}; {reap_error}");
                         context.record_subprocess_cleanup_failure(failure.clone());
-                        break Err(PluginRunResult::Failed(failure));
+                        break Err(PluginRunResult::Failed(failure.into()));
                     }
                 }
             }
@@ -865,9 +880,9 @@ pub fn run_plugin_subprocess(
     if outcome.is_ok()
         && let Some(error) = stdout.error.as_ref().or(stderr.error.as_ref())
     {
-        return PluginRunResult::Failed(format!(
-            "isolated plugin output capture was incomplete: {error}"
-        ));
+        return PluginRunResult::Failed(
+            format!("isolated plugin output capture was incomplete: {error}").into(),
+        );
     }
 
     match outcome {

@@ -5,6 +5,8 @@
 //! monitor-owned work, is never counted as application hang time.
 //!
 //! The ANR timing and readiness contract is documented in `docs/architecture.md`.
+//! The event loop supplies elapsed application-running time and excludes
+//! monitor-owned capture intervals from the watchdog clock.
 
 use std::time::Instant;
 

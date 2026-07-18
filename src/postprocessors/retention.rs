@@ -135,7 +135,8 @@ impl PostProcessor for RetentionManager {
             crate::pipeline::artifact::scavenge_stale_pending(
                 transaction.report_context().output_root(),
                 self.max_age,
-            )?;
+            )
+            .map_err(|error| error.to_string())?;
         }
         let current_report_dir = context.committed_report().map(|report| report.report_dir);
         validate_retention_root(&dir)?;

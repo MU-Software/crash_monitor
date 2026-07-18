@@ -715,12 +715,12 @@
 
 ### P2-09. structured tracing과 typed error를 도입한다
 
-- [ ] monitor 내부 `eprintln!`을 level/target이 있는 structured tracing으로 교체한다.
-- [ ] user-facing CLI stderr와 monitor operational log를 분리한다.
-- [ ] platform/plugin/path/SHM/artifact의 `Result<_, String>`을 영역별 typed error로 바꾼다.
-- [ ] config의 `Option`+silent default 경로는 `Result<ValidatedConfig, ConfigError>`로 바꿔 오류를 새로 보존한다.
-- [ ] 모든 log/error에 가능한 경우 `ReportId`, PID, stage, plugin ID를 포함한다.
-- [ ] 낡은 `#[allow(dead_code)]`, Phase 주석, 존재하지 않는 설계 문서 링크를 제거한다.
+- [x] monitor 내부 `eprintln!`을 level/target이 있는 structured tracing으로 교체한다.
+- [x] user-facing CLI stderr와 monitor operational log를 분리한다.
+- [x] platform/plugin/path/SHM/artifact의 `Result<_, String>`을 영역별 typed error로 바꾼다.
+- [x] config의 `Option`+silent default 경로는 `Result<ValidatedConfig, ConfigError>`로 바꿔 오류를 새로 보존한다.
+- [x] 모든 log/error에 가능한 경우 `ReportId`, PID, stage, plugin ID를 포함한다.
+- [x] 낡은 `#[allow(dead_code)]`, Phase 주석, 존재하지 않는 설계 문서 링크를 제거한다.
 
 범위: repository-wide, 특히 platform/pipeline/main.
 

@@ -492,7 +492,7 @@ impl PreProcessor for AttachmentCopier {
         } else {
             match &self.output_dir {
                 Some(dir) => dir.clone(),
-                None => crate::utils::paths::pending_dir()?,
+                None => crate::utils::paths::pending_dir().map_err(|error| error.to_string())?,
             }
         };
 

@@ -19,6 +19,7 @@ pub use task_control::{
 use mach2::port::mach_port_t;
 use std::sync::Mutex;
 
+use crate::errors::PlatformError;
 use crate::pipeline::PluginContext;
 
 /// Opaque platform task capability used by orchestration code. Only the
@@ -55,14 +56,14 @@ impl ArmThreadState64 {
     /// # Errors
     /// Returns an error when the response cannot cover every word read by the
     /// register consumer or exceeds the kernel flavor capacity.
-    pub fn try_from_words(words: &[u32]) -> Result<Self, String> {
+    pub fn try_from_words(words: &[u32]) -> Result<Self, PlatformError> {
         if !(Self::MIN_CONSUMER_WORDS..=Self::WORD_CAPACITY).contains(&words.len()) {
-            return Err(format!(
+            return Err(PlatformError::new(format!(
                 "ARM_THREAD_STATE64 returned {} words; expected {}..={}",
                 words.len(),
                 Self::MIN_CONSUMER_WORDS,
                 Self::WORD_CAPACITY
-            ));
+            )));
         }
         let mut state = [0; Self::WORD_CAPACITY];
         state[..words.len()].copy_from_slice(words);
