@@ -53,10 +53,7 @@ fn test_plugin_metadata() {
 #[test]
 fn available_space_saturates_for_very_large_volumes() {
     assert_eq!(available_bytes(u64::MAX, 4096), u64::MAX);
-    assert!(space_is_sufficient(
-        Ok((u64::MAX, u64::MAX)),
-        u64::MAX
-    ));
+    assert!(space_is_sufficient(Ok((u64::MAX, u64::MAX)), u64::MAX));
 }
 
 #[test]

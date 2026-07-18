@@ -50,10 +50,7 @@ fn available_bytes(blocks_available: u64, fragment_size: u64) -> u64 {
     blocks_available.saturating_mul(fragment_size)
 }
 
-fn space_is_sufficient(
-    stat: Result<(u64, u64), String>,
-    minimum_free_bytes: u64,
-) -> bool {
+fn space_is_sufficient(stat: Result<(u64, u64), String>, minimum_free_bytes: u64) -> bool {
     stat.map_or(true, |(blocks, fragment_size)| {
         available_bytes(blocks, fragment_size) >= minimum_free_bytes
     })

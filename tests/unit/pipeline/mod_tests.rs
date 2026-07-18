@@ -3064,9 +3064,7 @@ fn production_dialog_path_follows_package_layout_and_developer_fallback() {
             "/Applications/CrashMonitor/bin/crash_monitor"
         ))
         .unwrap(),
-        std::path::Path::new(
-            "/Applications/CrashMonitor/libexec/crash_monitor/crash_dialog_macos"
-        )
+        std::path::Path::new("/Applications/CrashMonitor/libexec/crash_monitor/crash_dialog_macos")
     );
     assert_eq!(
         production_dialog_path(std::path::Path::new(
