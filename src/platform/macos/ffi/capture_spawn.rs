@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::types::{OwnedMachPort, self_task};
+use super::types::{OwnedReceiveRight, OwnedSendRight, OwnedTaskPort, OwnedThreadPort, self_task};
 
 /// Descriptor on which the capture helper writes its framed result.
 ///
@@ -220,50 +220,30 @@ impl Default for ReceiveBuffer {
     }
 }
 
-struct ReceivePort(mach_port_t);
-
-impl ReceivePort {
-    fn new() -> Result<Self, String> {
-        let mut port = MACH_PORT_NULL;
-        // SAFETY: `port` is a valid out-parameter for a new receive right.
-        let allocate =
-            unsafe { mach_port_allocate(self_task(), MACH_PORT_RIGHT_RECEIVE, &raw mut port) };
-        if allocate != 0 {
-            return Err(format!(
-                "mach_port_allocate(capture handoff) failed: kr={allocate}"
-            ));
-        }
-        // SAFETY: the newly allocated receive right is valid; MAKE_SEND adds
-        // the send right copied through the exec transport.
-        let insert =
-            unsafe { mach_port_insert_right(self_task(), port, port, MACH_MSG_TYPE_MAKE_SEND) };
-        if insert != 0 {
-            // SAFETY: `port` is still owned exclusively by this function.
-            unsafe {
-                mach_port_destroy(self_task(), port);
-            }
-            return Err(format!(
-                "mach_port_insert_right(capture handoff) failed: kr={insert}"
-            ));
-        }
-        Ok(Self(port))
+fn allocate_receive_right() -> Result<OwnedReceiveRight, String> {
+    let mut port = MACH_PORT_NULL;
+    // SAFETY: `port` is a valid out-parameter for a new receive right.
+    let allocate =
+        unsafe { mach_port_allocate(self_task(), MACH_PORT_RIGHT_RECEIVE, &raw mut port) };
+    if allocate != 0 {
+        return Err(format!(
+            "mach_port_allocate(capture handoff) failed: kr={allocate}"
+        ));
     }
-
-    const fn raw(&self) -> mach_port_t {
-        self.0
-    }
-}
-
-impl Drop for ReceivePort {
-    fn drop(&mut self) {
-        if self.0 != MACH_PORT_NULL {
-            // SAFETY: this RAII owner uniquely owns the receive right. Destroy
-            // also removes its process-local send-right reference.
-            unsafe {
-                mach_port_destroy(self_task(), self.0);
-            }
+    // SAFETY: the newly allocated receive right is valid; MAKE_SEND adds
+    // the send right copied through the exec transport.
+    let insert =
+        unsafe { mach_port_insert_right(self_task(), port, port, MACH_MSG_TYPE_MAKE_SEND) };
+    if insert != 0 {
+        // SAFETY: `port` is still owned exclusively by this function.
+        unsafe {
+            mach_port_destroy(self_task(), port);
         }
+        return Err(format!(
+            "mach_port_insert_right(capture handoff) failed: kr={insert}"
+        ));
     }
+    Ok(OwnedReceiveRight::new(port))
 }
 
 fn message_size<T>() -> u32 {
@@ -393,7 +373,7 @@ fn destroy_received_message(buffer: &mut ReceiveBuffer) {
     }
 }
 
-fn receive_one_port(receive_port: mach_port_t, timeout_ms: u32) -> Result<OwnedMachPort, String> {
+fn receive_one_port(receive_port: mach_port_t, timeout_ms: u32) -> Result<OwnedSendRight, String> {
     let mut buffer = receive_message(receive_port, timeout_ms)?;
     // SAFETY: the buffer is aligned and fully initialized. Validation below
     // precedes taking ownership of the received descriptor.
@@ -410,13 +390,13 @@ fn receive_one_port(receive_port: mach_port_t, timeout_ms: u32) -> Result<OwnedM
         destroy_received_message(&mut buffer);
         return Err("invalid capture capability handshake message".into());
     }
-    Ok(OwnedMachPort::new(message.port.name))
+    Ok(OwnedSendRight::new(message.port.name))
 }
 
 fn receive_capabilities(
     receive_port: mach_port_t,
     expect_crashed_thread: bool,
-) -> Result<(OwnedMachPort, Option<OwnedMachPort>), String> {
+) -> Result<(OwnedTaskPort, Option<OwnedThreadPort>), String> {
     let mut buffer = receive_message(receive_port, CAPABILITY_HANDOFF_TIMEOUT_MS)?;
     // SAFETY: the buffer is aligned and fully initialized. Descriptor count,
     // message size, and port names are validated before ownership is created.
@@ -437,8 +417,8 @@ fn receive_capabilities(
         destroy_received_message(&mut buffer);
         return Err("invalid capture capability transfer message".into());
     }
-    let task = OwnedMachPort::new(message.ports[0].name);
-    let crashed_thread = expect_crashed_thread.then(|| OwnedMachPort::new(message.ports[1].name));
+    let task = OwnedTaskPort::new(message.ports[0].name);
+    let crashed_thread = expect_crashed_thread.then(|| OwnedThreadPort::new(message.ports[1].name));
     Ok((task, crashed_thread))
 }
 
@@ -558,7 +538,7 @@ pub fn spawn_capture_helper(
     let (_environment, environment_pointers) = inherited_environment()?;
     let duplicated_result = duplicate_result_fd(result_fd)?;
     let duplicated_result_fd = duplicated_result.as_raw_fd();
-    let handoff = ReceivePort::new()?;
+    let handoff = allocate_receive_right()?;
 
     let mut file_actions = SpawnFileActions::new()?;
     file_actions.add_dup2(duplicated_result_fd, CAPTURE_HELPER_RESULT_FD)?;
@@ -651,7 +631,7 @@ fn kill_and_reap_failed_handoff(child: Pid) -> Result<(), String> {
 fn inherited_transport_port(
     mask: exception_mask_t,
     description: &str,
-) -> Result<OwnedMachPort, String> {
+) -> Result<OwnedSendRight, String> {
     let mut masks = [0 as exception_mask_t; 1];
     let mut handlers = [MACH_PORT_NULL as exception_handler_t; 1];
     let mut behaviors = [0; 1];
@@ -686,7 +666,7 @@ fn inherited_transport_port(
             "task_get_exception_ports({description}) returned a null port"
         ));
     }
-    let port = OwnedMachPort::new(port);
+    let port = OwnedSendRight::new(port);
     // Clear the temporary exception transport before doing collector work, so
     // a later helper exception cannot be routed to the short-lived handoff
     // channel.
@@ -718,9 +698,9 @@ fn inherited_transport_port(
 /// unavailable, malformed, or times out.
 pub fn inherited_capture_ports(
     expect_crashed_thread: bool,
-) -> Result<(OwnedMachPort, Option<OwnedMachPort>), String> {
+) -> Result<(OwnedTaskPort, Option<OwnedThreadPort>), String> {
     let parent_handoff = inherited_transport_port(EXC_MASK_RPC_ALERT, "EXC_MASK_RPC_ALERT")?;
-    let control = ReceivePort::new()?;
+    let control = allocate_receive_right()?;
     send_one_port(parent_handoff.raw(), control.raw())?;
     receive_capabilities(control.raw(), expect_crashed_thread)
 }

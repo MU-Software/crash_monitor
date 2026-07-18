@@ -323,9 +323,9 @@
 ### P1-19. Mach right 종류별 RAII와 exception-port 정리를 구현한다
 
 - [x] detach될 수 있는 capture worker가 supervisor의 raw task name을 빌리지 않고 독립 send-right user reference를 소유·해제하게 한다.
-- [ ] receive right에는 send-right용 deallocate가 아니라 `mach_port_mod_refs` 또는 `mach_port_destruct`를 사용한다.
-- [ ] send, receive, task, thread right를 서로 다른 wrapper로 표현한다.
-- [ ] exception request descriptor의 task/thread right ownership과 reply 이후 정리 책임을 검증한다.
+- [x] receive right에는 send-right용 deallocate가 아니라 `mach_port_mod_refs` 또는 `mach_port_destruct`를 사용한다.
+- [x] send, receive, task, thread right를 서로 다른 wrapper로 표현한다.
+- [x] exception request descriptor의 task/thread right ownership과 reply 이후 정리 책임을 검증한다.
 
 범위: `src/platform/macos/ffi/exceptions.rs`, Mach port wrappers. 주의: `mach_vm_region.object_name`이 실질 port leak을 만든다는 주장은 이 작업의 근거로 사용하지 않는다.
 

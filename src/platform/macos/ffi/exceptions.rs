@@ -77,6 +77,7 @@ pub struct ReceivedMachMessage {
     buffer: Box<MachMessageBuffer>,
     received_size: usize,
     thread_port: Option<mach_port_t>,
+    task_port: Option<mach_port_t>,
     destroyer: MessageDestroyer,
     armed: bool,
 }
@@ -87,6 +88,7 @@ impl ReceivedMachMessage {
             buffer,
             received_size,
             thread_port: None,
+            task_port: None,
             destroyer: MessageDestroyer::Mach,
             armed: true,
         }
@@ -100,8 +102,9 @@ impl ReceivedMachMessage {
         self.buffer.as_bytes()
     }
 
-    fn set_validated_thread_port(&mut self, thread_port: mach_port_t) {
+    fn set_validated_descriptor_ports(&mut self, thread_port: mach_port_t, task_port: mach_port_t) {
         self.thread_port = Some(thread_port);
+        self.task_port = Some(task_port);
     }
 
     /// Return the non-owning name of the validated thread send right. The
@@ -114,6 +117,16 @@ impl ReceivedMachMessage {
     pub fn thread_port(&self) -> mach_port_t {
         self.thread_port
             .expect("received exception message must have a validated thread port")
+    }
+
+    /// Return the non-owning name of the validated task send right.
+    ///
+    /// Like [`Self::thread_port`], the descriptor right remains owned by this
+    /// received message and is released by `mach_msg_destroy` after reply.
+    #[cfg(test)]
+    fn task_port(&self) -> mach_port_t {
+        self.task_port
+            .expect("received exception message must have a validated task port")
     }
 
     fn mark_reply_right_consumed(&mut self) {
@@ -151,6 +164,7 @@ impl ReceivedMachMessage {
         bytes: &[u8],
         received_size: usize,
         thread_port: Option<mach_port_t>,
+        task_port: Option<mach_port_t>,
     ) -> (Self, Arc<AtomicUsize>) {
         let mut buffer = Box::<MachMessageBuffer>::default();
         let copied = bytes.len().min(MESSAGE_BUFFER_CAPACITY);
@@ -161,6 +175,7 @@ impl ReceivedMachMessage {
                 buffer,
                 received_size,
                 thread_port,
+                task_port,
                 destroyer: MessageDestroyer::Probe(counter.clone()),
                 armed: true,
             },
@@ -193,7 +208,7 @@ impl ReceivedMachMessage {
         bytes[12..16].copy_from_slice(&header.msgh_local_port.to_ne_bytes());
         bytes[16..20].copy_from_slice(&header.msgh_voucher_port.to_ne_bytes());
         bytes[20..24].copy_from_slice(&header.msgh_id.to_ne_bytes());
-        Self::fixture_with_bytes(&bytes, bytes.len(), Some(thread_port))
+        Self::fixture_with_bytes(&bytes, bytes.len(), Some(thread_port), Some(43))
     }
 }
 
@@ -374,7 +389,7 @@ fn exception_listener(port: mach_port_t, tx: mpsc::Sender<ExceptionListenerEvent
         // Parsing validated both MOVE_SEND descriptors. Their rights remain in
         // the receive buffer and are owned solely by `request`; only the
         // thread name is exposed as a non-owning view for capture.
-        request.set_validated_thread_port(parsed.thread_port);
+        request.set_validated_descriptor_ports(parsed.thread_port, parsed.task_port);
 
         let info = ExceptionInfo {
             received_at,
@@ -413,7 +428,7 @@ mod tests {
         bytes[12..16].copy_from_slice(&header.msgh_local_port.to_ne_bytes());
         bytes[16..20].copy_from_slice(&header.msgh_voucher_port.to_ne_bytes());
         bytes[20..24].copy_from_slice(&header.msgh_id.to_ne_bytes());
-        ReceivedMachMessage::fixture_with_bytes(&bytes, bytes.len(), Some(42))
+        ReceivedMachMessage::fixture_with_bytes(&bytes, bytes.len(), Some(42), Some(43))
     }
 
     fn fake_send_error() -> MachError {
@@ -472,6 +487,22 @@ mod tests {
             .expect("fixture header after send");
         assert_eq!(header.msgh_bits & MACH_MSGH_BITS_REMOTE_MASK, 0);
         assert_eq!(header.msgh_remote_port, MACH_PORT_NULL);
+        drop(request);
+        assert_eq!(destroys.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn validated_descriptor_rights_remain_borrowed_until_message_cleanup() {
+        let (mut request, destroys) = fake_request();
+        assert_eq!(request.thread_port(), 42);
+        assert_eq!(request.task_port(), 43);
+
+        let header = crate::platform::macos::exceptions::message_header(request.all_bytes())
+            .expect("fixture header");
+        let reply = build_exception_reply(&header).expect("safe reply identity");
+        send_owned_reply_with(&mut request, reply, |_| Ok(())).expect("fake send succeeds");
+
+        assert_eq!(destroys.load(Ordering::SeqCst), 0);
         drop(request);
         assert_eq!(destroys.load(Ordering::SeqCst), 1);
     }

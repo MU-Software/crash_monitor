@@ -597,7 +597,7 @@ impl Drop for ChildProcessGroup {
 
 struct MonitorSupervisor {
     child: ChildProcessGroup,
-    child_task: platform::OwnedMachPort,
+    child_task: platform::OwnedTaskPort,
     exception_port: platform::OwnedExceptionPort,
     event_source: event_source::MacEventSource,
     shared_memory: Option<Arc<shm::SharedMemory>>,
@@ -789,7 +789,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Get child task port for suspend/resume/vm_read (needed for crash introspection + snapshots).
     // Must succeed before starting listener — otherwise early crashes can't be inspected.
     let child_task = match acquire_task_port_or_termination(child_pid, child_started_at) {
-        Ok(TaskAcquisition::Acquired(task)) => platform::OwnedMachPort::new(task),
+        Ok(TaskAcquisition::Acquired(task)) => platform::OwnedTaskPort::new(task),
         Ok(TaskAcquisition::ChildTerminated(reason)) => {
             child_group.mark_reaped();
             #[allow(clippy::cast_sign_loss)]

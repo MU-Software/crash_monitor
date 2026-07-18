@@ -15,7 +15,7 @@ use super::{
 use crate::collectors::dylib::RawImageData;
 use crate::collectors::memory::RawHeapData;
 use crate::collectors::thread::RawThreadData;
-use crate::platform::macos::ffi::types::OwnedMachPort;
+use crate::platform::macos::ffi::types::OwnedThreadPort;
 use crate::platform::{MacOsPlatform, PlatformOps, VmRegionInfo};
 
 const CAPTURE_WIRE_VERSION: u32 = 1;
@@ -168,7 +168,7 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
     let mut data = CollectedData::default();
     let mut diagnostics = Diagnostics::new();
     let mut event = request.event;
-    event.crashed_thread = crashed_thread.as_ref().map(OwnedMachPort::raw);
+    event.crashed_thread = crashed_thread.as_ref().map(OwnedThreadPort::raw);
 
     for spec in request.collectors {
         let collector: Box<dyn Collector> = match spec.kind {

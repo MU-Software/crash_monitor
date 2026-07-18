@@ -24,7 +24,7 @@ pub fn get_task_for_pid(pid: i32) -> Result<mach_port_t, MachError> {
 /// Add one owned user reference to an existing task send right.
 ///
 /// Capture workers use this to keep the Mach name alive independently of the
-/// supervisor's `OwnedMachPort`. A detached worker must never borrow the sole
+/// supervisor's `OwnedTaskPort`. A detached worker must never borrow the sole
 /// user reference from a shorter-lived owner.
 ///
 /// # Errors

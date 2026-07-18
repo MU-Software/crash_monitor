@@ -18,7 +18,7 @@ fn run_helper_handoff(include_crashed_thread: bool) {
         // SAFETY: `mach_thread_self` creates a send-right reference owned by
         // the returned RAII wrapper.
         let thread = unsafe { mach2::mach_init::mach_thread_self() };
-        crash_monitor::platform::macos::ffi::types::OwnedMachPort::new(thread)
+        crash_monitor::platform::macos::ffi::types::OwnedThreadPort::new(thread)
     });
     let request = serde_json::json!({
         "version": 1,
@@ -31,7 +31,7 @@ fn run_helper_handoff(include_crashed_thread: bool) {
             "exception_subcode": null,
             "exception_codes": [],
             "crashed_thread": crashed_thread.as_ref().map(
-                crash_monitor::platform::macos::ffi::types::OwnedMachPort::raw
+                crash_monitor::platform::macos::ffi::types::OwnedThreadPort::raw
             ),
             "bail_on_suspend_failure": false,
             "pid": std::process::id(),
@@ -53,7 +53,7 @@ fn run_helper_handoff(include_crashed_thread: bool) {
         task,
         crashed_thread
             .as_ref()
-            .map(crash_monitor::platform::macos::ffi::types::OwnedMachPort::raw),
+            .map(crash_monitor::platform::macos::ffi::types::OwnedThreadPort::raw),
         Duration::from_secs(1),
     )
     .expect("spawn capture helper");
