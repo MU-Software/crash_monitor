@@ -119,8 +119,7 @@ fn drain_signal_pipe(read_fd: &OwnedFd) -> Result<Vec<i32>, String> {
     loop {
         match unistd::read(read_fd, &mut buf) {
             Ok(0) | Err(nix::errno::Errno::EAGAIN) => break,
-            Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => {}
+            Ok(_) | Err(nix::errno::Errno::EINTR) => {}
             Err(error) => return Err(format!("signal pipe drain failed: {error}")),
         }
     }

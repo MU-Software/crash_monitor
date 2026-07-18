@@ -258,9 +258,9 @@
 
 ### P1-12. spawn signal state와 오류 보고를 명시한다
 
-- [ ] `POSIX_SPAWN_SETSIGMASK`로 child signal mask를 명시적으로 설정한다.
-- [ ] 정책상 필요한 ignored signals만 `POSIX_SPAWN_SETSIGDEF`로 복구한다.
-- [ ] `posix_spawn` 계열 return code를 `io::Error::from_raw_os_error`로 해석해 원인을 표시한다.
+- [x] `POSIX_SPAWN_SETSIGMASK`로 child signal mask를 명시적으로 설정한다.
+- [x] 정책상 필요한 ignored signals만 `POSIX_SPAWN_SETSIGDEF`로 복구한다.
+- [x] `posix_spawn` 계열 return code를 `io::Error::from_raw_os_error`로 해석해 원인을 표시한다.
 
 범위: `src/platform/macos/ffi/spawn.rs`.
 

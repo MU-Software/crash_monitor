@@ -29,6 +29,8 @@ pub enum SpawnStage {
     FileActions,
     /// Creating a dedicated process group for lifecycle ownership failed.
     ProcessGroup,
+    /// Installing the child's explicit signal mask/default policy failed.
+    SignalState,
     /// Creating or setting up the child executable failed.
     PosixSpawn,
 }
@@ -41,6 +43,7 @@ impl fmt::Display for SpawnStage {
             Self::OutputPipe => "pipe/fcntl",
             Self::FileActions => "posix_spawn_file_actions",
             Self::ProcessGroup => "posix_spawn process-group attributes",
+            Self::SignalState => "posix_spawn signal attributes",
             Self::PosixSpawn => "posix_spawn",
         })
     }
@@ -67,7 +70,13 @@ impl SpawnError {
 
 impl fmt::Display for SpawnError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} failed: rc={}", self.stage, self.rc)
+        write!(
+            f,
+            "{} failed: rc={} ({})",
+            self.stage,
+            self.rc,
+            std::io::Error::from_raw_os_error(self.rc)
+        )
     }
 }
 
@@ -119,6 +128,44 @@ unsafe fn configure_process_group(attr: *mut libc::posix_spawnattr_t) -> Result<
     };
     if rc != 0 {
         return Err(SpawnError::new(SpawnStage::ProcessGroup, rc));
+    }
+    Ok(())
+}
+
+unsafe fn configure_signal_state(attr: *mut libc::posix_spawnattr_t) -> Result<(), SpawnError> {
+    let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: mask points to writable sigset storage.
+    if unsafe { libc::sigemptyset(mask.as_mut_ptr()) } != 0 {
+        return Err(SpawnError::new(SpawnStage::SignalState, last_errno()));
+    }
+    // SAFETY: mask was initialized above and attr is owned by the caller.
+    let rc = unsafe { libc::posix_spawnattr_setsigmask(attr, mask.as_ptr()) };
+    if rc != 0 {
+        return Err(SpawnError::new(SpawnStage::SignalState, rc));
+    }
+
+    let mut defaults = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(defaults.as_mut_ptr()) } != 0
+        || unsafe { libc::sigaddset(defaults.as_mut_ptr(), libc::SIGPIPE) } != 0
+    {
+        return Err(SpawnError::new(SpawnStage::SignalState, last_errno()));
+    }
+    // Rust ignores SIGPIPE in the monitor. Restore only that inherited ignored
+    // disposition; caught SIGTERM/SIGINT/SIGUSR1 handlers reset on exec.
+    let rc = unsafe { libc::posix_spawnattr_setsigdefault(attr, defaults.as_ptr()) };
+    if rc != 0 {
+        return Err(SpawnError::new(SpawnStage::SignalState, rc));
+    }
+
+    let mut flags = 0 as libc::c_short;
+    let rc = unsafe { libc::posix_spawnattr_getflags(attr, &raw mut flags) };
+    if rc != 0 {
+        return Err(SpawnError::new(SpawnStage::SignalState, rc));
+    }
+    flags |= (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short;
+    let rc = unsafe { libc::posix_spawnattr_setflags(attr, flags) };
+    if rc != 0 {
+        return Err(SpawnError::new(SpawnStage::SignalState, rc));
     }
     Ok(())
 }
@@ -204,6 +251,7 @@ fn output_pipes() -> Result<OutputPipes, SpawnError> {
     })
 }
 
+#[allow(clippy::too_many_lines)] // spawn attributes and file actions share one cleanup scope
 fn spawn_with_exception_port_impl(
     exc_port: mach_port_t,
     app_path: &std::ffi::CStr,
@@ -240,6 +288,10 @@ fn spawn_with_exception_port_impl(
         // Make the spawned process the leader of a new process group before
         // applying stdout/stderr file actions.
         if let Err(error) = configure_process_group(&raw mut attr) {
+            libc::posix_spawnattr_destroy(&raw mut attr);
+            return Err(error);
+        }
+        if let Err(error) = configure_signal_state(&raw mut attr) {
             libc::posix_spawnattr_destroy(&raw mut attr);
             return Err(error);
         }
@@ -481,8 +533,9 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "posix_spawnattr_setexceptionports_np failed: rc={}",
-                libc::EINVAL
+                "posix_spawnattr_setexceptionports_np failed: rc={} ({})",
+                libc::EINVAL,
+                std::io::Error::from_raw_os_error(libc::EINVAL)
             )
         );
 
@@ -560,6 +613,39 @@ mod tests {
             );
             assert_ne!(flags & libc::POSIX_SPAWN_SETPGROUP as libc::c_short, 0);
             assert_eq!(pgroup, 0, "zero requests child PID as its new PGID");
+            libc::posix_spawnattr_destroy(&raw mut attr);
+        }
+    }
+
+    #[test]
+    fn spawn_attributes_set_an_empty_mask_and_restore_only_sigpipe() {
+        unsafe {
+            let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
+            assert_eq!(libc::posix_spawnattr_init(&raw mut attr), 0);
+            configure_signal_state(&raw mut attr).expect("configure signal policy");
+
+            let mut flags = 0 as libc::c_short;
+            let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+            let mut defaults = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+            assert_eq!(
+                libc::posix_spawnattr_getflags(&raw const attr, &raw mut flags),
+                0
+            );
+            assert_eq!(
+                libc::posix_spawnattr_getsigmask(&raw const attr, mask.as_mut_ptr()),
+                0
+            );
+            assert_eq!(
+                libc::posix_spawnattr_getsigdefault(&raw const attr, defaults.as_mut_ptr()),
+                0
+            );
+            let mask = mask.assume_init();
+            let defaults = defaults.assume_init();
+            assert_ne!(flags & libc::POSIX_SPAWN_SETSIGMASK as libc::c_short, 0);
+            assert_ne!(flags & libc::POSIX_SPAWN_SETSIGDEF as libc::c_short, 0);
+            assert_eq!(libc::sigismember(&raw const mask, libc::SIGTERM), 0);
+            assert_eq!(libc::sigismember(&raw const defaults, libc::SIGPIPE), 1);
+            assert_eq!(libc::sigismember(&raw const defaults, libc::SIGTERM), 0);
             libc::posix_spawnattr_destroy(&raw mut attr);
         }
     }
