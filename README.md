@@ -99,3 +99,7 @@ error paths.
 - [docs/configuration.md](docs/configuration.md) — complete JSON defaults, ranges, and plugin policy
 - [docs/privacy.md](docs/privacy.md) — consent gates, retention, and encryption limitations
 - [docs/troubleshooting.md](docs/troubleshooting.md) — signing, orphan, SHM, and artifact recovery runbook
+
+## License
+
+Licensed under the [MIT License](LICENSE).
