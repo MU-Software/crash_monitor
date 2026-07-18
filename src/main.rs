@@ -309,28 +309,13 @@ fn poll_child_termination(
     }
 }
 
-fn wait_for_child_termination(
-    child_pid: nix::unistd::Pid,
-    child_started_at: Instant,
-) -> Result<pipeline::TerminationReason, String> {
-    loop {
-        match waitpid(child_pid, None) {
-            Ok(status) => {
-                if let Some(reason) =
-                    event_source::termination_from_wait_status(status, child_started_at.elapsed())
-                {
-                    return Ok(reason);
-                }
-            }
-            Err(nix::errno::Errno::EINTR) => {}
-            Err(e) => return Err(format!("waitpid failed: {e}")),
-        }
-    }
-}
-
 const CRASH_REAP_GRACE_DEADLINE: Duration = Duration::from_secs(3);
 const CRASH_REAP_AFTER_KILL_DEADLINE: Duration = Duration::from_secs(1);
 const CRASH_REAP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TASK_ACQUISITION_DEADLINE: Duration = Duration::from_secs(1);
+const TASK_ACQUISITION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const UNMONITORED_TERMINATION_GRACE_DEADLINE: Duration = Duration::from_secs(2);
+const UNMONITORED_REAP_AFTER_KILL_DEADLINE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 struct CrashReapDeadlines {
@@ -424,30 +409,107 @@ where
 /// startup. This replaces the old 50ms heuristic: `posix_spawn` errors are exec
 /// setup failures, while every successfully spawned fast exit is a real child
 /// `TerminationReason` regardless of how quickly it happens.
+fn acquire_task_port_or_termination_with<A, P, N, S>(
+    deadline_after: Duration,
+    retry_interval: Duration,
+    mut acquire: A,
+    mut poll_child: P,
+    mut now: N,
+    mut sleep: S,
+) -> Result<TaskAcquisition, String>
+where
+    A: FnMut() -> Result<mach_port_t, String>,
+    P: FnMut() -> Result<Option<pipeline::TerminationReason>, String>,
+    N: FnMut() -> Instant,
+    S: FnMut(Duration),
+{
+    let deadline = now() + deadline_after;
+
+    loop {
+        match acquire() {
+            Ok(task) => return Ok(TaskAcquisition::Acquired(task)),
+            Err(last_err) => {
+                if let Some(reason) = poll_child()? {
+                    return Ok(TaskAcquisition::ChildTerminated(reason));
+                }
+
+                let current = now();
+                if current >= deadline {
+                    return Err(format!(
+                        "task_for_pid acquisition deadline expired after {}ms: {last_err}",
+                        deadline_after.as_millis()
+                    ));
+                }
+                sleep(retry_interval.min(deadline.saturating_duration_since(current)));
+            }
+        }
+    }
+}
+
 fn acquire_task_port_or_termination(
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
 ) -> Result<TaskAcquisition, String> {
-    let pid = child_pid.as_raw();
-    let mut last_err = String::from("task_for_pid failed (no attempts)");
-    for _ in 0..20 {
-        match platform::get_task_for_pid(pid) {
-            Ok(task) => return Ok(TaskAcquisition::Acquired(task)),
-            Err(e) => {
-                last_err = e.to_string();
-                if let Some(reason) = poll_child_termination(child_pid, child_started_at)? {
-                    return Ok(TaskAcquisition::ChildTerminated(reason));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
+    acquire_task_port_or_termination_with(
+        TASK_ACQUISITION_DEADLINE,
+        TASK_ACQUISITION_RETRY_INTERVAL,
+        || platform::get_task_for_pid(child_pid.as_raw()).map_err(|error| error.to_string()),
+        || poll_child_termination(child_pid, child_started_at),
+        Instant::now,
+        std::thread::sleep,
+    )
+}
 
-    // Close the race between the final retry and returning an acquisition error.
-    if let Some(reason) = poll_child_termination(child_pid, child_started_at)? {
-        return Ok(TaskAcquisition::ChildTerminated(reason));
-    }
-    Err(last_err)
+/// An uninspectable child is not left running indefinitely. The monitor owns
+/// the child it spawned, so task-port acquisition failure selects the bounded
+/// terminate policy: SIGTERM, a grace deadline, SIGKILL, then a final reap
+/// deadline. A failure to observe terminal status is reported without falling
+/// back to blocking `waitpid`.
+fn terminate_unmonitorable_child_with<T, P, K, N, S>(
+    deadlines: CrashReapDeadlines,
+    mut send_sigterm: T,
+    poll: P,
+    send_sigkill: K,
+    now: N,
+    sleep: S,
+) -> Result<pipeline::TerminationReason, String>
+where
+    T: FnMut() -> Result<(), String>,
+    P: FnMut() -> Result<ChildPoll, String>,
+    K: FnMut() -> Result<(), String>,
+    N: FnMut() -> Instant,
+    S: FnMut(Duration),
+{
+    send_sigterm()?;
+    reap_after_detected_crash_with(false, deadlines, poll, send_sigkill, now, sleep)
+}
+
+fn terminate_unmonitorable_child(
+    child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
+) -> Result<pipeline::TerminationReason, String> {
+    terminate_unmonitorable_child_with(
+        CrashReapDeadlines {
+            before_sigkill: UNMONITORED_TERMINATION_GRACE_DEADLINE,
+            after_sigkill: UNMONITORED_REAP_AFTER_KILL_DEADLINE,
+        },
+        || match nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGTERM) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+            Err(error) => Err(format!("failed to terminate unmonitored child: {error}")),
+        },
+        || poll_child_after_crash_once(child_pid, child_started_at),
+        || {
+            nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL)
+                .or_else(|error| {
+                    (error == nix::errno::Errno::ESRCH)
+                        .then_some(())
+                        .ok_or(error)
+                })
+                .map_err(|error| format!("failed to kill unmonitored child: {error}"))
+        },
+        Instant::now,
+        std::thread::sleep,
+    )
 }
 
 /// Reap a child after a Mach exception was captured. Every terminal wait status
@@ -641,12 +703,13 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
                  [monitor] This usually means crash_monitor lacks the debugger entitlement.\n\
                  [monitor] Run `make crash-monitor` to rebuild with codesign."
             );
-            // Retain the existing ownership policy until P1-01 replaces it with
-            // an explicit bounded detach/terminate policy, but never discard a
-            // terminal status if one is observed here.
-            match wait_for_child_termination(child_pid, child_started_at) {
+            // An uninspectable child is terminated and reaped within explicit
+            // deadlines. Continuing without a task port would silently lose
+            // crash detection; blocking here would hang the monitor for the
+            // lifetime of a healthy long-running child.
+            match terminate_unmonitorable_child(child_pid, child_started_at) {
                 Ok(reason) => {
-                    eprintln!("[monitor] Child eventually terminated: {reason:?}");
+                    eprintln!("[monitor] Unmonitored child terminated: {reason:?}");
                     #[allow(clippy::cast_sign_loss)]
                     let child_pid_u32 = child_pid_raw as u32;
                     let _ = event_loop::handle_child_termination(
@@ -656,7 +719,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
                         reason,
                     );
                 }
-                Err(wait_err) => eprintln!("[monitor] waitpid cleanup failed: {wait_err}"),
+                Err(wait_err) => eprintln!("[monitor] bounded child cleanup failed: {wait_err}"),
             }
             return event_loop::EXIT_MONITOR_INTERNAL;
         }
@@ -989,6 +1052,99 @@ mod tests {
                 .iter()
                 .any(|entry| entry.as_bytes() == b"LANG=ko_KR.UTF-8")
         );
+    }
+
+    #[test]
+    fn task_port_entitlement_failure_expires_at_the_configured_deadline() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut attempts = 0;
+
+        let result = acquire_task_port_or_termination_with(
+            TEST_REAP_DEADLINE,
+            TEST_REAP_DEADLINE,
+            || {
+                attempts += 1;
+                Err("task_for_pid failed: KERN_FAILURE (missing entitlement)".to_string())
+            },
+            || Ok(None),
+            || base + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        );
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("missing entitlement must not acquire a task port"),
+        };
+        assert!(error.contains("acquisition deadline expired"));
+        assert!(error.contains("missing entitlement"));
+        assert_eq!(elapsed.get(), TEST_REAP_DEADLINE);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn long_running_unmonitorable_child_is_terminated_and_reaped_boundedly() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut polls = VecDeque::from([
+            ChildPoll::Running,
+            ChildPoll::Running,
+            ChildPoll::Terminated(signaled_reason()),
+        ]);
+        let mut sigterm_count = 0;
+        let mut sigkill_count = 0;
+
+        let reason = terminate_unmonitorable_child_with(
+            CrashReapDeadlines {
+                before_sigkill: TEST_REAP_DEADLINE,
+                after_sigkill: TEST_REAP_DEADLINE,
+            },
+            || {
+                sigterm_count += 1;
+                Ok(())
+            },
+            || Ok(polls.pop_front().unwrap_or(ChildPoll::Running)),
+            || {
+                sigkill_count += 1;
+                Ok(())
+            },
+            || base + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .expect("child must be reaped within the post-SIGKILL deadline");
+
+        assert_eq!(reason, signaled_reason());
+        assert_eq!(sigterm_count, 1);
+        assert_eq!(sigkill_count, 1);
+        assert_eq!(elapsed.get(), TEST_REAP_DEADLINE);
+    }
+
+    #[test]
+    fn child_early_exit_wins_over_task_port_retry_failure() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut polls = VecDeque::from([None, Some(exited_reason())]);
+        let mut attempts = 0;
+
+        let result = acquire_task_port_or_termination_with(
+            Duration::from_secs(30),
+            TEST_REAP_DEADLINE,
+            || {
+                attempts += 1;
+                Err("task_for_pid raced child startup".to_string())
+            },
+            || Ok(polls.pop_front().flatten()),
+            || base + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .expect("early child exit must be preserved as terminal status");
+
+        match result {
+            TaskAcquisition::ChildTerminated(reason) => assert_eq!(reason, exited_reason()),
+            TaskAcquisition::Acquired(_) => panic!("task port unexpectedly acquired"),
+        }
+        assert_eq!(attempts, 2);
+        assert_eq!(elapsed.get(), TEST_REAP_DEADLINE);
     }
 
     #[test]

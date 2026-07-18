@@ -165,9 +165,9 @@
 
 ### P1-01. task port 획득 실패를 bounded policy로 처리한다
 
-- [ ] `task_for_pid` 재시도 종료 후 무기한 blocking `waitpid`로 들어가지 않는다.
-- [ ] 설정된 deadline 뒤 child를 terminate/reap할지, 감시 불가 상태로 detach할지 명시적으로 선택한다.
-- [ ] entitlement 부재, 장기 실행 child, child 조기 종료를 각각 테스트한다.
+- [x] `task_for_pid` 재시도 종료 후 무기한 blocking `waitpid`로 들어가지 않는다.
+- [x] 설정된 deadline 뒤 child를 terminate/reap할지, 감시 불가 상태로 detach할지 명시적으로 선택한다.
+- [x] entitlement 부재, 장기 실행 child, child 조기 종료를 각각 테스트한다.
 
 범위: `src/main.rs`, task-port acquisition.
 
