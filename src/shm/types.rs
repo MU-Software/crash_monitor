@@ -31,6 +31,7 @@ pub use ffi::{
     sut_crumb_state_t as SutCrumbState, sut_screenshot_section_t as SutScreenshotSection,
     sut_shm_attachment_section_t as ShmAttachmentSection,
     sut_shm_attachment_slot_t as ShmAttachmentSlot, sut_shm_header_t as ShmHeader,
+    sut_shm_region_t as SutShmRegion,
 };
 
 // ═══════════════════════════════════════════════════
@@ -105,6 +106,8 @@ const _: () = assert!(offset_of!(SutScreenshotSection, valid) == 0);
 const _: () = assert!(offset_of!(SutScreenshotSection, timestamp) == 384);
 const _: () = assert!(offset_of!(SutScreenshotSection, tier) == 1152);
 const _: () = assert!(offset_of!(SutScreenshotSection, data) == 1536);
+const _: () = assert!(size_of::<SutShmRegion>() + size_of::<u32>() == SHM_TOTAL_SIZE);
+const _: () = assert!(align_of::<SutShmRegion>() == 8);
 
 // Offset assertions for SutCrashContext (app-agnostic layout)
 const _: () = assert!(offset_of!(SutCrashContext, heartbeat_counter) == 0);
@@ -121,30 +124,30 @@ const _: () = assert!(offset_of!(SutCrashContext, annotations) == 220);
 // ═══════════════════════════════════════════════════
 
 /// Section 1: Header
-pub const SECTION1_OFFSET: usize = 0;
+pub const SECTION1_OFFSET: usize = offset_of!(SutShmRegion, header);
 pub const SECTION1_SIZE: usize = size_of::<ShmHeader>();
 
 /// Section 2: Breadcrumb rings
-pub const SECTION2_OFFSET: usize = SECTION1_OFFSET + SECTION1_SIZE; // 64
+pub const SECTION2_OFFSET: usize = offset_of!(SutShmRegion, breadcrumbs);
 pub const SECTION2_SIZE: usize = size_of::<SutCrumbState>();
 
 /// Section 3: Crash context + settings + heartbeat + attachments
-pub const SECTION3_OFFSET: usize = SECTION2_OFFSET + SECTION2_SIZE;
-pub const CONTEXT_OFFSET: usize = SECTION3_OFFSET;
-pub const SETTINGS_OFFSET: usize = CONTEXT_OFFSET + size_of::<SutCrashContext>();
-pub const ATTACHMENT_OFFSET: usize = SETTINGS_OFFSET + size_of::<SutCrashSettingsSnapshot>();
+pub const CONTEXT_OFFSET: usize = offset_of!(SutShmRegion, context);
+pub const SECTION3_OFFSET: usize = CONTEXT_OFFSET;
+pub const SETTINGS_OFFSET: usize = offset_of!(SutShmRegion, settings);
+pub const ATTACHMENT_OFFSET: usize = offset_of!(SutShmRegion, attachments);
 pub const SECTION3_SIZE: usize = size_of::<SutCrashContext>()
     + size_of::<SutCrashSettingsSnapshot>()
     + size_of::<ShmAttachmentSection>();
 
 /// Section 4: Screenshot ring buffer
-pub const SECTION4_OFFSET: usize = SECTION3_OFFSET + SECTION3_SIZE;
-pub const SCREENSHOT_META_SIZE: usize = 96 * 4 + 96 * 8 + 96 * 4; // valid + timestamp + tier
-pub const SCREENSHOT_DATA_SIZE: usize = 96 * SCREENSHOT_BYTES_PER_SLOT;
-pub const SECTION4_SIZE: usize = SCREENSHOT_META_SIZE + SCREENSHOT_DATA_SIZE;
+pub const SECTION4_OFFSET: usize = offset_of!(SutShmRegion, screenshots);
+pub const SCREENSHOT_META_SIZE: usize = offset_of!(SutScreenshotSection, data);
+pub const SECTION4_SIZE: usize = size_of::<SutScreenshotSection>();
+pub const SCREENSHOT_DATA_SIZE: usize = SECTION4_SIZE - SCREENSHOT_META_SIZE;
 
 /// Section 5: Footer (canary)
-pub const FOOTER_OFFSET: usize = SECTION4_OFFSET + SECTION4_SIZE;
+pub const FOOTER_OFFSET: usize = size_of::<SutShmRegion>();
 
 /// Total shared memory size, fixed by the C ABI schema.
 pub const SHM_TOTAL_SIZE: usize = ffi::SUT_SHM_TOTAL_SIZE as usize;
@@ -157,6 +160,8 @@ const _: () = assert!(SECTION4_OFFSET == 265_424);
 const _: () = assert!(FOOTER_OFFSET == 50_033_360);
 const _: () = assert!(SHM_TOTAL_SIZE == FOOTER_OFFSET + size_of::<u32>());
 const _: () = assert!(SHM_TOTAL_SIZE == 50_033_364);
+const _: () =
+    assert!(SCREENSHOT_DATA_SIZE == SCREENSHOT_SLOTS as usize * SCREENSHOT_BYTES_PER_SLOT);
 
 // ═══════════════════════════════════════════════════
 //  Rust-native types (read from shm)

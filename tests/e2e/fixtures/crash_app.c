@@ -78,17 +78,16 @@ static void populate_shm(const char* scenario) {
     close(fd);
     if (base == MAP_FAILED) return;
 
-    sut_shm_header_t* header = (sut_shm_header_t*)base;
+    sut_shm_region_t* region = (sut_shm_region_t*)base;
+    sut_shm_header_t* header = &region->header;
     if (sut_shm_atomic_u32_load_acquire(&header->magic) != SUT_SHM_MAGIC ||
         sut_shm_atomic_u32_load_acquire(&header->version) != SUT_SHM_VERSION) {
         munmap(base, (size_t)st.st_size);
         return;
     }
 
-    uint8_t* p = (uint8_t*)base;
-    sut_crumb_state_t* crumbs = (sut_crumb_state_t*)(p + sizeof(sut_shm_header_t));
-    sut_crash_context_t* ctx =
-        (sut_crash_context_t*)(p + sizeof(sut_shm_header_t) + sizeof(sut_crumb_state_t));
+    sut_crumb_state_t* crumbs = &region->breadcrumbs;
+    sut_crash_context_t* ctx = &region->context;
 
     /* Register ring 0 without waiting for another writer. The registry
      * generation protects registration metadata, the per-ring generation

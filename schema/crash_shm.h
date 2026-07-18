@@ -247,11 +247,32 @@ _Static_assert(offsetof(sut_screenshot_section_t, tier) == 1152,
                "screenshot tier offset changed");
 _Static_assert(offsetof(sut_screenshot_section_t, data) == 1536,
                "screenshot data offset changed");
-_Static_assert(SUT_SHM_TOTAL_SIZE ==
-                   sizeof(sut_shm_header_t) + sizeof(sut_crumb_state_t) +
-                       sizeof(sut_crash_context_t) + sizeof(sut_crash_settings_snapshot_t) +
-                       sizeof(sut_shm_attachment_section_t) +
-                       sizeof(sut_screenshot_section_t) + sizeof(uint32_t),
+
+/* ── Complete region — authoritative section order and offsets ── */
+typedef struct sut_shm_region {
+    sut_shm_header_t header;
+    sut_crumb_state_t breadcrumbs;
+    sut_crash_context_t context;
+    sut_crash_settings_snapshot_t settings;
+    sut_shm_attachment_section_t attachments;
+    sut_screenshot_section_t screenshots;
+} sut_shm_region_t;
+
+_Static_assert(_Alignof(sut_shm_region_t) == 8, "shared-memory region alignment changed");
+_Static_assert(offsetof(sut_shm_region_t, header) == 0, "header section offset changed");
+_Static_assert(offsetof(sut_shm_region_t, breadcrumbs) == 64,
+               "breadcrumb section offset changed");
+_Static_assert(offsetof(sut_shm_region_t, context) == 262344,
+               "context section offset changed");
+_Static_assert(offsetof(sut_shm_region_t, settings) == 264104,
+               "settings section offset changed");
+_Static_assert(offsetof(sut_shm_region_t, attachments) == 264264,
+               "attachment section offset changed");
+_Static_assert(offsetof(sut_shm_region_t, screenshots) == 265424,
+               "screenshot section offset changed");
+_Static_assert(sizeof(sut_shm_region_t) == 50033360,
+               "payload region size/footer offset changed");
+_Static_assert(sizeof(sut_shm_region_t) + sizeof(uint32_t) == SUT_SHM_TOTAL_SIZE,
                "shared-memory total size changed");
 
 #endif /* CRASH_SHM_H_ */

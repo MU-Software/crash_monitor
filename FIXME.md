@@ -276,12 +276,12 @@
 
 ### P1-14. 전체 SHM layout을 하나의 schema에서 생성한다
 
-- [ ] 64-byte header, magic/version/canary, attachment section, section 순서와 offset을 `schema/crash_shm.h`의 single source of truth로 옮긴다.
-- [ ] screenshot slot 수의 literal `96`, attachment slot 수의 literal `4`를 제거하고 generated constant/array length를 사용한다.
-- [ ] section size를 `size_of`/`offset_of`에서 유도하고 generated screenshot struct와 직접 대조한다.
-- [ ] screenshot reader test의 `SECTION4_OFFSET + 96*4` timestamp 계산을 `offset_of!(SutScreenshotSection, timestamp)`로 바꾼다.
-- [ ] C producer와 Rust consumer 양쪽에 모든 핵심 struct size, field offset, section alignment assertion을 추가한다.
-- [ ] layout 변경 시 schema version을 올리는 규칙과 호환 정책을 문서화한다.
+- [x] 64-byte header, magic/version/canary, attachment section, section 순서와 offset을 `schema/crash_shm.h`의 single source of truth로 옮긴다.
+- [x] screenshot slot 수의 literal `96`, attachment slot 수의 literal `4`를 제거하고 generated constant/array length를 사용한다.
+- [x] section size를 `size_of`/`offset_of`에서 유도하고 generated screenshot struct와 직접 대조한다.
+- [x] screenshot reader test의 `SECTION4_OFFSET + 96*4` timestamp 계산을 `offset_of!(SutScreenshotSection, timestamp)`로 바꾼다.
+- [x] C producer와 Rust consumer 양쪽에 모든 핵심 struct size, field offset, section alignment assertion을 추가한다.
+- [x] layout 변경 시 schema version을 올리는 규칙과 호환 정책을 문서화한다.
 
 범위: `schema/crash_shm.h`, `src/shm/types.rs`, `tests/unit/shm/reader_tests.rs`, `tests/e2e/fixtures/crash_app.c`.
 

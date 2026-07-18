@@ -39,6 +39,13 @@ The monitor creates and sizes the region. Sections remain back to back:
 [ Header ][ Breadcrumb state ][ Crash context ][ Settings ][ Attachments ][ Screenshots ][ Canary ]
 ```
 
+That order and every section offset are generated from `sut_shm_region_t`; C
+producers must address sections through that type rather than repeating offset
+arithmetic. Any change to a field, array bound, section order, alignment,
+publication meaning, or accepted wire value requires incrementing
+`SUT_SHM_VERSION` in the same change. Adding assertions, aliases, or helper
+APIs that leave the bytes and semantics unchanged does not require a bump.
+
 The screenshot ring dominates the roughly 50 MB region. Schema v2 reused
 reserved or padding words and also changed the meaning of the former header
 offset-16 `ring_count` and screenshot `valid` words. Schema v3 replaces the wire
