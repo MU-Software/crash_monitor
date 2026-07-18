@@ -882,6 +882,9 @@ impl Pipeline {
         )
         .into_option();
 
+        #[cfg(feature = "test-support")]
+        crate::test_hooks::pause_at("finalize_staging");
+
         let mut result = ReportResult {
             artifact_paths: transaction.artifact_paths(),
             raw_path,
@@ -1174,6 +1177,10 @@ impl Pipeline {
             },
         )
         .into_option();
+
+        #[cfg(feature = "test-support")]
+        crate::test_hooks::pause_at("finalize_staging");
+
         let mut result = ReportResult {
             artifact_paths: transaction.artifact_paths(),
             raw_path: None,

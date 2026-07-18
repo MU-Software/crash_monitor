@@ -573,7 +573,11 @@ struct ChildProcessGroup {
 }
 
 impl ChildProcessGroup {
-    fn new(pid: nix::unistd::Pid, started_at: Instant) -> Result<Self, String> {
+    fn new(
+        pid: nix::unistd::Pid,
+        started_at: Instant,
+        shm_name: Option<&str>,
+    ) -> Result<Self, String> {
         // SAFETY: read-only query of the freshly spawned child.
         let actual_pgid = unsafe { nix::libc::getpgid(pid.as_raw()) };
         if actual_pgid != pid.as_raw() {
@@ -581,7 +585,7 @@ impl ChildProcessGroup {
                 "spawned child {pid} is not its process-group leader (getpgid={actual_pgid})"
             ));
         }
-        let parent_death_guard = platform::ParentDeathGuard::install(pid.as_raw())?;
+        let parent_death_guard = platform::ParentDeathGuard::install(pid.as_raw(), shm_name)?;
         Ok(Self {
             pid,
             // POSIX_SPAWN_SETPGROUP with pgroup=0 makes the child PID its PGID.
@@ -842,7 +846,11 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         }
     };
     let child_pid = nix::unistd::Pid::from_raw(child_pid_raw);
-    let mut child_group = match ChildProcessGroup::new(child_pid, child_started_at) {
+    let mut child_group = match ChildProcessGroup::new(
+        child_pid,
+        child_started_at,
+        shared_memory.as_ref().map(|mapping| mapping.name()),
+    ) {
         Ok(group) => group,
         Err(error) => {
             eprintln!("[monitor] Failed to establish child lifecycle ownership: {error}");

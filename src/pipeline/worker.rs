@@ -250,6 +250,11 @@ impl CaptureWorker {
             },
         };
 
+        #[cfg(feature = "test-support")]
+        if suspend_guard.is_some() {
+            crate::test_hooks::pause_at("capture_suspended");
+        }
+
         if Instant::now() >= deadline {
             finish_suspend(&mut suspend_guard);
             let outcome = defer_owned_if_isolated(

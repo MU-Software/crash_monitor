@@ -714,6 +714,8 @@ impl ArtifactTransaction {
                 .map_err(|error| format!("cannot commit report manifest: {error}"))?;
             lock(&self.core).state = TransactionState::Prepared;
             sync_directory(self.staging_dir())?;
+            #[cfg(feature = "test-support")]
+            crate::test_hooks::pause_at("finalize_prepared");
             after_manifest_sync()
         })();
         if prepare_result.is_err() {
@@ -762,6 +764,8 @@ impl ArtifactTransaction {
             core.committed_report = Some(committed.clone());
             core.publication_lease = Some(committed.report_dir.clone());
         }
+        #[cfg(feature = "test-support")]
+        crate::test_hooks::pause_at("finalize_published");
         after_directory_publish();
 
         if let Err(error) = sync_directory(&destination_root) {

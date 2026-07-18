@@ -4,6 +4,7 @@ use mach2::mach_port::{mach_port_allocate, mach_port_insert_right};
 use mach2::message::MACH_MSG_TYPE_MAKE_SEND;
 use mach2::port::{MACH_PORT_RIGHT_RECEIVE, mach_port_t};
 use nix::libc;
+use std::ffi::CString;
 use std::fmt;
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -411,7 +412,8 @@ fn spawn_with_exception_port_impl(
 ///
 /// The guardian blocks in async-signal-safe `read(2)`. Normal shutdown writes
 /// one disarm byte; monitor death closes the CLOEXEC pipe and produces EOF,
-/// causing a group-wide SIGKILL. It owns no Rust heap state in the fork child.
+/// causing a group-wide SIGKILL and unlinking the monitor-owned SHM name. The
+/// optional SHM name is validated and allocated before `fork`.
 pub struct ParentDeathGuard {
     write_fd: libc::c_int,
     guardian_pid: libc::pid_t,
@@ -424,12 +426,16 @@ impl ParentDeathGuard {
     /// # Errors
     /// Returns an error if the CLOEXEC pipe or guardian process cannot be
     /// created.
-    pub fn install(process_group: libc::pid_t) -> Result<Self, String> {
+    pub fn install(process_group: libc::pid_t, shm_name: Option<&str>) -> Result<Self, String> {
         if process_group <= 1 {
             return Err(format!(
                 "parent-death guard requires a positive child PGID, got {process_group}"
             ));
         }
+        let shm_name = shm_name
+            .map(CString::new)
+            .transpose()
+            .map_err(|error| format!("parent-death guard SHM name contains NUL: {error}"))?;
         let mut pipe_fds = [-1; 2];
         // SAFETY: `pipe_fds` provides storage for exactly two descriptors.
         if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
@@ -478,10 +484,16 @@ impl ParentDeathGuard {
                     }
                     if read_result == 0 {
                         libc::kill(-process_group, libc::SIGKILL);
+                        if let Some(name) = &shm_name {
+                            libc::shm_unlink(name.as_ptr());
+                        }
                         libc::_exit(0);
                     }
                     if *libc::__error() != libc::EINTR {
                         libc::kill(-process_group, libc::SIGKILL);
+                        if let Some(name) = &shm_name {
+                            libc::shm_unlink(name.as_ptr());
+                        }
                         libc::_exit(1);
                     }
                 }
@@ -690,6 +702,22 @@ mod tests {
 
     #[test]
     fn parent_death_guard_kills_the_owned_process_group_on_pipe_eof() {
+        let shm_name = format!("/cm_g_{:016x}", uuid::Uuid::new_v4().as_u128() as u64);
+        let c_shm_name = CString::new(shm_name.as_str()).unwrap();
+        let shm_fd = unsafe {
+            libc::shm_open(
+                c_shm_name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            )
+        };
+        assert!(
+            shm_fd >= 0,
+            "create guardian SHM fixture: {}",
+            std::io::Error::last_os_error()
+        );
+        unsafe { libc::close(shm_fd) };
+
         let mut ready_pipe = [-1; 2];
         assert_eq!(unsafe { libc::pipe(ready_pipe.as_mut_ptr()) }, 0);
         let pid = unsafe { libc::fork() };
@@ -726,7 +754,8 @@ mod tests {
             libc::close(ready_pipe[0]);
         }
         assert_eq!(unsafe { libc::getpgid(pid) }, pid);
-        let mut guard = ParentDeathGuard::install(pid).expect("install parent-death guard");
+        let mut guard =
+            ParentDeathGuard::install(pid, Some(&shm_name)).expect("install parent-death guard");
 
         // Simulate abrupt monitor death by closing the only parent-side pipe
         // descriptor without sending the normal disarm byte.
@@ -752,5 +781,18 @@ mod tests {
         }
         assert!(libc::WIFSIGNALED(child_status));
         assert_eq!(libc::WTERMSIG(child_status), libc::SIGKILL);
+
+        let reopened = unsafe { libc::shm_open(c_shm_name.as_ptr(), libc::O_RDONLY, 0) };
+        if reopened >= 0 {
+            unsafe {
+                libc::close(reopened);
+                libc::shm_unlink(c_shm_name.as_ptr());
+            }
+        }
+        assert_eq!(reopened, -1, "guardian must unlink monitor-owned SHM");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOENT)
+        );
     }
 }

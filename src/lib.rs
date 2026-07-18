@@ -32,6 +32,8 @@ mod postprocessors;
 mod preprocessors;
 pub mod shm;
 pub mod telemetry;
+#[cfg(feature = "test-support")]
+mod test_hooks;
 mod utils;
 mod watchdog;
 

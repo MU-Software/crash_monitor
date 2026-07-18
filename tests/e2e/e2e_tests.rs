@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::mem::{offset_of, size_of};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -538,6 +539,50 @@ fn read_fixture_state(path: &Path, deadline: Instant) -> (nix::unistd::Pid, Stri
             "fixture did not publish process state"
         );
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn wait_for_stage_marker(path: &Path, stage: &str, deadline: Instant) {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            assert_eq!(
+                contents.lines().next(),
+                Some(stage),
+                "unexpected lifecycle marker contents"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "monitor did not reach lifecycle stage {stage}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn assert_no_exposed_partial_reports(data_dir: &Path) {
+    let pending = data_dir.join("crashes/pending");
+    if let Ok(entries) = std::fs::read_dir(&pending) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                name.starts_with('.'),
+                "partial report became visible in pending: {}",
+                entry.path().display()
+            );
+        }
+    }
+
+    let sent = archive_dir(data_dir);
+    if let Ok(entries) = std::fs::read_dir(&sent) {
+        for entry in entries.flatten() {
+            assert!(
+                committed_report_artifact(&entry, None).is_some(),
+                "sent contains an incomplete or invalid report: {}",
+                entry.path().display()
+            );
+        }
     }
 }
 
@@ -1147,6 +1192,93 @@ fn test_e2e_sigusr1_snapshot_uses_the_real_signal_pipe() {
             .is_some_and(|threads| !threads.is_empty()),
         "capture-helper result must preserve collected thread data"
     );
+}
+
+#[test]
+#[ignore = "requires a signed test-support monitor; run make e2e-required"]
+fn test_e2e_monitor_kill_recovery_covers_capture_and_finalize_boundaries() {
+    if !require_prerequisites() {
+        return;
+    }
+
+    let stages = [
+        ("capture_suspended", 0_usize),
+        ("finalize_staging", 0),
+        ("finalize_prepared", 1),
+        ("finalize_published", 1),
+    ];
+    for (stage, expected_reports) in stages {
+        let data_dir = TempDir::new().expect("create stage temp dir");
+        let state_file = data_dir.path().join(format!("{stage}.fixture-state"));
+        let marker_file = data_dir.path().join(format!("{stage}.marker"));
+        let monitor = monitor_cmd(data_dir.path())
+            .env("CRASH_APP_STATE_FILE", &state_file)
+            .env("CRASH_MONITOR_TEST_PAUSE_STAGE", stage)
+            .env("CRASH_MONITOR_TEST_STAGE_MARKER", &marker_file)
+            .arg("run")
+            .arg(crash_app_path())
+            .arg("wait")
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn crash_monitor for {stage}: {error}"));
+        let (child_pid, shm_name) =
+            read_fixture_state(&state_file, Instant::now() + Duration::from_secs(5));
+        let mut processes = FixtureProcessGuard {
+            monitor,
+            child_pid,
+            shm_name,
+        };
+
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(
+                i32::try_from(processes.monitor.id()).expect("monitor PID fits i32"),
+            ),
+            nix::sys::signal::Signal::SIGUSR1,
+        )
+        .unwrap_or_else(|error| panic!("request snapshot for {stage}: {error}"));
+        wait_for_stage_marker(
+            &marker_file,
+            stage,
+            Instant::now() + Duration::from_secs(10),
+        );
+
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(
+                i32::try_from(processes.monitor.id()).expect("monitor PID fits i32"),
+            ),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap_or_else(|error| panic!("kill monitor at {stage}: {error}"));
+        let status = processes
+            .monitor
+            .wait()
+            .unwrap_or_else(|error| panic!("reap monitor at {stage}: {error}"));
+        assert_eq!(status.signal(), Some(SIGKILL_NUMBER));
+        processes.assert_cleaned();
+
+        let restart = monitor_cmd(data_dir.path())
+            .arg("run")
+            .arg(crash_app_path())
+            .arg("clean")
+            .output_with_deadline(E2E_MONITOR_DEADLINE)
+            .unwrap_or_else(|error| panic!("restart monitor after {stage}: {error}"));
+        assert!(
+            restart.status.success(),
+            "restart after {stage} failed: {}",
+            String::from_utf8_lossy(&restart.stderr)
+        );
+
+        assert_no_exposed_partial_reports(data_dir.path());
+        let reports = find_reports(&archive_dir(data_dir.path()), "snapshot");
+        assert_eq!(
+            reports.len(),
+            expected_reports,
+            "unexpected recovered report count after killing at {stage}"
+        );
+        for report_path in reports {
+            let report = read_report_json(&report_path);
+            assert_report_identity(&report_path, &report, "snapshot");
+        }
+    }
 }
 
 #[test]
