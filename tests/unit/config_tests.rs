@@ -384,6 +384,36 @@ fn enabled_duration_and_count_ranges_are_validated() {
 }
 
 #[test]
+fn watchdog_duration_error_does_not_imply_an_enable_toggle() {
+    let error = serde_json::from_str::<CrashReporterConfig>(
+        r#"{"watchdog":{"threshold_ms":0}}"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "watchdog.threshold_ms must be greater than zero"
+    );
+}
+
+#[test]
+fn watchdog_check_interval_cannot_exceed_threshold() {
+    let error = serde_json::from_str::<CrashReporterConfig>(
+        r#"{"watchdog":{"threshold_ms":100,"check_interval_ms":101}}"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "watchdog.check_interval_ms must not exceed watchdog.threshold_ms"
+    );
+}
+
+#[test]
 fn zero_rate_limit_and_retention_thresholds_keep_documented_sentinel_meaning() {
     let config = serde_json::from_str::<CrashReporterConfig>(
         r#"{

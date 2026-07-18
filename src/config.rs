@@ -438,13 +438,6 @@ impl CrashReporterConfig {
                     && self.post_processors.log_rotator.max_size_mb == 0,
                 "post_processors.log_rotator.max_size_mb",
             ),
-            (self.watchdog.warmup_ms == 0, "watchdog.warmup_ms"),
-            (self.watchdog.threshold_ms == 0, "watchdog.threshold_ms"),
-            (
-                self.watchdog.check_interval_ms == 0,
-                "watchdog.check_interval_ms",
-            ),
-            (self.watchdog.cooldown_ms == 0, "watchdog.cooldown_ms"),
         ] {
             if invalid {
                 return Err(ConfigValidationError::InvalidNumericRange {
@@ -453,6 +446,7 @@ impl CrashReporterConfig {
                 });
             }
         }
+        self.watchdog.validate()?;
         let trigger_category_enabled = self.triggers.enabled;
         let triggers = ValidatedTriggersConfig {
             crash: trigger_category_enabled && self.triggers.crash.enabled,
@@ -547,6 +541,37 @@ impl Default for WatchdogConfig {
             check_interval_ms: 2_000,
             cooldown_ms: 60_000,
         }
+    }
+}
+
+impl WatchdogConfig {
+    /// Validate watchdog timings after every source of configuration,
+    /// including explicitly enabled environment overrides.
+    ///
+    /// # Errors
+    /// Returns [`ConfigValidationError::InvalidNumericRange`] when a timing is
+    /// zero or the polling interval exceeds the ANR threshold.
+    pub fn validate(self) -> Result<Self, ConfigValidationError> {
+        for (value, field) in [
+            (self.warmup_ms, "watchdog.warmup_ms"),
+            (self.threshold_ms, "watchdog.threshold_ms"),
+            (self.check_interval_ms, "watchdog.check_interval_ms"),
+            (self.cooldown_ms, "watchdog.cooldown_ms"),
+        ] {
+            if value == 0 {
+                return Err(ConfigValidationError::InvalidNumericRange {
+                    field,
+                    requirement: "must be greater than zero",
+                });
+            }
+        }
+        if self.check_interval_ms > self.threshold_ms {
+            return Err(ConfigValidationError::InvalidNumericRange {
+                field: "watchdog.check_interval_ms",
+                requirement: "must not exceed watchdog.threshold_ms",
+            });
+        }
+        Ok(self)
     }
 }
 

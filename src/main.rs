@@ -118,9 +118,9 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 fn watchdog_config_with_explicit_env_overrides(
     config: config::WatchdogConfig,
-) -> config::WatchdogConfig {
+) -> Result<config::WatchdogConfig, config::ConfigValidationError> {
     if std::env::var_os("CRASH_MONITOR_ALLOW_ENV_OVERRIDES").as_deref() != Some(OsStr::new("1")) {
-        return config;
+        return Ok(config);
     }
     config::WatchdogConfig {
         warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", config.warmup_ms),
@@ -131,6 +131,7 @@ fn watchdog_config_with_explicit_env_overrides(
         ),
         cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", config.cooldown_ms),
     }
+    .validate()
 }
 
 const CRASH_MONITOR_SHM_ENV: &str = "CRASH_MONITOR_SHM";
@@ -878,15 +879,24 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Configuration alone does not arm it: the child must publish its first
     // heartbeat and the shared-memory producer-ready handshake. Environment
     // overrides allow E2E tests to use shorter timeouts.
-    let anr_config = pl.report_enabled(pipeline::ReportType::Anr).then(|| {
-        let watchdog = watchdog_config_with_explicit_env_overrides(validated_config.watchdog());
-        event_loop::AnrConfig {
+    let anr_config = if pl.report_enabled(pipeline::ReportType::Anr) {
+        let watchdog = match watchdog_config_with_explicit_env_overrides(validated_config.watchdog())
+        {
+            Ok(watchdog) => watchdog,
+            Err(error) => {
+                eprintln!("[monitor] Invalid watchdog environment override: {error}");
+                return event_loop::EXIT_MONITOR_INTERNAL;
+            }
+        };
+        Some(event_loop::AnrConfig {
             warmup_ms: watchdog.warmup_ms,
             threshold_ms: watchdog.threshold_ms,
             check_interval_ms: watchdog.check_interval_ms,
             cooldown_ms: watchdog.cooldown_ms,
-        }
-    });
+        })
+    } else {
+        None
+    };
 
     // Build event source from Mac-specific channels
     #[allow(clippy::cast_sign_loss)] // PID is always positive
