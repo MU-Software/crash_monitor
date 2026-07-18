@@ -352,14 +352,16 @@ fn test_format_environment_none() {
 #[test]
 fn test_format_environment_some() {
     let env = RawEnvironment {
-        os_version: "15.3".to_string(),
-        os_build: "24D60".to_string(),
+        kernel_release: "24.3.0".to_string(),
+        kernel_version: "Darwin Kernel Version 24.3.0".to_string(),
         arch: "arm64".to_string(),
         hostname: "mac".to_string(),
+        variables_source: "spawn_environment_snapshot",
         env_vars: vec![("LANG".to_string(), "en_US".to_string())],
     };
     let json = format_environment(Some(&env)).expect("Some");
-    assert_eq!(json["os_version"], "15.3");
+    assert_eq!(json["kernel_release"], "24.3.0");
+    assert_eq!(json["variables_source"], "spawn_environment_snapshot");
     assert_eq!(json["arch"], "arm64");
     assert_eq!(json["env_vars"]["LANG"], "en_US");
 }

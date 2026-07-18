@@ -562,10 +562,10 @@
 
 ### P1-44. environment 수집의 출처·이름·기본값을 정확히 한다
 
-- [ ] monitor의 현재 environment를 임의 target environment라고 표현하지 않고, spawn 시 child에 전달한 snapshot을 수집한다.
-- [ ] child-only 추가 값과 child가 runtime에 변경한 값은 snapshot에 반영되지 않는다는 한계를 기록한다.
-- [ ] Darwin kernel release를 `os_version`이라고 부르지 말고 `kernel_release`로 바꾸거나 macOS product version을 별도 수집한다.
-- [ ] `MemoryCollector`의 실제 데이터 의존성이 없는 `ThreadCollector` dependency를 제거한다.
+- [x] monitor의 현재 environment를 임의 target environment라고 표현하지 않고, spawn 시 child에 전달한 snapshot을 수집한다.
+- [x] child-only 추가 값과 child가 runtime에 변경한 값은 snapshot에 반영되지 않는다는 한계를 기록한다.
+- [x] Darwin kernel release를 `os_version`이라고 부르지 말고 `kernel_release`로 바꾸거나 macOS product version을 별도 수집한다.
+- [x] `MemoryCollector`의 실제 데이터 의존성이 없는 `ThreadCollector` dependency를 제거한다.
 
 범위: `src/collectors/environment.rs`, `src/collectors/memory.rs`.
 

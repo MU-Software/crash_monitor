@@ -505,10 +505,11 @@ fn format_environment(
         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
         .collect();
     Some(serde_json::json!({
-        "os_version": env.os_version,
-        "os_build": env.os_build,
+        "kernel_release": env.kernel_release,
+        "kernel_version": env.kernel_version,
         "arch": env.arch,
         "hostname": env.hostname,
+        "variables_source": env.variables_source,
         "env_vars": vars,
     }))
 }

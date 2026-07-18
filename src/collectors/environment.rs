@@ -14,10 +14,11 @@ const SENSITIVE_PATTERNS: &[&str] = &["TOKEN", "SECRET", "KEY", "PASSWORD", "CRE
 
 /// Raw environment data captured by the collector.
 pub struct RawEnvironment {
-    pub os_version: String,
-    pub os_build: String,
+    pub kernel_release: String,
+    pub kernel_version: String,
     pub arch: String,
     pub hostname: String,
+    pub variables_source: &'static str,
     pub env_vars: Vec<(String, String)>,
 }
 
@@ -94,7 +95,7 @@ impl Collector for EnvironmentCollector {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        let (os_version, os_build, arch) = match uname() {
+        let (kernel_release, kernel_version, arch) = match uname() {
             Ok(info) => (
                 info.release().to_string_lossy().into_owned(),
                 info.version().to_string_lossy().into_owned(),
@@ -109,7 +110,9 @@ impl Collector for EnvironmentCollector {
 
         context.checkpoint()?;
         let mut env_vars = Vec::new();
+        let variables_source;
         if let Some(environment) = &self.child_environment {
+            variables_source = "spawn_environment_snapshot";
             for (key, value) in environment.reportable_entries() {
                 context.checkpoint()?;
                 if !is_sensitive(key) {
@@ -117,21 +120,18 @@ impl Collector for EnvironmentCollector {
                 }
             }
         } else {
-            // Retained for library callers and unit tests that do not spawn a
-            // child. Production injects the final posix_spawn environment.
-            for (key, value) in std::env::vars() {
-                context.checkpoint()?;
-                if !is_sensitive(&key) {
-                    env_vars.push((key, value));
-                }
-            }
+            // Never present the monitor's environment as target data. Library
+            // callers that do not provide the spawn snapshot get an explicitly
+            // unavailable source and an empty variable map.
+            variables_source = "unavailable";
         }
 
         data.raw.environment = Some(RawEnvironment {
-            os_version,
-            os_build,
+            kernel_release,
+            kernel_version,
             arch,
             hostname,
+            variables_source,
             env_vars,
         });
 
