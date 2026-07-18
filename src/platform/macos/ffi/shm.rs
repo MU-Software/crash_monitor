@@ -4,9 +4,11 @@
 //! implementation using `CreateFileMapping` / `MapViewOfFile`.
 
 use std::ffi::CString;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
 
 use nix::libc;
+use uuid::Uuid;
 
 use crate::shm::types::{
     CRUMB_MAX_THREADS, CRUMB_RING_CAPACITY, FOOTER_OFFSET, SCREENSHOT_HEIGHT, SCREENSHOT_SLOTS,
@@ -53,45 +55,124 @@ impl ShmMapping {
     }
 }
 
+const SHM_CREATE_ATTEMPTS: usize = 8;
+
+struct PendingShm {
+    name: String,
+    c_name: CString,
+    fd: Option<OwnedFd>,
+    owns_name: bool,
+}
+
+impl PendingShm {
+    fn publish_mapping(mut self, base: *mut u8) -> ShmMapping {
+        drop(self.fd.take());
+        self.owns_name = false;
+        ShmMapping {
+            name: self.name.clone(),
+            base,
+            size: SHM_TOTAL_SIZE,
+        }
+    }
+}
+
+impl Drop for PendingShm {
+    fn drop(&mut self) {
+        // `OwnedFd` closes after this body. Unlinking first prevents new opens
+        // while the failed creator still owns the last descriptor.
+        if self.owns_name {
+            unsafe {
+                libc::shm_unlink(self.c_name.as_ptr());
+            }
+        }
+    }
+}
+
+fn random_shm_name(monitor_pid: u32) -> String {
+    format!("/crash_monitor_{monitor_pid}_{}", Uuid::new_v4().simple())
+}
+
+fn open_exclusive_shm(monitor_pid: u32) -> Result<PendingShm, String> {
+    for _ in 0..SHM_CREATE_ATTEMPTS {
+        let name = random_shm_name(monitor_pid);
+        let c_name = CString::new(name.as_str())
+            .map_err(|error| format!("shared-memory name contains NUL: {error}"))?;
+        // SAFETY: name is NUL-terminated and O_EXCL ensures this creator never
+        // attaches to or truncates an existing object.
+        let raw_fd = unsafe {
+            libc::shm_open(
+                c_name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            )
+        };
+        if raw_fd >= 0 {
+            // SAFETY: successful shm_open returned one newly-owned descriptor.
+            let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            return Ok(PendingShm {
+                name,
+                c_name,
+                fd: Some(fd),
+                owns_name: true,
+            });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EEXIST) {
+            return Err(format!("shm_open({name}) failed: {error}"));
+        }
+    }
+    Err(format!(
+        "failed to allocate a unique shared-memory name after {SHM_CREATE_ATTEMPTS} attempts"
+    ))
+}
+
+fn validate_created_object(fd: &OwnedFd) -> Result<(), String> {
+    // SAFETY: `stat` is writable and fd is live for the call.
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &raw mut stat) } != 0 {
+        return Err(format!("fstat failed: {}", std::io::Error::last_os_error()));
+    }
+    if stat.st_uid != unsafe { libc::geteuid() } {
+        return Err(format!(
+            "shared-memory owner mismatch: expected uid {}, found {}",
+            unsafe { libc::geteuid() },
+            stat.st_uid
+        ));
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(format!(
+            "shared-memory object is not regular: mode={:#o}",
+            stat.st_mode
+        ));
+    }
+    if stat.st_size != SHM_TOTAL_SIZE as libc::off_t {
+        return Err(format!(
+            "shared-memory size mismatch: expected {SHM_TOTAL_SIZE}, found {}",
+            stat.st_size
+        ));
+    }
+    Ok(())
+}
+
 /// Create a new POSIX shared memory region for the given monitor PID.
 ///
 /// # Errors
 /// Returns an error if `shm_open`, `ftruncate`, or `mmap` fails.
 pub fn create_shared_memory(monitor_pid: u32) -> Result<ShmMapping, String> {
-    let name = format!("/crash_monitor_{monitor_pid}");
-    let c_name = CString::new(name.as_str()).map_err(|e| format!("CString::new failed: {e}"))?;
-
-    // Try to unlink any stale segment with the same name (e.g., from a crashed test).
-    // Errors are ignored — the segment may not exist.
-    unsafe {
-        libc::shm_unlink(c_name.as_ptr());
-    }
-
-    // SAFETY: shm_open creates/opens a POSIX shared memory object.
-    let fd = unsafe {
-        libc::shm_open(
-            c_name.as_ptr(),
-            libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(format!(
-            "shm_open({name}) failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
+    let pending = open_exclusive_shm(monitor_pid)?;
+    let fd = pending
+        .fd
+        .as_ref()
+        .expect("pending shm owns its descriptor");
 
     // Size the region
     #[allow(clippy::cast_possible_wrap)]
-    let rc = unsafe { libc::ftruncate(fd, SHM_TOTAL_SIZE as libc::off_t) };
+    let rc = unsafe { libc::ftruncate(fd.as_raw_fd(), SHM_TOTAL_SIZE as libc::off_t) };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
-        unsafe {
-            libc::close(fd);
-        }
         return Err(format!("ftruncate failed: {err}"));
     }
+    validate_created_object(fd)?;
 
     // Map the region
     let base = unsafe {
@@ -100,26 +181,18 @@ pub fn create_shared_memory(monitor_pid: u32) -> Result<ShmMapping, String> {
             SHM_TOTAL_SIZE,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
-            fd,
+            fd.as_raw_fd(),
             0,
         )
     };
-    unsafe {
-        libc::close(fd);
-    } // fd no longer needed after mmap
-
     if base == libc::MAP_FAILED {
         return Err(format!("mmap failed: {}", std::io::Error::last_os_error()));
     }
 
     let base = base.cast::<u8>();
 
-    // Zero the entire region
-    unsafe {
-        ptr::write_bytes(base, 0, SHM_TOTAL_SIZE);
-    }
-
-    // Write header
+    // A newly-created, extended POSIX shm object reads as zero without eagerly
+    // dirtying every payload page. Initialize only schema metadata and canary.
     // SAFETY: mmap returns page-aligned memory (4KB+), so casting to ShmHeader is safe.
     #[allow(clippy::cast_ptr_alignment)]
     let header = base.cast::<ShmHeader>();
@@ -153,13 +226,12 @@ pub fn create_shared_memory(monitor_pid: u32) -> Result<ShmMapping, String> {
 
     #[allow(clippy::cast_precision_loss)] // display only
     let size_mb = SHM_TOTAL_SIZE as f64 / (1024.0 * 1024.0);
-    eprintln!("[monitor] Shared memory created: {name} ({SHM_TOTAL_SIZE} bytes, {size_mb:.1} MB)");
+    eprintln!(
+        "[monitor] Shared memory created: {} ({SHM_TOTAL_SIZE} bytes, {size_mb:.1} MB)",
+        pending.name
+    );
 
-    Ok(ShmMapping {
-        name,
-        base,
-        size: SHM_TOTAL_SIZE,
-    })
+    Ok(pending.publish_mapping(base))
 }
 
 impl Drop for ShmMapping {
@@ -174,5 +246,19 @@ impl Drop for ShmMapping {
             }
         }
         eprintln!("[monitor] Shared memory unlinked: {}", self.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_names_keep_pid_prefix_and_do_not_repeat() {
+        let first = random_shm_name(42);
+        let second = random_shm_name(42);
+        assert!(first.starts_with("/crash_monitor_42_"));
+        assert_ne!(first, second);
+        assert_eq!(first.len(), "/crash_monitor_42_".len() + 32);
     }
 }

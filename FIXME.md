@@ -295,10 +295,10 @@
 
 ### P1-16. SHM 생성과 초기화를 안전하고 지연 할당 친화적으로 만든다
 
-- [ ] PID 기반 이름 대신 random nonce를 포함한 이름과 `O_CREAT|O_EXCL`을 사용하고 `EEXIST`는 새 nonce로 재시도한다.
-- [ ] unlink와 open 사이 TOCTOU를 줄이고 open 뒤 owner, type, size를 `fstat`로 검증한다.
-- [ ] ftruncate/mmap 등 모든 중간 실패에서 fd close와 `shm_unlink`가 실행되는 create guard를 도입한다.
-- [ ] 새 약 50MB mapping 전체를 `write_bytes(0)`하지 않고 필요한 header/state/canary만 초기화한다.
+- [x] PID 기반 이름 대신 random nonce를 포함한 이름과 `O_CREAT|O_EXCL`을 사용하고 `EEXIST`는 새 nonce로 재시도한다.
+- [x] unlink와 open 사이 TOCTOU를 줄이고 open 뒤 owner, type, size를 `fstat`로 검증한다.
+- [x] ftruncate/mmap 등 모든 중간 실패에서 fd close와 `shm_unlink`가 실행되는 create guard를 도입한다.
+- [x] 새 약 50MB mapping 전체를 `write_bytes(0)`하지 않고 필요한 header/state/canary만 초기화한다.
 
 범위: `src/platform/macos/ffi/shm.rs`.
 
