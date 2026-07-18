@@ -173,6 +173,7 @@ fn resolver_reads_and_parses_regular_file_from_open_descriptor() {
         architecture: None,
         text_start: Some(0x1000),
         text_end: Some(0x2000),
+        segments: Vec::new(),
     };
 
     let symbols =

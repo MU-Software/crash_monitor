@@ -289,6 +289,15 @@ pub struct LoadedImageReport {
     pub text_start: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_end: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<LoadedImageSegmentReport>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LoadedImageSegmentReport {
+    pub name: String,
+    pub start: String,
+    pub end: String,
 }
 
 #[derive(Serialize, Deserialize)]

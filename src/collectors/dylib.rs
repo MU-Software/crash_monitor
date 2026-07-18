@@ -33,6 +33,16 @@ pub struct RawImageData {
     pub text_start: Option<u64>,
     #[serde(default)]
     pub text_end: Option<u64>,
+    #[serde(default)]
+    pub segments: Vec<RawImageSegment>,
+}
+
+/// Runtime address range of one complete Mach-O segment command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RawImageSegment {
+    pub name: String,
+    pub start: u64,
+    pub end: u64,
 }
 
 // ═══════════════════════════════════════════════════
@@ -181,6 +191,7 @@ fn enumerate_loaded_images(
             architecture: None,
             text_start: None,
             text_end: None,
+            segments: Vec::new(),
         });
     }
 
@@ -311,14 +322,17 @@ fn compute_image_metadata(
     let Some(commands_address) = base_address.checked_add(32) else {
         return;
     };
-    let Ok(cmds) = platform.vm_read(task, commands_address, sizeofcmds) else {
-        return;
+    let cmds = match platform.vm_read(task, commands_address, sizeofcmds) {
+        Ok(bytes) | Err(crate::platform::VmReadError::Partial { bytes, .. }) => bytes,
+        Err(crate::platform::VmReadError::Platform(_)) => return,
     };
     if context.checkpoint().is_err() {
         return;
     }
 
     let mut offset = 0;
+    let mut parsed_segments = Vec::new();
+    let mut text_segment = None;
     for _ in 0..ncmds {
         if context.checkpoint().is_err() {
             return;
@@ -332,47 +346,57 @@ fn compute_image_metadata(
         let Some(cmdsize) = read_u32_le(&cmds, offset + 4).map(|value| value as usize) else {
             break;
         };
-
-        if cmd == LC_SEGMENT_64 && cmdsize >= 72 {
-            // segment_command_64: cmd(4) + cmdsize(4) + segname(16) + vmaddr(8) + ...
-            // segname at offset+8, vmaddr at offset+24
-            let Some(segname_bytes) = cmds.get(offset + 8..offset + 24) else {
-                break;
-            };
-            let segname_end = segname_bytes.iter().position(|&b| b == 0).unwrap_or(16);
-            let Ok(segname) = std::str::from_utf8(&segname_bytes[..segname_end]) else {
-                break;
-            };
-
-            if segname == "__TEXT" {
-                let Some(vmaddr) = read_u64_le(&cmds, offset + 24) else {
-                    break;
-                };
-                let Some(vmsize) = read_u64_le(&cmds, offset + 32) else {
-                    break;
-                };
-                image.slide = base_address.checked_sub(vmaddr);
-                image.text_start = Some(base_address);
-                image.text_end = base_address.checked_add(vmsize);
-            }
-        } else if cmd == LC_UUID
-            && cmdsize >= 24
-            && let Some(uuid) = cmds.get(offset + 8..offset + 24)
-        {
-            image.uuid = Some(format_uuid(uuid));
-        }
-
-        if cmdsize == 0 {
+        if cmdsize < 8 {
             break;
         }
         let Some(next) = offset.checked_add(cmdsize) else {
             break;
         };
-        if next > cmds.len() {
+        let Some(command) = cmds.get(offset..next) else {
+            // A partial vm_read may end in the middle of the next command.
+            // Preserve every earlier complete command and stop here.
             break;
+        };
+
+        if cmd == LC_SEGMENT_64 && cmdsize >= 72 {
+            // segment_command_64: cmd(4) + cmdsize(4) + segname(16) + vmaddr(8) + ...
+            // segname at offset+8, vmaddr at offset+24
+            let segname_bytes = &command[8..24];
+            let segname_end = segname_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+            if let Ok(segname) = std::str::from_utf8(&segname_bytes[..segname_end]) {
+                let vmaddr = read_u64_le(command, 24).unwrap_or_default();
+                let vmsize = read_u64_le(command, 32).unwrap_or_default();
+                parsed_segments.push((segname.to_string(), vmaddr, vmsize));
+                if segname == "__TEXT" {
+                    text_segment = Some((vmaddr, vmsize));
+                }
+            }
+        } else if cmd == LC_UUID && cmdsize >= 24 {
+            image.uuid = Some(format_uuid(&command[8..24]));
         }
+
         offset = next;
     }
+
+    let Some((text_vmaddr, text_vmsize)) = text_segment else {
+        return;
+    };
+    let Some(slide) = base_address.checked_sub(text_vmaddr) else {
+        return;
+    };
+    image.slide = Some(slide);
+    image.text_start = text_vmaddr.checked_add(slide);
+    image.text_end = image
+        .text_start
+        .and_then(|start| start.checked_add(text_vmsize));
+    image.segments = parsed_segments
+        .into_iter()
+        .filter_map(|(name, vmaddr, vmsize)| {
+            let start = vmaddr.checked_add(slide)?;
+            let end = start.checked_add(vmsize)?;
+            (start < end).then_some(RawImageSegment { name, start, end })
+        })
+        .collect();
 }
 
 fn format_uuid(bytes: &[u8]) -> String {

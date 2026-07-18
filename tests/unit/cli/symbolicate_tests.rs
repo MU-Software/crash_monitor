@@ -36,6 +36,7 @@ fn test_build_slide_map_sorted() {
             architecture: None,
             text_start: None,
             text_end: None,
+            segments: Vec::new(),
         },
         LoadedImageReport {
             path: "/a".into(),
@@ -45,6 +46,7 @@ fn test_build_slide_map_sorted() {
             architecture: None,
             text_start: None,
             text_end: None,
+            segments: Vec::new(),
         },
     ];
     let slides = build_slide_map(&images);
@@ -119,6 +121,7 @@ fn test_build_slide_map_no_slide() {
         architecture: None,
         text_start: None,
         text_end: None,
+        segments: Vec::new(),
     }];
     let slides = build_slide_map(&images);
     assert_eq!(slides.len(), 1);
@@ -192,6 +195,7 @@ fn image_address_matching_uses_exact_text_range() {
         architecture: Some("arm64".into()),
         text_start: Some("0x1000".into()),
         text_end: Some("0x2000".into()),
+        segments: Vec::new(),
     };
     assert!(image_contains(&image, 0x1000));
     assert!(image_contains(&image, 0x1fff));

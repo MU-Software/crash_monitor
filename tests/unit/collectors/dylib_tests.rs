@@ -10,6 +10,11 @@ fn make_image(path: &str, base: u64) -> RawImageData {
         architecture: None,
         text_start: Some(base),
         text_end: base.checked_add(0x1000),
+        segments: vec![RawImageSegment {
+            name: "__TEXT".into(),
+            start: base,
+            end: base + 0x1000,
+        }],
     }
 }
 
@@ -62,19 +67,24 @@ fn macho_metadata_collects_uuid_architecture_slide_and_text_range() {
     let mut header = vec![0_u8; 32];
     header[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
     header[4..8].copy_from_slice(&0x0100_000c_u32.to_le_bytes());
-    header[16..20].copy_from_slice(&2_u32.to_le_bytes());
-    header[20..24].copy_from_slice(&96_u32.to_le_bytes());
+    header[16..20].copy_from_slice(&3_u32.to_le_bytes());
+    header[20..24].copy_from_slice(&168_u32.to_le_bytes());
     platform.memory.insert(base, header);
 
-    let mut commands = vec![0_u8; 96];
+    let mut commands = vec![0_u8; 168];
     commands[0..4].copy_from_slice(&LC_SEGMENT_64.to_le_bytes());
     commands[4..8].copy_from_slice(&72_u32.to_le_bytes());
     commands[8..14].copy_from_slice(b"__TEXT");
     commands[24..32].copy_from_slice(&0x4_000_u64.to_le_bytes());
     commands[32..40].copy_from_slice(&0x3_000_u64.to_le_bytes());
-    commands[72..76].copy_from_slice(&LC_UUID.to_le_bytes());
-    commands[76..80].copy_from_slice(&24_u32.to_le_bytes());
-    commands[80..96].copy_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    commands[72..76].copy_from_slice(&LC_SEGMENT_64.to_le_bytes());
+    commands[76..80].copy_from_slice(&72_u32.to_le_bytes());
+    commands[80..86].copy_from_slice(b"__DATA");
+    commands[96..104].copy_from_slice(&0x7_000_u64.to_le_bytes());
+    commands[104..112].copy_from_slice(&0x1_000_u64.to_le_bytes());
+    commands[144..148].copy_from_slice(&LC_UUID.to_le_bytes());
+    commands[148..152].copy_from_slice(&24_u32.to_le_bytes());
+    commands[152..168].copy_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     platform.memory.insert(base + 32, commands);
 
     let mut image = make_image("/bin/app", base);
@@ -84,8 +94,62 @@ fn macho_metadata_collects_uuid_architecture_slide_and_text_range() {
     assert_eq!(image.text_start, Some(base));
     assert_eq!(image.text_end, Some(base + 0x3_000));
     assert_eq!(
+        image.segments,
+        vec![
+            RawImageSegment {
+                name: "__TEXT".into(),
+                start: base,
+                end: base + 0x3_000,
+            },
+            RawImageSegment {
+                name: "__DATA".into(),
+                start: base + 0x3_000,
+                end: base + 0x4_000,
+            },
+        ]
+    );
+    assert_eq!(
         image.uuid.as_deref(),
         Some("00010203-0405-0607-0809-0a0b0c0d0e0f")
+    );
+}
+
+#[test]
+fn macho_metadata_preserves_complete_commands_from_partial_vm_read() {
+    let mut platform = crate::platform::mock::MockPlatform::default();
+    let base = 0x2_0000;
+    let mut header = vec![0_u8; 32];
+    header[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
+    header[16..20].copy_from_slice(&2_u32.to_le_bytes());
+    header[20..24].copy_from_slice(&144_u32.to_le_bytes());
+    platform.memory.insert(base, header);
+
+    let mut partial_commands = vec![0_u8; 80];
+    partial_commands[0..4].copy_from_slice(&LC_SEGMENT_64.to_le_bytes());
+    partial_commands[4..8].copy_from_slice(&72_u32.to_le_bytes());
+    partial_commands[8..14].copy_from_slice(b"__TEXT");
+    partial_commands[24..32].copy_from_slice(&0x8_000_u64.to_le_bytes());
+    partial_commands[32..40].copy_from_slice(&0x2_000_u64.to_le_bytes());
+    partial_commands[72..76].copy_from_slice(&LC_SEGMENT_64.to_le_bytes());
+    partial_commands[76..80].copy_from_slice(&72_u32.to_le_bytes());
+    platform.memory.insert(base + 32, partial_commands);
+
+    let mut image = make_image("/bin/partial", base);
+    image.text_start = None;
+    image.text_end = None;
+    image.segments.clear();
+    compute_image_metadata(&platform, 0, &mut image, &PluginContext::without_deadline());
+
+    assert_eq!(image.slide, Some(base - 0x8_000));
+    assert_eq!(image.text_start, Some(base));
+    assert_eq!(image.text_end, Some(base + 0x2_000));
+    assert_eq!(
+        image.segments,
+        vec![RawImageSegment {
+            name: "__TEXT".into(),
+            start: base,
+            end: base + 0x2_000,
+        }]
     );
 }
 

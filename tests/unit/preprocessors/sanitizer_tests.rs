@@ -38,6 +38,7 @@ fn test_masks_username_in_image_paths() {
         architecture: None,
         text_start: None,
         text_end: None,
+        segments: Vec::new(),
     });
 
     sanitizer
@@ -84,6 +85,7 @@ fn test_no_username_is_noop() {
         architecture: None,
         text_start: None,
         text_end: None,
+        segments: Vec::new(),
     });
 
     sanitizer
@@ -158,6 +160,7 @@ fn test_preserves_non_path_strings() {
         architecture: None,
         text_start: None,
         text_end: None,
+        segments: Vec::new(),
     });
 
     sanitizer

@@ -60,6 +60,7 @@ fn app_image() -> RawImageData {
         architecture: Some("arm64".into()),
         text_start: Some(0x1_0000_0000),
         text_end: Some(0x1_0001_0000),
+        segments: Vec::new(),
     }
 }
 
@@ -72,6 +73,7 @@ fn system_image() -> RawImageData {
         architecture: Some("arm64".into()),
         text_start: Some(0x2_0000_0000),
         text_end: Some(0x2_0001_0000),
+        segments: Vec::new(),
     }
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::collectors::attachment::RawCopiedAttachment;
-use crate::collectors::dylib::RawImageData;
+use crate::collectors::dylib::{RawImageData, RawImageSegment};
 use crate::collectors::environment::RawEnvironment;
 use crate::collectors::memory::{RawHeapData, RawMallocZone};
 use crate::collectors::thread::{RawStackCapture, RawThreadData};
@@ -105,6 +105,23 @@ fn image(path: &str, base: u64, slide: Option<u64>) -> RawImageData {
         architecture: Some("arm64".into()),
         text_start: Some(base),
         text_end: base.checked_add(0x1_0000),
+        segments: vec![
+            RawImageSegment {
+                name: "__TEXT".into(),
+                start: base,
+                end: base + 0x8000,
+            },
+            RawImageSegment {
+                name: "__DATA".into(),
+                start: base + 0x8000,
+                end: base + 0xc000,
+            },
+            RawImageSegment {
+                name: "__LINKEDIT".into(),
+                start: base + 0xc000,
+                end: base + 0x1_0000,
+            },
+        ],
     }
 }
 
@@ -133,6 +150,9 @@ fn test_format_images() {
     assert_eq!(out[0].path, "/usr/lib/libSystem.dylib");
     assert_eq!(out[0].base, "0x1000");
     assert_eq!(out[0].slide.as_deref(), Some("0x4000"));
+    assert_eq!(out[0].segments.len(), 3);
+    assert_eq!(out[0].segments[1].name, "__DATA");
+    assert_eq!(out[0].segments[1].start, "0x9000");
     assert_eq!(out[1].base, "0x8000");
     assert_eq!(out[1].slide, None);
 }
@@ -150,17 +170,15 @@ fn test_region_label_text_segment() {
 #[test]
 fn test_region_label_data_segment() {
     let images = vec![image("/bin/app", 0x1_0000, None)];
-    // protection rw- (bit 2 set, bit 4 clear) → __DATA.
-    let label = region_label(&region(0x1_0000, 3, 0), &images);
+    let label = region_label(&region(0x1_8000, 3, 0), &images);
     assert_eq!(label, "__DATA app");
 }
 
 #[test]
-fn test_region_label_other_segment() {
+fn test_region_label_linkedit_segment() {
     let images = vec![image("/bin/app", 0x1_0000, None)];
-    // protection r-- (neither exec nor write) → __OTHER.
-    let label = region_label(&region(0x1_0000, 1, 0), &images);
-    assert_eq!(label, "__OTHER app");
+    let label = region_label(&region(0x1_c000, 1, 0), &images);
+    assert_eq!(label, "__LINKEDIT app");
 }
 
 #[test]

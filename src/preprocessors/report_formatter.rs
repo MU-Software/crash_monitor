@@ -13,8 +13,9 @@ use crate::collectors::memory::RawHeapData;
 use crate::collectors::thread::RawThreadData;
 use crate::pipeline::report::{
     BacktraceFrame, BreadcrumbReport, BuildReport, CrashContextReport, EnvironmentReport,
-    HeapSummary, HeapZoneReport, LoadedImageReport, ReportValueSource, SessionReport,
-    SettingsSnapshotReport, StackMemoryReport, TaskVmSummaryReport, ThreadReport, VmRegionReport,
+    HeapSummary, HeapZoneReport, LoadedImageReport, LoadedImageSegmentReport, ReportValueSource,
+    SessionReport, SettingsSnapshotReport, StackMemoryReport, TaskVmSummaryReport, ThreadReport,
+    VmRegionReport,
 };
 use crate::pipeline::{CollectedData, Diagnostics, PluginStatus};
 use crate::platform::VmRegionInfo;
@@ -169,6 +170,15 @@ fn format_images(images: &[RawImageData]) -> Vec<LoadedImageReport> {
             architecture: img.architecture.clone(),
             text_start: img.text_start.map(|value| format!("{value:#x}")),
             text_end: img.text_end.map(|value| format!("{value:#x}")),
+            segments: img
+                .segments
+                .iter()
+                .map(|segment| LoadedImageSegmentReport {
+                    name: segment.name.clone(),
+                    start: format!("{:#x}", segment.start),
+                    end: format!("{:#x}", segment.end),
+                })
+                .collect(),
         })
         .collect()
 }
@@ -312,21 +322,15 @@ fn prot_string(prot: i32) -> &'static str {
 /// Generate a human-readable label for a VM region, cross-referencing loaded images.
 /// Images must be sorted by `base_address` (as returned by `enumerate_loaded_images`).
 fn region_label(region: &VmRegionInfo, images: &[RawImageData]) -> String {
-    if let Some(img) = images.iter().find(|image| {
+    if let Some((img, segment)) = images.iter().find_map(|image| {
         image
-            .text_start
-            .zip(image.text_end)
-            .is_some_and(|(start, end)| region.address >= start && region.address < end)
+            .segments
+            .iter()
+            .find(|segment| region.address >= segment.start && region.address < segment.end)
+            .map(|segment| (image, segment))
     }) {
         let name = img.path.rsplit('/').next().unwrap_or(&img.path);
-        let segment = if region.protection & 4 != 0 {
-            "__TEXT"
-        } else if region.protection & 2 != 0 {
-            "__DATA"
-        } else {
-            "__OTHER"
-        };
-        return format!("{segment} {name}");
+        return format!("{} {name}", segment.name);
     }
 
     // Fall back to user_tag label

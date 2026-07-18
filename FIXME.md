@@ -1077,6 +1077,14 @@
 
 범위: `src/shm/reader.rs`, `src/collectors/screenshot.rs`, SHM reader tests.
 
+### P2-49. 부분 Mach-O metadata와 실제 segment 범위를 보존한다
+
+- [x] load-command `vm_read`가 부분 성공해도 완전히 포함된 command까지 파싱한다.
+- [x] `__TEXT`에서 계산한 slide를 모든 완전한 segment에 적용해 runtime 범위를 수집한다.
+- [x] backtrace 해석은 `__TEXT` 범위를 유지하고 memory-map label은 실제 segment명을 사용한다.
+
+범위: `src/collectors/dylib.rs`, `src/preprocessors/report_formatter.rs`, report image schema.
+
 ## 전체 완료 조건
 
 - [ ] `exit(1)`, uncaught signal, Mach exception, possible OOM, ANR, snapshot이 각각 고유 `ReportId`와 올바른 termination metadata로 보고된다.
