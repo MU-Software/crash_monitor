@@ -726,11 +726,11 @@
 
 ### P2-10. generated binding과 workspace 설정의 drift를 막는다
 
-- [ ] generated binding을 check-in하고 CI에서 schema drift를 검사하거나 bindgen/libclang toolchain을 명확히 pin한다.
-- [ ] 약 50MB screenshot struct에 bindgen이 `Copy`/`Debug`를 파생하지 않게 `no_copy`/`no_debug`를 설정한다.
-- [ ] `SutCrumbState` 등 다른 수백 KiB generated struct도 크기 기준으로 `no_copy`/`no_debug` 적용 여부를 검토한다.
-- [ ] `workspace.package`, shared dependencies, shared lints를 member crate가 상속하게 한다.
-- [ ] 사용하지 않는 `uuid`는 제거하거나 실제 `ReportId` 구현에 사용한다.
+- [x] generated binding을 check-in하고 CI에서 schema drift를 검사하거나 bindgen/libclang toolchain을 명확히 pin한다.
+- [x] 약 50MB screenshot struct에 bindgen이 `Copy`/`Debug`를 파생하지 않게 `no_copy`/`no_debug`를 설정한다.
+- [x] `SutCrumbState` 등 다른 수백 KiB generated struct도 크기 기준으로 `no_copy`/`no_debug` 적용 여부를 검토한다.
+- [x] `workspace.package`, shared dependencies, shared lints를 member crate가 상속하게 한다.
+- [x] 사용하지 않는 `uuid`는 제거하거나 실제 `ReportId` 구현에 사용한다.
 
 범위: `build.rs`, `Cargo.toml`, member manifests.
 

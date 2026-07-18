@@ -1,8 +1,11 @@
 [package]
 name = "crash_dialog_mock"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Mock feedback dialog for E2E tests — outputs fixed text, no UI"
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "crash_dialog_mock"
