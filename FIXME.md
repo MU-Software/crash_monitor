@@ -931,9 +931,9 @@
 
 ### P2-32. test-only dialog mock을 production artifact에서 분리한다
 
-- [ ] production workspace/default build/package에 `crash_dialog_mock`이 포함되지 않게 한다.
-- [ ] test에서는 명시적인 dev dependency/fixture로 build한다.
-- [ ] production package manifest에 허용 binary 목록을 둔다.
+- [x] production workspace/default build/package에 `crash_dialog_mock`이 포함되지 않게 한다.
+- [x] test에서는 명시적인 dev dependency/fixture로 build한다.
+- [x] production package manifest에 허용 binary 목록을 둔다.
 
 범위: workspace/package manifests.
 

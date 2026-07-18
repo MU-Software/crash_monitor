@@ -1,5 +1,6 @@
 [workspace]
-members = [".", "crates/crash_dialog_macos", "crates/crash_dialog_mock"]
+members = [".", "crates/crash_dialog_macos"]
+exclude = ["crates/crash_dialog_mock"]
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

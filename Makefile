@@ -74,6 +74,7 @@ package: sign
 # never compiles that trust-boundary bypass.
 e2e-build: check-sign-identity
 	cargo build --release --workspace --features test-support
+	cargo build --release --locked --manifest-path crates/crash_dialog_mock/Cargo.toml --target-dir target
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
 	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
 

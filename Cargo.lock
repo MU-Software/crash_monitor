@@ -308,13 +308,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crash_dialog_mock"
-version = "0.1.0"
-dependencies = [
- "clap",
-]
-
-[[package]]
 name = "crash_monitor"
 version = "0.1.0"
 dependencies = [
