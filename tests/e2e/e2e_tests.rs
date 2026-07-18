@@ -29,7 +29,6 @@ use tempfile::TempDir;
 
 const MONITOR_INTERNAL_FAILURE_EXIT_CODE: i32 = 70;
 const CHILD_FAILURE_EXIT_CODE: i32 = 80;
-const DETECTED_CRASH_EXIT_CODE: i32 = 81;
 const SIGABRT_NUMBER: i32 = 6;
 const SIGILL_NUMBER: i32 = 4;
 const SIGKILL_NUMBER: i32 = 9;
@@ -747,8 +746,8 @@ fn test_e2e_crash_sigsegv() {
 
     assert_eq!(
         output.status.code(),
-        Some(DETECTED_CRASH_EXIT_CODE),
-        "detected Mach crash should use the crash namespace; stderr: {}",
+        Some(128 + SIGSEGV_NUMBER),
+        "a reaped Mach crash should preserve 128 + signal; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -853,8 +852,8 @@ fn test_e2e_crash_sigabrt() {
 
     assert_eq!(
         output.status.code(),
-        Some(DETECTED_CRASH_EXIT_CODE),
-        "detected Mach crash should use the crash namespace; stderr: {}",
+        Some(128 + SIGABRT_NUMBER),
+        "a reaped Mach crash should preserve 128 + signal; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -1120,7 +1119,7 @@ fn test_e2e_other_fatal_signal_preserves_sigill() {
         .output()
         .expect("run crash_monitor");
 
-    assert_eq!(output.status.code(), Some(DETECTED_CRASH_EXIT_CODE));
+    assert_eq!(output.status.code(), Some(128 + SIGILL_NUMBER));
     let reports = find_reports(&archive, "crash");
     assert_eq!(reports.len(), 1);
     let json = read_report_json(&reports[0]);
