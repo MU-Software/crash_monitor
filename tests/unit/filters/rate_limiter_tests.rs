@@ -156,6 +156,23 @@ fn test_should_process_uses_real_time() {
 }
 
 #[test]
+fn test_persistent_state_survives_monitor_restart_and_stays_bounded() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("rate-limit.json");
+    let event = dummy_event(ReportType::Crash);
+    let context = PluginContext::without_deadline();
+
+    let first = RateLimiter::with_state_path(2, Duration::from_secs(60), state_path.clone());
+    assert!(first.should_process(&event, &context).unwrap());
+    assert!(first.should_process(&event, &context).unwrap());
+    drop(first);
+
+    let restarted = RateLimiter::with_state_path(2, Duration::from_secs(60), state_path.clone());
+    assert!(!restarted.should_process(&event, &context).unwrap());
+    assert!(std::fs::metadata(state_path).unwrap().len() <= 128 * 1024);
+}
+
+#[test]
 fn test_plugin_metadata() {
     let limiter = RateLimiter::new(3, Duration::from_secs(60));
     assert_eq!(limiter.name(), "RateLimiter");

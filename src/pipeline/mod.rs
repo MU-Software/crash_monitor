@@ -1482,10 +1482,25 @@ pub fn default_macos_pipeline_from_config_with_runtime(
         )));
     }
     if on("RateLimiter") {
-        filters.push(Box::new(RateLimiter::new(
-            cfg.filters.rate_limiter.max_events,
-            Duration::from_secs(cfg.filters.rate_limiter.window_secs),
-        )));
+        let rate_state_root = output_dir
+            .clone()
+            .or_else(|| crate::utils::paths::pending_dir_path().ok());
+        let limiter = rate_state_root.map_or_else(
+            || {
+                RateLimiter::new(
+                    cfg.filters.rate_limiter.max_events,
+                    Duration::from_secs(cfg.filters.rate_limiter.window_secs),
+                )
+            },
+            |root| {
+                RateLimiter::with_state_path(
+                    cfg.filters.rate_limiter.max_events,
+                    Duration::from_secs(cfg.filters.rate_limiter.window_secs),
+                    root.join(".rate-limit-state.json"),
+                )
+            },
+        );
+        filters.push(Box::new(limiter));
     }
 
     // ── Collectors ──

@@ -443,11 +443,11 @@
 
 ### P1-32. rate limit과 duplicate 정책을 event 수명주기에 맞춘다
 
-- [ ] monitor 재시작 뒤에도 crash-loop 보호가 필요하면 bounded persistent state를 사용한다.
-- [ ] duplicate key에 report type, severity, process/build identity를 포함해 snapshot/ANR이 fatal crash를 억제하지 않게 한다.
-- [ ] usable frame이 없을 때 상수 empty fingerprint를 만들지 않거나 안전한 fallback을 사용한다.
-- [ ] 같은 monitor에서 반복 가능한 snapshot/ANR의 duplicate가 timestamp를 계속 갱신해 suppression window를 무한 연장하지 않게 한다.
-- [ ] occurrence count와 마지막 관측 시각을 정책에 맞게 분리한다.
+- [x] monitor 재시작 뒤에도 crash-loop 보호가 필요하면 bounded persistent state를 사용한다.
+- [x] duplicate key에 report type, severity, process/build identity를 포함해 snapshot/ANR이 fatal crash를 억제하지 않게 한다.
+- [x] usable frame이 없을 때 상수 empty fingerprint를 만들지 않거나 안전한 fallback을 사용한다.
+- [x] 같은 monitor에서 반복 가능한 snapshot/ANR의 duplicate가 timestamp를 계속 갱신해 suppression window를 무한 연장하지 않게 한다.
+- [x] occurrence count와 마지막 관측 시각을 정책에 맞게 분리한다.
 
 범위: `src/filters/rate_limiter.rs`, `src/preprocessors/fingerprint.rs`, `src/preprocessors/duplicate.rs`.
 

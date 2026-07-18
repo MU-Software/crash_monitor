@@ -183,15 +183,14 @@ fn test_system_frames_excluded() {
 }
 
 #[test]
-fn test_empty_backtrace_produces_fingerprint() {
+fn test_empty_backtrace_does_not_produce_constant_fingerprint() {
     let fp = Fingerprinter::new(8);
     let event = make_event();
 
     let mut data = make_data_with_backtrace(vec![], true, vec![app_image()], BTreeMap::new());
 
     let _ = fp.process(&event, &mut data, &PluginContext::without_deadline());
-    // Even an empty backtrace should produce a fingerprint (hash of empty input)
-    assert!(data.fingerprint.is_some());
+    assert!(data.fingerprint.is_none());
 }
 
 #[test]

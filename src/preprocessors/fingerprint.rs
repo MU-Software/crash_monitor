@@ -110,6 +110,14 @@ impl PreProcessor for Fingerprinter {
             }
         }
 
+        // No usable application frame means there is no stable crash
+        // identity. In particular, do not turn every empty/system-only trace
+        // into the same SHA-256(empty) duplicate key.
+        if frame_ids.is_empty() {
+            data.fingerprint = None;
+            return Ok(());
+        }
+
         // Compute SHA-256 of concatenated frame identifiers
         let mut hasher = Sha256::new();
         for (i, id) in frame_ids.iter().enumerate() {
