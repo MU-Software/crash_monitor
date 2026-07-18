@@ -1085,6 +1085,14 @@
 
 범위: `src/collectors/dylib.rs`, `src/preprocessors/report_formatter.rs`, report image schema.
 
+### P2-50. 최종 report 살균에서 역직렬화 결합을 제거한다
+
+- [x] report를 한 번 `serde_json::Value`로 직렬화한 뒤 문자열 leaf를 재귀적으로 살균한다.
+- [x] 살균된 `Value`를 바로 기록해 `DeserializeOwned`와 `Value → T` 왕복을 제거한다.
+- [x] `skip_serializing` 등 직렬화 전용 필드가 있는 타입도 쓰기 경로에서 허용한다.
+
+범위: `src/preprocessors/sanitizer.rs`, report/feedback JSON write paths.
+
 ## 전체 완료 조건
 
 - [ ] `exit(1)`, uncaught signal, Mach exception, possible OOM, ANR, snapshot이 각각 고유 `ReportId`와 올바른 termination metadata로 보고된다.

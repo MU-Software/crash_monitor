@@ -7,7 +7,6 @@ use crate::pipeline::{
     CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor, Priority,
 };
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 pub struct Sanitizer {
     /// Username derived from `$USER`, falling back to the final `$HOME` component.
@@ -63,16 +62,14 @@ impl Sanitizer {
         }
     }
 
-    pub(crate) fn sanitize_serializable<T>(&self, value: &mut T) -> Result<(), String>
+    pub(crate) fn sanitize_to_value<T>(&self, value: &T) -> Result<serde_json::Value, String>
     where
-        T: Serialize + DeserializeOwned,
+        T: Serialize + ?Sized,
     {
-        let mut json = serde_json::to_value(&*value)
+        let mut json = serde_json::to_value(value)
             .map_err(|error| format!("privacy sanitizer encode failed: {error}"))?;
         self.sanitize_json_value(&mut json);
-        *value = serde_json::from_value(json)
-            .map_err(|error| format!("privacy sanitizer decode failed: {error}"))?;
-        Ok(())
+        Ok(json)
     }
 }
 

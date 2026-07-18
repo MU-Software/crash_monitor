@@ -141,6 +141,28 @@ fn recursive_json_redaction_preserves_json_shape() {
 }
 
 #[test]
+fn serializable_only_values_are_sanitized_without_deserialization() {
+    #[derive(serde::Serialize)]
+    struct SerializeOnly<'a> {
+        path: &'a str,
+        #[serde(skip_serializing)]
+        _computed_only: usize,
+    }
+
+    let sanitizer =
+        Sanitizer::from_identity(Some("alice".to_string()), Some("/Users/alice".to_string()));
+    let value = sanitizer
+        .sanitize_to_value(&SerializeOnly {
+            path: "/Users/alice/project/report.json",
+            _computed_only: 7,
+        })
+        .unwrap();
+
+    assert_eq!(value["path"], "[HOME]/project/report.json");
+    assert!(value.get("computed_only").is_none());
+}
+
+#[test]
 fn test_depends_on_fingerprinter() {
     let sanitizer = Sanitizer::new();
     assert!(sanitizer.hard_dependencies().is_empty());
