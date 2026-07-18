@@ -27,6 +27,11 @@ producing a report. This is the core reason for the out-of-process design.
    can't be inspected.
 4. Start the exception-listener thread and enter the event loop.
 
+`posix_spawn` is the only child-creation path. The monitor prepares the process
+group, signal mask/defaults, inherited descriptors, exception-port setup, and
+shared-memory environment before spawning; it does not run application code in
+a post-`fork` monitor process.
+
 ## Event sources
 
 All sources feed a single event loop as a `MonitorEvent`:
@@ -76,3 +81,36 @@ On a crash/snapshot/ANR event:
 Steps 2 and 4–6 run through the [plugin pipeline](pipeline.md). The shared-memory
 layout that couples the child (producer) and monitor (consumer) is described in
 [shared-memory.md](shared-memory.md).
+
+## Artifact lifecycle
+
+Every event owns one immutable `ReportId` and one report-local transaction:
+
+```text
+event
+  → pending/.report-<id>.pending/       hidden staging; partial by definition
+  → report.json + optional raw/PNG      exact files registered in memory
+  → report.zip                          default canonical artifact
+  → manifest.json                       written and synced last
+  → sent/<id>/                          one atomic directory publication
+  → retention                           count/bytes/age cleanup after notification
+```
+
+The default pipeline archives the JSON and registered attachments into
+`report.zip`, selects `sent/` as the destination, then publishes the complete
+directory with `manifest.json` as its commit record. A deliberately disabled or
+failed archiver can leave `report.json` as the canonical artifact; a disabled
+move step publishes to `pending/<id>/`. Readers use the manifest rather than
+guessing filenames. On restart, a staging directory whose synced manifest is
+complete is recovered to its recorded destination; an incomplete staging
+directory stays hidden and is eligible for bounded scavenging.
+
+| Trigger | Capture-time evidence | Terminal metadata | Child after capture |
+|---|---|---|---|
+| `snapshot` | policy-authorized thread/image/SHM snapshot | none | resumed |
+| `anr` | same snapshot plus watchdog context | none | resumed |
+| `crash` | exception codes and bounded task snapshot | actual reaped status | terminates after Mach reply |
+| `exit_failure` / `signal_failure` / `oom` | owned termination/process-output state; no live task capture | exit code or signal/core flag/runtime | already terminal |
+
+See [reports.md](reports.md#location-and-lifecycle) for the manifest contract
+and [privacy.md](privacy.md) for evidence gates and retention limitations.

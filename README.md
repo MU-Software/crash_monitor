@@ -45,7 +45,11 @@ built, they stay hidden in
 visible only after `manifest.json` is written last and the whole directory is
 atomically published as either `pending/<ReportId>/` or `sent/<ReportId>/`.
 Prepared reports interrupted just before publication are recovered on restart;
-incomplete staging directories remain hidden. Override the base directory with
+incomplete staging directories remain hidden and are scavenged only after they
+are no longer owned by a live monitor. The default pipeline produces
+`sent/<ReportId>/report.zip`; if archiving or relocation is disabled, the
+manifest can instead name `report.json` or a committed `pending/<ReportId>/`.
+Override the base directory with
 `CRASH_MONITOR_DATA_DIR`. Report types include `crash`, `snapshot`, `anr`,
 `oom`, `exit_failure`, and `signal_failure`.
 

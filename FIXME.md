@@ -989,10 +989,10 @@
 
 ### P2-39. 실제 startup과 artifact lifecycle을 문서화한다
 
-- [ ] “fork+exec” 설명을 실제 `posix_spawn`과 exception-port 설정 흐름으로 고친다.
-- [ ] 기본 pipeline의 최종 산출물이 `pending` JSON이 아니라 `sent`의 ZIP이라는 사실과 중간 상태를 설명한다.
-- [ ] temp→pending→archive→sent→retention 및 recovery 상태를 diagram/문장으로 동기화한다.
-- [ ] snapshot, crash, ANR, exit failure별 artifact 차이를 설명한다.
+- [x] “fork+exec” 설명을 실제 `posix_spawn`과 exception-port 설정 흐름으로 고친다.
+- [x] 기본 pipeline의 최종 산출물이 `pending` JSON이 아니라 `sent`의 ZIP이라는 사실과 중간 상태를 설명한다.
+- [x] temp→pending→archive→sent→retention 및 recovery 상태를 diagram/문장으로 동기화한다.
+- [x] snapshot, crash, ANR, exit failure별 artifact 차이를 설명한다.
 
 범위: `README.md`, `docs/architecture.md`, report/pipeline docs.
 
