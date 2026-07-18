@@ -222,6 +222,30 @@ fn last_errno() -> libc::c_int {
         .unwrap_or(libc::EIO)
 }
 
+fn move_above_stdio(fd: OwnedFd) -> Result<OwnedFd, SpawnError> {
+    if fd.as_raw_fd() > libc::STDERR_FILENO {
+        return Ok(fd);
+    }
+
+    // Child file actions close every original pipe descriptor after dup2.
+    // Keeping those originals above stderr prevents a close action from
+    // accidentally closing the newly-installed stdout/stderr descriptor when
+    // the monitor itself was launched with fd 1 or 2 closed.
+    // SAFETY: `fd` is valid and `F_DUPFD_CLOEXEC` returns a newly-owned fd.
+    let duplicated = unsafe {
+        libc::fcntl(
+            fd.as_raw_fd(),
+            libc::F_DUPFD_CLOEXEC,
+            libc::STDERR_FILENO + 1,
+        )
+    };
+    if duplicated == -1 {
+        return Err(SpawnError::new(SpawnStage::OutputPipe, last_errno()));
+    }
+    // SAFETY: successful F_DUPFD_CLOEXEC transfers ownership of a new fd.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+}
+
 fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd), SpawnError> {
     let mut fds = [-1; 2];
     // SAFETY: `fds` points to space for exactly two descriptors.
@@ -229,8 +253,8 @@ fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd), SpawnError> {
         return Err(SpawnError::new(SpawnStage::OutputPipe, last_errno()));
     }
     // SAFETY: pipe returned two newly-owned descriptors.
-    let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-    let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    let read = move_above_stdio(unsafe { OwnedFd::from_raw_fd(fds[0]) })?;
+    let write = move_above_stdio(unsafe { OwnedFd::from_raw_fd(fds[1]) })?;
     for fd in [&read, &write] {
         // SAFETY: descriptor is owned and valid for the duration of the call.
         if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
@@ -540,6 +564,20 @@ mod tests {
         );
 
         assert_std_error::<SpawnError>();
+    }
+
+    #[test]
+    fn output_pipe_descriptors_never_overlap_stdio() {
+        let pipes = output_pipes().expect("create capture pipes");
+
+        for fd in [
+            &pipes.stdout_read,
+            &pipes.stdout_write,
+            &pipes.stderr_read,
+            &pipes.stderr_write,
+        ] {
+            assert!(fd.as_raw_fd() > libc::STDERR_FILENO);
+        }
     }
 
     #[test]
