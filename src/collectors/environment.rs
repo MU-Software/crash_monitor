@@ -9,8 +9,9 @@ use nix::sys::utsname::uname;
 use std::ffi::CString;
 use std::sync::Arc;
 
-/// Sensitive environment variable name patterns (case-insensitive).
-const SENSITIVE_PATTERNS: &[&str] = &["TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "AUTH"];
+/// Minimal diagnostic allowlist. Everything else, including URL/DSN/cookie,
+/// credential and key-material variables, is excluded by default.
+const ALLOWED_ENV_KEYS: &[&str] = &["LANG", "TERM", "TZ"];
 
 /// Raw environment data captured by the collector.
 pub struct RawEnvironment {
@@ -104,9 +105,9 @@ impl Collector for EnvironmentCollector {
             Err(_) => (String::new(), String::new(), String::new()),
         };
 
-        let hostname = nix::unistd::gethostname()
-            .map(|h| h.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // Hostnames commonly contain a person's name or managed-device ID.
+        // Keep the schema stable while making exclusion explicit.
+        let hostname = "[REDACTED]".to_string();
 
         context.checkpoint()?;
         let mut env_vars = Vec::new();
@@ -115,7 +116,7 @@ impl Collector for EnvironmentCollector {
             variables_source = "spawn_environment_snapshot";
             for (key, value) in environment.reportable_entries() {
                 context.checkpoint()?;
-                if !is_sensitive(key) {
+                if is_allowed(key) {
                     env_vars.push((key.to_string(), value.to_string()));
                 }
             }
@@ -140,9 +141,9 @@ impl Collector for EnvironmentCollector {
     }
 }
 
-fn is_sensitive(key: &str) -> bool {
-    let upper = key.to_uppercase();
-    SENSITIVE_PATTERNS.iter().any(|pat| upper.contains(pat))
+fn is_allowed(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    ALLOWED_ENV_KEYS.contains(&upper.as_str()) || upper.starts_with("LC_")
 }
 
 #[cfg(test)]

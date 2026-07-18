@@ -46,6 +46,23 @@ deliberate:
 }
 ```
 
+Environment capture uses a minimal allowlist (`LANG`, `LC_*`, `TERM`, and
+`TZ`) rather than attempting to enumerate secret names. URL/DSN/cookie and
+credential/key variables are therefore excluded by default. Hostname is
+serialized as `[REDACTED]`. Text that reaches a report—including thread names,
+breadcrumbs, annotations, attachment labels/original paths, child-output
+tails, and feedback—is sanitized again immediately before each JSON write.
+Exact home directories, descendants, and username-only values are masked;
+macOS path matching is ASCII case-insensitive to match common volume behavior.
+
+Screenshot pixels have no reliable general-purpose redaction transform. They
+remain excluded by default and require the full privacy profile, deployment
+consent, and the individual screenshot toggle shown above. Integrators must
+surface that explicit choice in their own consent UI. Raw SHM wire dumps are
+likewise excluded by default and require the separate `privacy.raw_shm` opt-in;
+unlike decoded textual report fields, their opaque binary payload is not
+content-redacted.
+
 `consent: "granted"` is a deployment-time assertion by the integrator. The
 monitor does not display a consent prompt and this setting does not replace any
 notice or consent flow required by the application or applicable law. Revoking

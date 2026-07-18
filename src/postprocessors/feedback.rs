@@ -150,6 +150,7 @@ impl PostProcessor for FeedbackPostProcessor {
 
         let mut crash_report = report::load_report(json_path)?;
         crash_report.user_feedback = Some(serde_json::json!({ "comment": feedback }));
+        crate::preprocessors::Sanitizer::new().sanitize_serializable(&mut crash_report)?;
         let json = serde_json::to_vec_pretty(&crash_report)
             .map_err(|error| format!("failed to serialize feedback report: {error}"))?;
         report::atomic_replace(json_path, &json)?;

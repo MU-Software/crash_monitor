@@ -591,14 +591,14 @@
 
 ### P1-47. privacy sanitizer를 모든 serialize 경로에 일관되게 적용한다
 
-- [ ] trailing slash가 없는 exact HOME, HOME 하위 path, username-only 값을 path-component 단위로 마스킹한다.
-- [ ] `$USER`가 없으면 `$HOME`의 마지막 component 또는 `getpwuid`를 fallback으로 사용하고, macOS path의 case-insensitive matching을 지원할지 정책과 테스트를 둔다.
-- [ ] environment는 denylist보다 최소 allowlist를 기본으로 하고 URL userinfo, cookie, DSN, database URL, key material을 다룬다.
-- [ ] breadcrumb file/message, annotations, attachment original path, thread name, hostname, raw dump에 같은 privacy redaction 정책을 적용한다.
-- [ ] feedback은 Sanitizer 실행 뒤 JSON을 patch하므로 feedback 전용 정제 또는 final serialization 직전 sanitizer를 적용한다.
-- [ ] hostname과 screenshot pixel은 기본 제외·opt-in·별도 redaction 정책 중 명시된 방식을 사용한다.
-- [ ] screenshot 수집이 기본 활성이라면 feedback/consent UI에서 포함 여부를 분명히 알리고 선택 가능하게 한다.
-- [ ] exact HOME, nested path, username-only value, missing USER를 테스트한다.
+- [x] trailing slash가 없는 exact HOME, HOME 하위 path, username-only 값을 path-component 단위로 마스킹한다.
+- [x] `$USER`가 없으면 `$HOME`의 마지막 component 또는 `getpwuid`를 fallback으로 사용하고, macOS path의 case-insensitive matching을 지원할지 정책과 테스트를 둔다.
+- [x] environment는 denylist보다 최소 allowlist를 기본으로 하고 URL userinfo, cookie, DSN, database URL, key material을 다룬다.
+- [x] breadcrumb file/message, annotations, attachment original path, thread name, hostname, raw dump에 같은 privacy redaction 정책을 적용한다.
+- [x] feedback은 Sanitizer 실행 뒤 JSON을 patch하므로 feedback 전용 정제 또는 final serialization 직전 sanitizer를 적용한다.
+- [x] hostname과 screenshot pixel은 기본 제외·opt-in·별도 redaction 정책 중 명시된 방식을 사용한다.
+- [x] screenshot 수집이 기본 활성이라면 feedback/consent UI에서 포함 여부를 분명히 알리고 선택 가능하게 한다.
+- [x] exact HOME, nested path, username-only value, missing USER를 테스트한다.
 
 범위: `src/preprocessors/sanitizer.rs`, environment/screenshot collectors, report formatter.
 

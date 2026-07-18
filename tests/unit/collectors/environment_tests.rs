@@ -41,7 +41,7 @@ fn test_captures_os_info() {
         "kernel_release should not be empty"
     );
     assert!(!env.arch.is_empty(), "arch should not be empty");
-    assert!(!env.hostname.is_empty(), "hostname should not be empty");
+    assert_eq!(env.hostname, "[REDACTED]");
 }
 
 #[test]
@@ -70,8 +70,12 @@ fn test_plugin_metadata() {
 #[test]
 fn injected_child_environment_is_used_and_non_utf8_is_skipped() {
     let environment = [
-        CString::new("CHILD_VISIBLE=child-value").unwrap(),
+        CString::new("LANG=ko_KR.UTF-8").unwrap(),
+        CString::new("LC_MESSAGES=en_US.UTF-8").unwrap(),
         CString::new("CHILD_SECRET=hidden").unwrap(),
+        CString::new("DATABASE_URL=postgres://alice:secret@example/db").unwrap(),
+        CString::new("COOKIE=session=secret").unwrap(),
+        CString::new("PUBLIC_URL=https://alice:secret@example.test/path").unwrap(),
         CString::new(vec![b'N', b'O', b'N', b'=', 0xff]).unwrap(),
     ];
     let collector = EnvironmentCollector::with_child_environment(Arc::new(
@@ -91,7 +95,10 @@ fn injected_child_environment_is_used_and_non_utf8_is_skipped() {
     let env = &data.raw.environment.as_ref().unwrap().env_vars;
     assert_eq!(
         env,
-        &vec![("CHILD_VISIBLE".to_string(), "child-value".to_string())]
+        &vec![
+            ("LANG".to_string(), "ko_KR.UTF-8".to_string()),
+            ("LC_MESSAGES".to_string(), "en_US.UTF-8".to_string()),
+        ]
     );
     assert_eq!(
         data.raw.environment.as_ref().unwrap().variables_source,

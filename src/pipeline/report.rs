@@ -884,6 +884,9 @@ pub fn write_report(
         report.attachments.push(attachment);
     }
 
+    // Defense in depth: post-formatting consumers and future fields must pass
+    // through the same privacy policy immediately before serialization.
+    crate::preprocessors::Sanitizer::new().sanitize_serializable(report)?;
     let json =
         serde_json::to_vec_pretty(report).map_err(|e| format!("JSON serialization failed: {e}"))?;
     transaction

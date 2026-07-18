@@ -43,10 +43,7 @@ fn test_masks_username_in_image_paths() {
     sanitizer
         .process(&event, &mut data, &PluginContext::without_deadline())
         .unwrap();
-    assert_eq!(
-        data.raw.images[0].path,
-        "/Users/[USERNAME]/project/libfoo.dylib"
-    );
+    assert_eq!(data.raw.images[0].path, "[HOME]/project/libfoo.dylib");
 }
 
 #[test]
@@ -66,17 +63,17 @@ fn test_masks_username_in_symbols() {
     sanitizer
         .process(&event, &mut data, &PluginContext::without_deadline())
         .unwrap();
-    assert_eq!(
-        data.raw.symbols[&0x1000],
-        "/Users/[USERNAME]/src/main.c:foo"
-    );
+    assert_eq!(data.raw.symbols[&0x1000], "[HOME]/src/main.c:foo");
 }
 
 #[test]
 fn test_no_username_is_noop() {
     // We can't unset USER in a test safely, but we can test that the
     // sanitizer does nothing when username is None.
-    let sanitizer = Sanitizer { username: None };
+    let sanitizer = Sanitizer {
+        username: None,
+        home: None,
+    };
     let event = dummy_event();
     let mut data = CollectedData::default();
     data.raw.images.push(RawImageData {
@@ -94,6 +91,51 @@ fn test_no_username_is_noop() {
         .unwrap();
     // Path should remain unchanged
     assert_eq!(data.raw.images[0].path, "/Users/alice/project/lib.dylib");
+}
+
+#[test]
+fn exact_home_nested_home_and_username_only_are_redacted() {
+    let sanitizer =
+        Sanitizer::from_identity(Some("Alice".to_string()), Some("/Users/Alice".to_string()));
+    let mut exact = "/users/alice".to_string();
+    let mut nested = "file:///Users/Alice/private/report.txt".to_string();
+    let mut username = "alice".to_string();
+    let mut lookalike = "/Users/Alicev2/report.txt".to_string();
+
+    sanitizer.sanitize_str(&mut exact);
+    sanitizer.sanitize_str(&mut nested);
+    sanitizer.sanitize_str(&mut username);
+    sanitizer.sanitize_str(&mut lookalike);
+
+    assert_eq!(exact, "[HOME]");
+    assert_eq!(nested, "file://[HOME]/private/report.txt");
+    assert_eq!(username, "[USERNAME]");
+    assert_eq!(lookalike, "/Users/Alicev2/report.txt");
+}
+
+#[test]
+fn missing_user_falls_back_to_home_component() {
+    let sanitizer = Sanitizer::from_identity(None, Some("/Users/fallback-user/".to_string()));
+    assert_eq!(sanitizer.username.as_deref(), Some("fallback-user"));
+
+    let mut value = "fallback-user".to_string();
+    sanitizer.sanitize_str(&mut value);
+    assert_eq!(value, "[USERNAME]");
+}
+
+#[test]
+fn recursive_json_redaction_preserves_json_shape() {
+    let sanitizer =
+        Sanitizer::from_identity(Some("alice".to_string()), Some("/Users/alice".to_string()));
+    let mut value = serde_json::json!({
+        "annotation": "/Users/alice/project",
+        "nested": ["alice", 7, true]
+    });
+
+    sanitizer.sanitize_json_value(&mut value);
+
+    assert_eq!(value["annotation"], "[HOME]/project");
+    assert_eq!(value["nested"], serde_json::json!(["[USERNAME]", 7, true]));
 }
 
 #[test]

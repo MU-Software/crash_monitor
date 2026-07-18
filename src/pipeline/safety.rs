@@ -885,12 +885,17 @@ pub fn write_raw_stage1(
     transaction: &ArtifactTransaction,
     threads: &[RawThreadData],
 ) -> Result<PathBuf, String> {
+    let sanitizer = crate::preprocessors::Sanitizer::new();
     transaction.write_artifact("threads.txt", ArtifactKind::ThreadRaw, |file| {
         for (i, thread) in threads.iter().enumerate() {
+            let mut thread_name = thread.name.clone();
+            if let Some(name) = &mut thread_name {
+                sanitizer.sanitize_str(name);
+            }
             writeln!(
                 file,
                 "---thread {} (port={}, name={:?}, crashed={})---",
-                i, thread.thread_port, thread.name, thread.crashed
+                i, thread.thread_port, thread_name, thread.crashed
             )
             .map_err(|e| format!("write: {e}"))?;
 
