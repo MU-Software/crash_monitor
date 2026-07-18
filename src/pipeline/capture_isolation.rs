@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     CollectedData, Collector, CollectorAccess, CrashEvent, Diagnostics, Pipeline, PluginDiagnostic,
-    PluginRunResult, PluginStatus,
+    PluginRunResult, PluginStatus, ReportId,
 };
 use crate::collectors::dylib::RawImageData;
 use crate::collectors::memory::RawHeapData;
@@ -75,7 +75,49 @@ pub(crate) struct TaskCaptureData {
 struct TaskCaptureResult {
     version: u32,
     data: TaskCaptureData,
-    diagnostics: Vec<PluginDiagnostic>,
+    diagnostics: Vec<TaskCaptureDiagnostic>,
+}
+
+/// Fixed-layout binary representation of plugin diagnostics.
+///
+/// The report-facing `PluginDiagnostic` intentionally omits a missing
+/// `report_id` in JSON. Bincode is not self-describing, so applying that
+/// conditional omission to the helper wire format would shift every
+/// following field and make the payload undecodable.
+#[derive(Serialize, Deserialize)]
+struct TaskCaptureDiagnostic {
+    name: String,
+    status: PluginStatus,
+    duration_ms: u64,
+    report_id: Option<ReportId>,
+    started_offset_ms: u64,
+    finished_offset_ms: u64,
+}
+
+impl From<PluginDiagnostic> for TaskCaptureDiagnostic {
+    fn from(diagnostic: PluginDiagnostic) -> Self {
+        Self {
+            name: diagnostic.name,
+            status: diagnostic.status,
+            duration_ms: diagnostic.duration_ms,
+            report_id: diagnostic.report_id,
+            started_offset_ms: diagnostic.started_offset_ms,
+            finished_offset_ms: diagnostic.finished_offset_ms,
+        }
+    }
+}
+
+impl From<TaskCaptureDiagnostic> for PluginDiagnostic {
+    fn from(diagnostic: TaskCaptureDiagnostic) -> Self {
+        Self {
+            name: diagnostic.name,
+            status: diagnostic.status,
+            duration_ms: diagnostic.duration_ms,
+            report_id: diagnostic.report_id,
+            started_offset_ms: diagnostic.started_offset_ms,
+            finished_offset_ms: diagnostic.finished_offset_ms,
+        }
+    }
 }
 
 pub(crate) enum IsolatedCaptureOutcome {
@@ -220,7 +262,7 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
             memory_map: data.raw.memory_map,
             heap: data.raw.heap,
         },
-        diagnostics: diagnostics.plugins,
+        diagnostics: diagnostics.plugins.into_iter().map(Into::into).collect(),
     };
     let mut output = crate::platform::macos::ffi::capture_spawn::capture_result_file()?;
     wire_options()
@@ -358,7 +400,7 @@ fn decode_result(result_file: &mut File) -> IsolatedCaptureOutcome {
         Ok(result) => result,
         Err(error) => {
             return IsolatedCaptureOutcome::Failed(format!(
-                "cannot decode capture-helper result: {error}"
+                "cannot decode {length}-byte capture-helper result: {error}"
             ));
         }
     };
@@ -368,7 +410,10 @@ fn decode_result(result_file: &mut File) -> IsolatedCaptureOutcome {
             result.version
         ));
     }
-    IsolatedCaptureOutcome::Completed(result.data, result.diagnostics)
+    IsolatedCaptureOutcome::Completed(
+        result.data,
+        result.diagnostics.into_iter().map(Into::into).collect(),
+    )
 }
 
 fn kill_and_reap_timed_out_helper(helper: &mut CaptureHelperProcess) -> IsolatedCaptureOutcome {
@@ -424,4 +469,32 @@ fn wire_options() -> impl Options {
         .with_fixint_encoding()
         .with_limit(MAX_CAPTURE_WIRE_BYTES)
         .reject_trailing_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_wire_round_trip_uses_identical_options() {
+        let result = TaskCaptureResult {
+            version: CAPTURE_WIRE_VERSION,
+            data: TaskCaptureData::default(),
+            diagnostics: vec![TaskCaptureDiagnostic {
+                name: "ThreadCollector".to_string(),
+                status: PluginStatus::Ok,
+                duration_ms: 12,
+                report_id: None,
+                started_offset_ms: 3,
+                finished_offset_ms: 15,
+            }],
+        };
+        let encoded = wire_options().serialize(&result).expect("encode result");
+        let decoded: TaskCaptureResult =
+            wire_options().deserialize(&encoded).expect("decode result");
+        assert_eq!(decoded.version, CAPTURE_WIRE_VERSION);
+        assert_eq!(decoded.diagnostics.len(), 1);
+        assert!(decoded.diagnostics[0].report_id.is_none());
+        assert_eq!(decoded.diagnostics[0].finished_offset_ms, 15);
+    }
 }

@@ -428,21 +428,6 @@ fn write_oom_config(data_dir: &Path) {
     .expect("write OOM config");
 }
 
-fn wait_for_report(dir: &Path, report_type: &str, deadline: Instant) -> Vec<PathBuf> {
-    loop {
-        let reports = find_reports(dir, report_type);
-        if !reports.is_empty() {
-            return reports;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {report_type} report in {}",
-            dir.display()
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 struct FixtureProcessGuard {
     monitor: Child,
     child_pid: nix::unistd::Pid,
@@ -1044,37 +1029,62 @@ fn test_e2e_sigusr1_snapshot_uses_the_real_signal_pipe() {
     }
     let data_dir = TempDir::new().expect("create temp dir");
     let archive = archive_dir(data_dir.path());
-    let mut monitor = monitor_cmd(data_dir.path())
+    let state_file = data_dir.path().join("fixture-state");
+    let monitor = monitor_cmd(data_dir.path())
+        .env("CRASH_APP_STATE_FILE", &state_file)
         .arg("run")
         .arg(crash_app_path())
         .arg("wait")
         .spawn()
         .expect("spawn crash_monitor");
+    let (child_pid, shm_name) =
+        read_fixture_state(&state_file, Instant::now() + Duration::from_secs(5));
+    let mut processes = FixtureProcessGuard {
+        monitor,
+        child_pid,
+        shm_name,
+    };
 
-    std::thread::sleep(Duration::from_millis(250));
     nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(i32::try_from(monitor.id()).expect("pid fits i32")),
+        nix::unistd::Pid::from_raw(i32::try_from(processes.monitor.id()).expect("pid fits i32")),
         nix::sys::signal::Signal::SIGUSR1,
     )
     .expect("send real SIGUSR1 to monitor");
-    let reports = wait_for_report(
-        &archive,
-        "snapshot",
-        Instant::now() + Duration::from_secs(10),
-    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let reports = loop {
+        let reports = find_reports(&archive, "snapshot");
+        if !reports.is_empty() {
+            break reports;
+        }
+        if let Some(status) = processes.monitor.try_wait().expect("poll crash_monitor") {
+            panic!("crash_monitor exited before publishing a snapshot report: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for snapshot report in {archive:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
 
     nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(i32::try_from(monitor.id()).expect("pid fits i32")),
+        nix::unistd::Pid::from_raw(i32::try_from(processes.monitor.id()).expect("pid fits i32")),
         nix::sys::signal::Signal::SIGTERM,
     )
     .expect("request monitor shutdown");
-    let status = monitor.wait().expect("reap monitor");
+    let status = processes.monitor.wait().expect("reap monitor");
     assert_eq!(status.code(), Some(128 + SIGTERM_NUMBER));
+    processes.assert_cleaned();
 
     assert_eq!(reports.len(), 1);
     let json = read_report_json(&reports[0]);
     assert_report_identity(&reports[0], &json, "snapshot");
     assert!(json.get("termination").is_none() || json["termination"].is_null());
+    assert!(
+        json["threads"]
+            .as_array()
+            .is_some_and(|threads| !threads.is_empty()),
+        "capture-helper result must preserve collected thread data"
+    );
 }
 
 #[test]
@@ -1183,6 +1193,12 @@ fn test_e2e_anr() {
 
     let json = read_report_json(&reports[0]);
     assert_report_identity(&reports[0], &json, "anr");
+    assert!(
+        json["threads"]
+            .as_array()
+            .is_some_and(|threads| !threads.is_empty()),
+        "capture-helper result must preserve collected thread data"
+    );
 }
 
 /// The debug build binary lacks the debugger entitlement (only `make e2e-build`
