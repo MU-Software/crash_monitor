@@ -7,6 +7,7 @@ use crate::pipeline::report::{self, CrashReport, LoadedImageReport};
 use crate::utils::paths::{PRIVATE_FILE_MODE, open_trusted_directory, validate_private_file};
 use nix::fcntl::{OFlag, openat, renameat};
 use nix::sys::stat::Mode;
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 #[cfg(target_os = "macos")]
@@ -255,20 +256,15 @@ fn parse_thin_identity(bytes: &[u8]) -> Option<MachOIdentity> {
         }
         if cmd == 0x1b && size >= 24 {
             let uuid = bytes.get(offset + 8..offset + 24)?;
-            let uuid = uuid
-                .iter()
-                .enumerate()
-                .map(|(index, byte)| {
-                    let separator = if matches!(index, 4 | 6 | 8 | 10) {
-                        "-"
-                    } else {
-                        ""
-                    };
-                    format!("{separator}{byte:02x}")
-                })
-                .collect();
+            let mut formatted_uuid = String::with_capacity(36);
+            for (index, byte) in uuid.iter().enumerate() {
+                if matches!(index, 4 | 6 | 8 | 10) {
+                    formatted_uuid.push('-');
+                }
+                write!(formatted_uuid, "{byte:02x}").expect("writing to String cannot fail");
+            }
             return Some(MachOIdentity {
-                uuid,
+                uuid: formatted_uuid,
                 architecture: architecture.to_string(),
             });
         }

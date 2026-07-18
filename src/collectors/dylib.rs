@@ -4,6 +4,7 @@
 //! Slide is computed within the collector (during suspension) to avoid
 //! cross-category dependency with a pre-processor.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::pipeline::{
@@ -354,10 +355,11 @@ fn compute_image_metadata(
                 image.text_start = Some(base_address);
                 image.text_end = base_address.checked_add(vmsize);
             }
-        } else if cmd == LC_UUID && cmdsize >= 24 {
-            if let Some(uuid) = cmds.get(offset + 8..offset + 24) {
-                image.uuid = Some(format_uuid(uuid));
-            }
+        } else if cmd == LC_UUID
+            && cmdsize >= 24
+            && let Some(uuid) = cmds.get(offset + 8..offset + 24)
+        {
+            image.uuid = Some(format_uuid(uuid));
         }
 
         if cmdsize == 0 {
@@ -374,18 +376,14 @@ fn compute_image_metadata(
 }
 
 fn format_uuid(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| {
-            let separator = if matches!(index, 4 | 6 | 8 | 10) {
-                "-"
-            } else {
-                ""
-            };
-            format!("{separator}{byte:02x}")
-        })
-        .collect()
+    let mut uuid = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            uuid.push('-');
+        }
+        write!(uuid, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    uuid
 }
 
 // ═══════════════════════════════════════════════════

@@ -151,10 +151,26 @@ fn thin_and_fat_macho_identity_selection_is_bounds_checked() {
     let mut fat = vec![0_u8; second_offset + x86.len()];
     fat[0..4].copy_from_slice(&0xcafe_babe_u32.to_be_bytes());
     fat[4..8].copy_from_slice(&2_u32.to_be_bytes());
-    fat[16..20].copy_from_slice(&(first_offset as u32).to_be_bytes());
-    fat[20..24].copy_from_slice(&(arm.len() as u32).to_be_bytes());
-    fat[36..40].copy_from_slice(&(second_offset as u32).to_be_bytes());
-    fat[40..44].copy_from_slice(&(x86.len() as u32).to_be_bytes());
+    fat[16..20].copy_from_slice(
+        &u32::try_from(first_offset)
+            .expect("test offset fits u32")
+            .to_be_bytes(),
+    );
+    fat[20..24].copy_from_slice(
+        &u32::try_from(arm.len())
+            .expect("test image fits u32")
+            .to_be_bytes(),
+    );
+    fat[36..40].copy_from_slice(
+        &u32::try_from(second_offset)
+            .expect("test offset fits u32")
+            .to_be_bytes(),
+    );
+    fat[40..44].copy_from_slice(
+        &u32::try_from(x86.len())
+            .expect("test image fits u32")
+            .to_be_bytes(),
+    );
     fat[first_offset..second_offset].copy_from_slice(&arm);
     fat[second_offset..].copy_from_slice(&x86);
     let identities = parse_macho_identities(&fat).unwrap();
