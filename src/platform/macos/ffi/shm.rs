@@ -56,6 +56,9 @@ impl ShmMapping {
 }
 
 const SHM_CREATE_ATTEMPTS: usize = 8;
+/// Darwin's POSIX shared-memory namespace accepts at most 30 visible bytes
+/// (`PSEMNAMLEN` includes the trailing NUL). Keep one byte of headroom.
+const MAX_DARWIN_SHM_NAME_BYTES: usize = 29;
 
 struct PendingShm {
     name: String,
@@ -89,7 +92,13 @@ impl Drop for PendingShm {
 }
 
 fn random_shm_name(monitor_pid: u32) -> String {
-    format!("/crash_monitor_{monitor_pid}_{}", Uuid::new_v4().simple())
+    // 8 hexadecimal PID digits + 16 nonce digits give a 64-bit random
+    // collision domain while remaining valid on Darwin. O_EXCL and bounded
+    // retries remain the authority if a collision does occur.
+    let nonce = (Uuid::new_v4().as_u128() >> 64) as u64;
+    let name = format!("/cm_{monitor_pid:08x}_{nonce:016x}");
+    debug_assert!(name.len() <= MAX_DARWIN_SHM_NAME_BYTES);
+    name
 }
 
 fn open_exclusive_shm(monitor_pid: u32) -> Result<PendingShm, String> {
@@ -139,13 +148,32 @@ fn validate_created_object(fd: &OwnedFd) -> Result<(), String> {
             stat.st_uid
         ));
     }
-    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+    let file_type = stat.st_mode & libc::S_IFMT;
+    // Darwin's POSIX shm descriptors report permission bits but no vnode type
+    // bits (`S_IFMT == 0`). Other platforms expose them as regular files.
+    #[cfg(target_os = "macos")]
+    let valid_file_type = file_type == 0 || file_type == libc::S_IFREG;
+    #[cfg(not(target_os = "macos"))]
+    let valid_file_type = file_type == libc::S_IFREG;
+    if !valid_file_type {
         return Err(format!(
             "shared-memory object is not regular: mode={:#o}",
             stat.st_mode
         ));
     }
-    if stat.st_size != SHM_TOTAL_SIZE as libc::off_t {
+    #[cfg(target_os = "macos")]
+    let valid_size = {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let rounded_size = usize::try_from(page_size)
+            .ok()
+            .filter(|size| *size > 0)
+            .and_then(|size| SHM_TOTAL_SIZE.checked_next_multiple_of(size));
+        stat.st_size == SHM_TOTAL_SIZE as libc::off_t
+            || rounded_size.is_some_and(|size| stat.st_size == size as libc::off_t)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let valid_size = stat.st_size == SHM_TOTAL_SIZE as libc::off_t;
+    if !valid_size {
         return Err(format!(
             "shared-memory size mismatch: expected {SHM_TOTAL_SIZE}, found {}",
             stat.st_size
@@ -256,8 +284,25 @@ mod tests {
     fn random_names_keep_pid_prefix_and_do_not_repeat() {
         let first = random_shm_name(42);
         let second = random_shm_name(42);
-        assert!(first.starts_with("/crash_monitor_42_"));
+        assert!(first.starts_with("/cm_0000002a_"));
         assert_ne!(first, second);
-        assert_eq!(first.len(), "/crash_monitor_42_".len() + 32);
+        assert_eq!(first.len(), MAX_DARWIN_SHM_NAME_BYTES);
+    }
+
+    #[test]
+    fn actual_shared_memory_name_is_accepted_and_unlinked_on_drop() {
+        let name = {
+            let mapping = create_shared_memory(std::process::id()).expect("create shared memory");
+            assert!(mapping.name().len() <= MAX_DARWIN_SHM_NAME_BYTES);
+            mapping.name().to_string()
+        };
+
+        let c_name = CString::new(name).unwrap();
+        let reopened = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDWR, 0) };
+        assert_eq!(reopened, -1, "drop must unlink the shared-memory name");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOENT)
+        );
     }
 }
