@@ -15,8 +15,7 @@ fn dialog_bin() -> std::path::PathBuf {
         .get_or_init(|| {
             let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             let target = std::env::var_os("CARGO_TARGET_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| manifest.join("target"));
+                .map_or_else(|| manifest.join("target"), std::path::PathBuf::from);
             let path = target.join("debug/crash_dialog_macos");
             if !path.exists() {
                 let status = Command::new(env!("CARGO"))

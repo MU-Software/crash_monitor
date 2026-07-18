@@ -343,7 +343,7 @@ fn summary_renders_non_string_json_annotations_and_missing_fields() {
     let rendered = String::from_utf8(output).unwrap();
     assert!(rendered.contains("frame_number=2847"), "{rendered}");
     assert!(rendered.contains("flags=[\"safe\",true]"), "{rendered}");
-    assert!(rendered.contains("User feedback: <missing>") == false);
+    assert!(!rendered.contains("User feedback: <missing>"));
 }
 
 #[test]

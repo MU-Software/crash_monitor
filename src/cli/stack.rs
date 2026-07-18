@@ -113,11 +113,19 @@ fn run_with_writers(
 }
 
 /// Print bytes in classic hexdump format (16 bytes per line with ASCII sidebar).
+///
+/// # Errors
+///
+/// Returns the sink error when the output cannot be written.
 pub fn print_hexdump(data: &[u8], output: &mut dyn Write) -> io::Result<()> {
     format_hexdump(data, output)
 }
 
 /// Stream bytes in classic hexdump format without materializing the full dump.
+///
+/// # Errors
+///
+/// Returns the sink error when any hexdump line cannot be written.
 pub fn format_hexdump(data: &[u8], out: &mut dyn Write) -> io::Result<()> {
     for (offset, chunk) in data.chunks(16).enumerate() {
         // Offset

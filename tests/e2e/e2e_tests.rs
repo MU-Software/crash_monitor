@@ -337,9 +337,10 @@ fn check_prerequisites() -> Result<(), String> {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if !stdout.contains("com.apple.security.cs.debugger") {
-                return Err(format!(
+                return Err(
                     "crash_monitor lacks com.apple.security.cs.debugger; run `make e2e-build` with a valid SIGN_IDENTITY"
-                ));
+                        .to_string(),
+                );
             }
         }
         Err(e) => {
@@ -1169,9 +1170,10 @@ fn test_e2e_anr() {
         if let Some(status) = processes.monitor.try_wait().expect("poll crash_monitor") {
             panic!("crash_monitor exited before publishing an ANR report: {status}");
         }
-        if Instant::now() >= deadline {
-            panic!("timed out waiting for an ANR report in {archive:?}");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an ANR report in {archive:?}"
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
 

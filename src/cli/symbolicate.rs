@@ -186,7 +186,7 @@ fn find_dwarf_binary_for_images(
     }
     match matches.as_slice() {
         [] => Err("no DWARF image matches a report image UUID and architecture".to_string()),
-        [matched] => Ok(matched.clone()),
+        [candidate] => Ok(candidate.clone()),
         _ => Err(format!(
             "ambiguous dSYM: {} DWARF images match the report ({})",
             matches.len(),
