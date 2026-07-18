@@ -310,7 +310,7 @@ pub fn termination_from_wait_status(
             core_dumped,
             runtime_ms,
         }),
-        _ => None,
+        WaitStatus::Stopped(_, _) | WaitStatus::Continued(_) | WaitStatus::StillAlive => None,
     }
 }
 

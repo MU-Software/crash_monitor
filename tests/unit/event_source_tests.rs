@@ -173,10 +173,14 @@ fn terminal_wait_status_preserves_signal_core_and_runtime() {
 
 #[test]
 fn nonterminal_wait_status_is_not_fabricated_into_a_termination() {
-    assert_eq!(
-        termination_from_wait_status(WaitStatus::StillAlive, Duration::ZERO),
-        None
-    );
+    let pid = nix::unistd::Pid::from_raw(42);
+    for status in [
+        WaitStatus::StillAlive,
+        WaitStatus::Stopped(pid, nix::sys::signal::Signal::SIGSTOP),
+        WaitStatus::Continued(pid),
+    ] {
+        assert_eq!(termination_from_wait_status(status, Duration::ZERO), None);
+    }
 }
 
 #[test]

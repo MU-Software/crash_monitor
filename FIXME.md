@@ -249,10 +249,10 @@
 
 ### P1-11. `waitpid`와 child-state edge case를 손실 없이 처리한다
 
-- [ ] `ChildGone`/`ECHILD`를 exit 0과 구분해 `UnknownStatus` 또는 monitor error로 표현한다.
-- [ ] `StillAlive | _` 같은 wildcard를 제거하고 모든 terminal/stopped/continued 상태를 exhaustive match한다.
-- [ ] `EINTR`를 재시도하고 unexpected wait 오류를 살아 있는 child의 종료로 오판하지 않는다.
-- [ ] non-crash nonzero exit가 crash 전용 port destroy/지연 경로를 거치지 않게 한다.
+- [x] `ChildGone`/`ECHILD`를 exit 0과 구분해 `UnknownStatus` 또는 monitor error로 표현한다.
+- [x] `StillAlive | _` 같은 wildcard를 제거하고 모든 terminal/stopped/continued 상태를 exhaustive match한다.
+- [x] `EINTR`를 재시도하고 unexpected wait 오류를 살아 있는 child의 종료로 오판하지 않는다.
+- [x] non-crash nonzero exit가 crash 전용 port destroy/지연 경로를 거치지 않게 한다.
 
 범위: `src/event_loop.rs`, `src/event_source.rs`, `src/platform/macos/ffi/spawn.rs`, `src/main.rs`.
 
