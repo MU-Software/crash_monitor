@@ -444,7 +444,7 @@ fn acquire_task_port_or_termination_with<A, P, N, S>(
     mut sleep: S,
 ) -> Result<TaskAcquisition, String>
 where
-    A: FnMut() -> Result<mach_port_t, String>,
+    A: FnMut(Duration) -> Result<mach_port_t, String>,
     P: FnMut() -> Result<Option<pipeline::TerminationReason>, String>,
     N: FnMut() -> Instant,
     S: FnMut(Duration),
@@ -452,7 +452,8 @@ where
     let deadline = now() + deadline_after;
 
     loop {
-        match acquire() {
+        let remaining = deadline.saturating_duration_since(now());
+        match acquire(remaining) {
             Ok(task) => return Ok(TaskAcquisition::Acquired(task)),
             Err(last_err) => {
                 if let Some(reason) = poll_child()? {
@@ -472,6 +473,54 @@ where
     }
 }
 
+/// Execute one potentially blocking task-port lookup behind a deadline.
+///
+/// Darwin does not offer a cancellable `task_for_pid` variant. A timed-out
+/// lookup is therefore detached, allowing the supervisor to contain and reap
+/// the child before exiting. If the call completes after the receiver is gone,
+/// the worker releases any acquired send right instead of leaking it.
+fn task_for_pid_with_timeout<F>(timeout: Duration, operation: F) -> Result<mach_port_t, String>
+where
+    F: FnOnce() -> Result<mach_port_t, String> + Send + 'static,
+{
+    if timeout.is_zero() {
+        return Err("task_for_pid call deadline expired".to_string());
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let handle = std::thread::Builder::new()
+        .name("task-port-acquisition".to_string())
+        .spawn(move || {
+            let result = operation();
+            if let Err(std::sync::mpsc::SendError(result)) = sender.send(result)
+                && let Ok(task) = result
+            {
+                platform::deallocate_task_port(task);
+            }
+        })
+        .map_err(|error| format!("spawning task_for_pid worker failed: {error}"))?;
+
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => {
+            handle
+                .join()
+                .map_err(|_| "task_for_pid worker panicked".to_string())?;
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            drop(handle);
+            Err(format!(
+                "task_for_pid call exceeded {}ms",
+                timeout.as_millis()
+            ))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = handle.join();
+            Err("task_for_pid worker disconnected".to_string())
+        }
+    }
+}
+
 fn acquire_task_port_or_termination(
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
@@ -479,7 +528,11 @@ fn acquire_task_port_or_termination(
     acquire_task_port_or_termination_with(
         TASK_ACQUISITION_DEADLINE,
         TASK_ACQUISITION_RETRY_INTERVAL,
-        || platform::get_task_for_pid(child_pid.as_raw()).map_err(|error| error.to_string()),
+        move |remaining| {
+            task_for_pid_with_timeout(remaining, move || {
+                platform::get_task_for_pid(child_pid.as_raw()).map_err(|error| error.to_string())
+            })
+        },
         || poll_child_termination(child_pid, child_started_at),
         Instant::now,
         std::thread::sleep,
@@ -1278,7 +1331,7 @@ mod tests {
         let result = acquire_task_port_or_termination_with(
             TEST_REAP_DEADLINE,
             TEST_REAP_DEADLINE,
-            || {
+            |_| {
                 attempts += 1;
                 Err("task_for_pid failed: KERN_FAILURE (missing entitlement)".to_string())
             },
@@ -1294,6 +1347,28 @@ mod tests {
         assert!(error.contains("missing entitlement"));
         assert_eq!(elapsed.get(), TEST_REAP_DEADLINE);
         assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn blocking_task_port_call_cannot_outlive_the_supervisor_deadline() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+
+        let error = task_for_pid_with_timeout(Duration::from_millis(10), move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            done_tx.send(()).unwrap();
+            Err("released blocked lookup".to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.contains("exceeded 10ms"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     #[test]
@@ -1343,7 +1418,7 @@ mod tests {
         let result = acquire_task_port_or_termination_with(
             Duration::from_secs(30),
             TEST_REAP_DEADLINE,
-            || {
+            |_| {
                 attempts += 1;
                 Err("task_for_pid raced child startup".to_string())
             },

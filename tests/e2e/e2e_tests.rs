@@ -22,7 +22,7 @@ use std::io::Read;
 use std::mem::{offset_of, size_of};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -37,6 +37,7 @@ const SIGTERM_NUMBER: i32 = 15;
 const REPORT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const REPORT_MANIFEST_FILE_NAME: &str = "manifest.json";
 const MAX_REPORT_MANIFEST_BYTES: u64 = 1024 * 1024;
+const E2E_MONITOR_DEADLINE: Duration = Duration::from_secs(20);
 
 #[derive(Deserialize)]
 struct ReportManifest {
@@ -109,6 +110,35 @@ fn monitor_cmd(data_dir: &Path) -> Command {
     cmd.env("CRASH_MONITOR_DATA_DIR", data_dir);
     cmd.env("CRASH_MONITOR_DIALOG_BIN", mock_dialog_path());
     cmd
+}
+
+trait CommandDeadlineExt {
+    fn output_with_deadline(&mut self, timeout: Duration) -> std::io::Result<Output>;
+}
+
+impl CommandDeadlineExt for Command {
+    fn output_with_deadline(&mut self, timeout: Duration) -> std::io::Result<Output> {
+        let mut child = self.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if child.try_wait()?.is_some() {
+                return child.wait_with_output();
+            }
+            if Instant::now() >= deadline {
+                let pid = child.id();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "crash_monitor process {pid} exceeded {}ms and was killed",
+                        timeout.as_millis()
+                    ),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
 }
 
 /// Get the sent crashes directory within a test's data dir.
@@ -726,7 +756,7 @@ fn test_e2e_crash_sigsegv() {
         .arg("run")
         .arg(crash_app_path())
         .arg("sigsegv")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run crash_monitor");
 
     assert_eq!(
@@ -832,7 +862,7 @@ fn test_e2e_crash_sigabrt() {
         .arg("run")
         .arg(crash_app_path())
         .arg("sigabrt")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run crash_monitor");
 
     assert_eq!(
@@ -867,7 +897,7 @@ fn test_e2e_fast_clean_exit() {
         .arg("run")
         .arg(crash_app_path())
         .arg("clean")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run crash_monitor");
 
     // Monitor should exit 0 on clean exit
@@ -898,7 +928,7 @@ fn test_e2e_nonzero_exit_reports_termination() {
         .arg("run")
         .arg(crash_app_path())
         .arg("exit42")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run crash_monitor");
 
     assert_eq!(
@@ -935,7 +965,7 @@ fn test_e2e_sigterm_preserves_signal_semantics() {
         .arg("run")
         .arg(crash_app_path())
         .arg("sigterm")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run crash_monitor");
 
     assert_eq!(
@@ -974,7 +1004,7 @@ fn test_e2e_nonexistent_executable_is_monitor_failure() {
     let output = monitor_cmd(data_dir.path())
         .arg("run")
         .arg(&nonexistent)
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run crash_monitor");
 
     assert_eq!(
@@ -1005,7 +1035,7 @@ fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
         .arg("run")
         .arg(crash_app_path())
         .arg("uninstrumented")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run crash_monitor");
 
     assert_eq!(
@@ -1101,7 +1131,7 @@ fn test_e2e_sigkill_is_classified_as_possible_oom_when_enabled() {
         .arg("run")
         .arg(crash_app_path())
         .arg("sigkill")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("run crash_monitor");
 
     assert_eq!(output.status.code(), Some(128 + SIGKILL_NUMBER));
@@ -1126,7 +1156,7 @@ fn test_e2e_other_fatal_signal_preserves_sigill() {
         .arg("run")
         .arg(crash_app_path())
         .arg("sigill")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("run crash_monitor");
 
     assert_eq!(output.status.code(), Some(128 + SIGILL_NUMBER));
@@ -1240,7 +1270,7 @@ fn test_e2e_unsigned_binary_fails_fast() {
         .arg("run")
         .arg(&child)
         .arg("clean")
-        .output()
+        .output_with_deadline(E2E_MONITOR_DEADLINE)
         .expect("failed to run debug crash_monitor");
 
     assert!(

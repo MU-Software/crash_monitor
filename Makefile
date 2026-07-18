@@ -128,7 +128,7 @@ e2e-test: e2e-build $(E2E_CHILD)
 # capable of granting com.apple.security.cs.debugger.
 e2e-required: e2e-build $(E2E_CHILD)
 	cargo build
-	E2E_REQUIRED=1 cargo test --test e2e_tests -- --include-ignored
+	E2E_REQUIRED=1 cargo test --test e2e_tests -- --include-ignored --test-threads=1
 
 test: schema-check
 	cargo test --workspace --all-targets
@@ -151,7 +151,7 @@ e2e-coverage: $(E2E_CHILD)
 	. $(COV_ENV_FILE); cargo build --release --workspace --features test-support
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
 	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
-	. $(COV_ENV_FILE); CRASH_MONITOR_E2E_BIN=$(abspath $(MONITOR_BIN)) E2E_REQUIRED=1 cargo test --test e2e_tests -- --include-ignored
+	. $(COV_ENV_FILE); CRASH_MONITOR_E2E_BIN=$(abspath $(MONITOR_BIN)) E2E_REQUIRED=1 cargo test --test e2e_tests -- --include-ignored --test-threads=1
 	cargo llvm-cov report $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"
 
