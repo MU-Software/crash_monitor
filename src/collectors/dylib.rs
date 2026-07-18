@@ -66,10 +66,8 @@ impl Collector for DylibCollector {
     ) -> Result<(), String> {
         context.checkpoint()?;
         let platform = self.platform.as_ref();
-        data.raw.images = enumerate_loaded_images(platform, task, context).unwrap_or_else(|e| {
-            eprintln!("[monitor] dylib collection failed: {e}");
-            vec![]
-        });
+        data.raw.images = enumerate_loaded_images(platform, task, context)
+            .map_err(|error| format!("dylib image enumeration failed: {error}"))?;
         context.checkpoint()?;
         compute_all_slides(platform, task, &mut data.raw.images, context)?;
         Ok(())

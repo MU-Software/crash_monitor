@@ -273,7 +273,7 @@ impl PluginContext {
 pub enum PluginRunResult<T> {
     Completed(T),
     Failed(String),
-    Panicked,
+    Panicked(String),
     TimedOut,
 }
 
@@ -282,7 +282,7 @@ impl<T> PluginRunResult<T> {
     pub fn into_option(self) -> Option<T> {
         match self {
             Self::Completed(value) => Some(value),
-            Self::Failed(_) | Self::Panicked | Self::TimedOut => None,
+            Self::Failed(_) | Self::Panicked(_) | Self::TimedOut => None,
         }
     }
 }
@@ -328,11 +328,24 @@ pub fn run_plugin_cooperative<T>(
             eprintln!("[monitor] plugin {name}: {error}");
             PluginRunResult::Failed(error)
         }
-        Err(_) => {
-            eprintln!("[monitor] plugin {name} panicked");
-            PluginRunResult::Panicked
+        Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            eprintln!("[monitor] plugin {name} panicked: {message}");
+            PluginRunResult::Panicked(message)
         }
     }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&'static str>()
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| format!("non-string panic payload ({:?})", payload.type_id()))
 }
 
 /// Execute a plugin closure with panic catching and no process-global timeout.

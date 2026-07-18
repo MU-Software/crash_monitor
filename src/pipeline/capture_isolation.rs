@@ -370,7 +370,7 @@ fn plugin_status<T>(outcome: &PluginRunResult<T>) -> PluginStatus {
     match outcome {
         PluginRunResult::Completed(_) => PluginStatus::Ok,
         PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
-        PluginRunResult::Panicked => PluginStatus::Error("plugin panicked".into()),
+        PluginRunResult::Panicked(message) => PluginStatus::Panic(message.clone()),
         PluginRunResult::TimedOut => PluginStatus::TimedOut,
     }
 }

@@ -359,12 +359,12 @@
 
 ### P1-23. plugin 실행 결과를 typed diagnostics로 보존한다
 
-- [ ] `Ok`, `Partial`, `Rejected`, `Error`, `Panic`, `Timeout`, `Skipped`를 서로 다른 상태로 모델링한다.
-- [ ] collector가 내부 오류를 로그만 남기고 빈 성공으로 바꾸지 않게 한다.
-- [ ] `DylibCollector`의 image 열거 실패를 `unwrap_or_else(... vec![])` 뒤 `Ok(())`로 바꾸지 않고 `Partial` 또는 `Error`와 원인으로 전파한다.
-- [ ] filter의 passed/rejected/error와 차단한 plugin 이름을 기록한다.
-- [ ] artifact가 없어 notifier를 건너뛴 경우에도 `Skipped` 사유를 기록한다.
-- [ ] panic payload와 실제 error chain을 단일 `failed or panicked` 문자열로 축약하지 않는다.
+- [x] `Ok`, `Partial`, `Rejected`, `Error`, `Panic`, `Timeout`, `Skipped`를 서로 다른 상태로 모델링한다.
+- [x] collector가 내부 오류를 로그만 남기고 빈 성공으로 바꾸지 않게 한다.
+- [x] `DylibCollector`의 image 열거 실패를 `unwrap_or_else(... vec![])` 뒤 `Ok(())`로 바꾸지 않고 `Partial` 또는 `Error`와 원인으로 전파한다.
+- [x] filter의 passed/rejected/error와 차단한 plugin 이름을 기록한다.
+- [x] artifact가 없어 notifier를 건너뛴 경우에도 `Skipped` 사유를 기록한다.
+- [x] panic payload와 실제 error chain을 단일 `failed or panicked` 문자열로 축약하지 않는다.
 
 범위: pipeline traits/safety/diagnostics와 각 collector.
 

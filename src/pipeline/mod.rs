@@ -214,7 +214,7 @@ fn plugin_status<T>(result: &PluginRunResult<T>) -> PluginStatus {
     match result {
         PluginRunResult::Completed(_) => PluginStatus::Ok,
         PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
-        PluginRunResult::Panicked => PluginStatus::Error("panicked".to_string()),
+        PluginRunResult::Panicked(message) => PluginStatus::Panic(message.clone()),
         PluginRunResult::TimedOut => PluginStatus::TimedOut,
     }
 }
@@ -627,8 +627,12 @@ impl Pipeline {
                 timeout,
                 |context| filter.should_process(event, context),
             );
-            let status = plugin_status(&outcome);
             let pass = outcome.into_option().unwrap_or(true);
+            let status = if pass {
+                PluginStatus::Ok
+            } else {
+                PluginStatus::Rejected(format!("{} rejected the event", filter.name()))
+            };
             diagnostics.record(filter.name(), status, start.elapsed());
             if !pass {
                 return std::mem::take(diagnostics);
@@ -821,6 +825,13 @@ impl Pipeline {
                 );
                 let status = plugin_status(&outcome);
                 diagnostics.record(n.name(), status, start.elapsed());
+            }
+        } else {
+            for notifier in &self.notifiers {
+                diagnostics.record_immediate(
+                    notifier.name(),
+                    PluginStatus::Skipped("no final report artifact".into()),
+                );
             }
         }
 

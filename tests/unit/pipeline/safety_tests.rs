@@ -64,7 +64,7 @@ fn test_run_plugin_cooperative_panic_is_typed() {
     let result = run_plugin_cooperative::<i32>("test", &context, |_| {
         panic!("oops");
     });
-    assert!(matches!(result, PluginRunResult::Panicked));
+    assert!(matches!(result, PluginRunResult::Panicked(message) if message == "oops"));
 }
 
 #[test]

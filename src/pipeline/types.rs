@@ -164,7 +164,10 @@ pub enum Priority {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PluginStatus {
     Ok,
+    Partial(String),
+    Rejected(String),
     Error(String),
+    Panic(String),
     /// The plugin's absolute deadline or cancellation token fired.
     TimedOut,
     Skipped(String),
@@ -264,9 +267,9 @@ impl Diagnostics {
 
     #[must_use]
     pub fn succeeded(&self, name: &str) -> bool {
-        self.plugins
-            .iter()
-            .any(|d| d.name == name && matches!(d.status, PluginStatus::Ok))
+        self.plugins.iter().any(|d| {
+            d.name == name && matches!(d.status, PluginStatus::Ok | PluginStatus::Partial(_))
+        })
     }
 
     #[must_use]

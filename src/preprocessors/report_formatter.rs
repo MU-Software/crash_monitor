@@ -218,9 +218,24 @@ pub(crate) fn build_diagnostics_json(diagnostics: &Diagnostics) -> Option<serde_
                     "status": "ok",
                     "duration_ms": d.duration_ms,
                 }),
+                PluginStatus::Partial(reason) => serde_json::json!({
+                    "status": "partial",
+                    "reason": reason,
+                    "duration_ms": d.duration_ms,
+                }),
+                PluginStatus::Rejected(reason) => serde_json::json!({
+                    "status": "rejected",
+                    "reason": reason,
+                    "duration_ms": d.duration_ms,
+                }),
                 PluginStatus::Error(e) => serde_json::json!({
                     "status": "error",
                     "error": e,
+                    "duration_ms": d.duration_ms,
+                }),
+                PluginStatus::Panic(payload) => serde_json::json!({
+                    "status": "panic",
+                    "payload": payload,
                     "duration_ms": d.duration_ms,
                 }),
                 PluginStatus::TimedOut => serde_json::json!({

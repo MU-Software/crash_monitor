@@ -61,7 +61,9 @@ impl Notifier for SystemNotification {
             )),
             PluginRunResult::TimedOut => Err("osascript timed out".to_string()),
             PluginRunResult::Failed(error) => Err(error),
-            PluginRunResult::Panicked => Err("osascript supervisor panicked".to_string()),
+            PluginRunResult::Panicked(message) => {
+                Err(format!("osascript supervisor panicked: {message}"))
+            }
         }
     }
 }
