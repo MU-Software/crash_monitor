@@ -1042,10 +1042,10 @@
 
 ### P2-45. 운영 troubleshooting runbook을 만든다
 
-- [ ] entitlement와 `task_for_pid` 실패 진단 절차를 제공한다.
-- [ ] signing identity, helper signature, architecture mismatch를 확인하는 절차를 제공한다.
-- [ ] orphan child/process group, stale SHM, incomplete `pending`, failed archive를 확인·복구하는 절차를 제공한다.
-- [ ] 안전하게 수집을 끄고 기존 민감 report를 정리하는 절차를 제공한다.
+- [x] entitlement와 `task_for_pid` 실패 진단 절차를 제공한다.
+- [x] signing identity, helper signature, architecture mismatch를 확인하는 절차를 제공한다.
+- [x] orphan child/process group, stale SHM, incomplete `pending`, failed archive를 확인·복구하는 절차를 제공한다.
+- [x] 안전하게 수집을 끄고 기존 민감 report를 정리하는 절차를 제공한다.
 
 범위: operations/troubleshooting documentation.
 
