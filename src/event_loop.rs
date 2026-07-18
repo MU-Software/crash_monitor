@@ -42,6 +42,9 @@ pub enum MonitorEvent {
     },
     /// SIGUSR1 manual snapshot.
     Snapshot,
+    /// SIGTERM/SIGINT requested monitor shutdown. The outer lifecycle
+    /// supervisor forwards this signal to the complete child process group.
+    ShutdownSignal(i32),
     /// A terminal child status, normalized from every `waitpid` owner.
     ChildTerminated(TerminationReason),
     /// The monitor can no longer determine the child's state reliably.
@@ -108,6 +111,10 @@ pub enum MonitorOutcome {
         /// to the fatal finalization worker.
         report_path: Option<PathBuf>,
     },
+    ShutdownRequested {
+        signal: i32,
+        termination: Option<TerminationReason>,
+    },
     MonitorFailure(String),
 }
 
@@ -121,7 +128,8 @@ impl MonitorOutcome {
             | Self::DetectedCrash {
                 termination: Some(TerminationReason::Signaled { signal, .. }),
                 ..
-            } => 128 + signal,
+            }
+            | Self::ShutdownRequested { signal, .. } => 128 + signal,
             Self::DetectedCrash {
                 termination: Some(TerminationReason::Exited { exit_code: 0, .. }) | None,
                 ..
@@ -147,6 +155,18 @@ impl MonitorOutcome {
             Self::DetectedCrash { .. } => Self::DetectedCrash {
                 termination: reason,
                 report_path,
+            },
+            other => other,
+        }
+    }
+
+    /// Attach the child status observed after forwarding a shutdown signal.
+    #[must_use]
+    pub fn with_shutdown_termination(self, reason: Option<TerminationReason>) -> Self {
+        match self {
+            Self::ShutdownRequested { signal, .. } => Self::ShutdownRequested {
+                signal,
+                termination: reason,
             },
             other => other,
         }
@@ -503,6 +523,20 @@ pub fn event_loop(
                     &mut last_anr_check,
                     monitor_work_started,
                 );
+            }
+
+            Some(MonitorEvent::ShutdownSignal(signal)) => {
+                capture_worker.shutdown(Duration::from_millis(100));
+                background_worker.shutdown(BACKGROUND_DRAIN_DEADLINE);
+                return EventLoopResult {
+                    outcome: MonitorOutcome::ShutdownRequested {
+                        signal,
+                        termination: None,
+                    },
+                    crash_finalization: None,
+                    crash_cleanup_required: false,
+                    listener_loss_containment_required: false,
+                };
             }
 
             Some(MonitorEvent::ChildTerminated(reason)) => {

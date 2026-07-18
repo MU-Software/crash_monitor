@@ -23,7 +23,6 @@ use crate::platform::macos::types::{
 };
 
 use super::spawn::{allocate_receive_port, insert_send_right};
-use super::types::OwnedMachPort;
 
 const MESSAGE_BUFFER_CAPACITY: usize = 8 * 1024;
 const EXCEPTION_REPLY_TIMEOUT: mach_msg_timeout_t = 100;
@@ -288,7 +287,7 @@ pub fn create_exception_port() -> Result<mach_port_t, String> {
     let port = allocate_receive_port().map_err(|e| e.to_string())?;
     if let Err(e) = insert_send_right(port) {
         // Clean up the receive right we just allocated
-        drop(OwnedMachPort::new(port));
+        drop(super::types::OwnedExceptionPort::new(port));
         return Err(e.to_string());
     }
     Ok(port)

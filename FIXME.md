@@ -173,10 +173,10 @@
 
 ### P1-02. monitor가 child process group의 전체 수명주기를 소유한다
 
-- [ ] spawn 시 별도 process group을 만들고 PID, PGID, task port, exception port, listener, SHM을 supervisor가 소유한다.
-- [ ] SIGTERM/SIGINT를 self-pipe/event source로 받아 정책에 따라 child group에 전달한다.
-- [ ] monitor 정상 종료, 내부 오류, 강제 종료 가능한 범위에서 child terminate/reap과 SHM/port 정리를 보장한다.
-- [ ] parent-death guard 또는 fixture 자체 deadline으로 monitor 비정상 종료 시 orphan 위험을 줄인다.
+- [x] spawn 시 별도 process group을 만들고 PID, PGID, task port, exception port, listener, SHM을 supervisor가 소유한다.
+- [x] SIGTERM/SIGINT를 self-pipe/event source로 받아 정책에 따라 child group에 전달한다.
+- [x] monitor 정상 종료, 내부 오류, 강제 종료 가능한 범위에서 child terminate/reap과 SHM/port 정리를 보장한다.
+- [x] parent-death guard 또는 fixture 자체 deadline으로 monitor 비정상 종료 시 orphan 위험을 줄인다.
 
 범위: `src/main.rs`, `src/event_loop.rs`, `src/platform/macos/ffi/spawn.rs`.
 

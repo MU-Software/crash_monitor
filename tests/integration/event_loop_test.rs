@@ -2144,6 +2144,34 @@ fn listener_loss_requires_fail_closed_child_containment() {
 }
 
 #[test]
+fn test_shutdown_signal_is_returned_to_the_process_group_supervisor() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline(tempdir.path());
+    let mut source = TestEventSource::new(vec![MonitorEvent::ShutdownSignal(15)]);
+
+    let outcome = event_loop(
+        &mut source,
+        &pipeline,
+        0,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        &outcome.outcome,
+        MonitorOutcome::ShutdownRequested {
+            signal: 15,
+            termination: None
+        }
+    ));
+    assert_eq!(outcome.exit_code(), 143);
+    assert_eq!(count_json_files(tempdir.path()), 0);
+}
+
+#[test]
 fn test_startup_recovers_valid_prepared_sent_report_without_exposing_partial_entries() {
     use crash_monitor::pipeline::{ArtifactKind, ArtifactTransaction, ReportContext, ReportType};
 

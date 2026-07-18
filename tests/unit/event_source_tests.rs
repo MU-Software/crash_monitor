@@ -6,6 +6,14 @@
 
 use super::*;
 
+static SIGNAL_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn signal_state_guard() -> std::sync::MutexGuard<'static, ()> {
+    SIGNAL_STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Create a pipe and set its read end non-blocking, matching how
 /// `setup_signal_pipe` configures the real signal pipe.
 fn nonblocking_pipe() -> (OwnedFd, OwnedFd) {
@@ -18,20 +26,24 @@ fn nonblocking_pipe() -> (OwnedFd, OwnedFd) {
 
 #[test]
 fn drain_reports_false_on_empty_pipe() {
+    let _guard = signal_state_guard();
     let (read_fd, _write_fd) = nonblocking_pipe();
-    assert!(!drain_signal_pipe(&read_fd).unwrap());
+    PENDING_SIGNALS.store(0, Ordering::Release);
+    assert!(drain_signal_pipe(&read_fd).unwrap().is_empty());
 }
 
 #[test]
 fn drain_reports_true_after_write_then_false_again() {
+    let _guard = signal_state_guard();
     let (read_fd, write_fd) = nonblocking_pipe();
 
-    // A byte written (as sigusr1_handler would) is drained as a snapshot request.
+    // The handler publishes identity atomically and uses the pipe only to wake.
+    PENDING_SIGNALS.store(PENDING_SIGUSR1, Ordering::Release);
     unistd::write(&write_fd, &[1u8]).unwrap();
-    assert!(drain_signal_pipe(&read_fd).unwrap());
+    assert_eq!(drain_signal_pipe(&read_fd).unwrap(), vec![libc::SIGUSR1]);
 
     // Once drained, the pipe is empty again.
-    assert!(!drain_signal_pipe(&read_fd).unwrap());
+    assert!(drain_signal_pipe(&read_fd).unwrap().is_empty());
 }
 
 #[test]
@@ -48,12 +60,14 @@ fn signal_pipe_is_nonblocking_and_close_on_exec_at_both_ends() {
 
 #[test]
 fn signal_burst_is_fully_drained_and_coalesced_to_one_request() {
+    let _guard = signal_state_guard();
     let (read_fd, write_fd) = nonblocking_cloexec_pipe("test signal pipe").unwrap();
     let burst = [1_u8; 512];
+    PENDING_SIGNALS.store(PENDING_SIGUSR1, Ordering::Release);
     unistd::write(&write_fd, &burst).unwrap();
 
-    assert!(drain_signal_pipe(&read_fd).unwrap());
-    assert!(!drain_signal_pipe(&read_fd).unwrap());
+    assert_eq!(drain_signal_pipe(&read_fd).unwrap(), vec![libc::SIGUSR1]);
+    assert!(drain_signal_pipe(&read_fd).unwrap().is_empty());
 }
 
 #[test]
@@ -86,15 +100,18 @@ fn duplicate_signal_pipe_owner_is_reported_without_replacing_the_live_fd() {
 
 #[test]
 fn signal_handler_restores_interrupted_errno() {
+    let _guard = signal_state_guard();
     let previous = SIGNAL_PIPE_WRITE.swap(-1, Ordering::AcqRel);
     nix::errno::Errno::EBUSY.set();
-    sigusr1_handler(libc::SIGUSR1);
+    monitor_signal_handler(libc::SIGUSR1);
     assert_eq!(nix::errno::Errno::last(), nix::errno::Errno::EBUSY);
+    PENDING_SIGNALS.store(0, Ordering::Release);
     SIGNAL_PIPE_WRITE.store(previous, Ordering::Release);
 }
 
 #[test]
 fn signal_pipe_drain_propagates_non_retryable_errors() {
+    let _guard = signal_state_guard();
     let write_only: OwnedFd = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/null")
@@ -102,6 +119,21 @@ fn signal_pipe_drain_propagates_non_retryable_errors() {
         .into();
     let error = drain_signal_pipe(&write_only).unwrap_err();
     assert!(error.contains("EBADF"), "{error}");
+}
+
+#[test]
+fn drain_preserves_coalesced_shutdown_and_snapshot_identities() {
+    let _guard = signal_state_guard();
+    let (read_fd, write_fd) = nonblocking_pipe();
+    PENDING_SIGNALS.store(
+        PENDING_SIGUSR1 | PENDING_SIGTERM | PENDING_SIGINT,
+        Ordering::Release,
+    );
+    unistd::write(&write_fd, &[1]).unwrap();
+    assert_eq!(
+        drain_signal_pipe(&read_fd).unwrap(),
+        vec![libc::SIGTERM, libc::SIGINT, libc::SIGUSR1]
+    );
 }
 
 #[test]

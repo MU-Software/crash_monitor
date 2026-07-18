@@ -27,6 +27,8 @@ pub enum SpawnStage {
     OutputPipe,
     /// Configuring `posix_spawn` file actions failed.
     FileActions,
+    /// Creating a dedicated process group for lifecycle ownership failed.
+    ProcessGroup,
     /// Creating or setting up the child executable failed.
     PosixSpawn,
 }
@@ -38,6 +40,7 @@ impl fmt::Display for SpawnStage {
             Self::ExceptionPorts => "posix_spawnattr_setexceptionports_np",
             Self::OutputPipe => "pipe/fcntl",
             Self::FileActions => "posix_spawn_file_actions",
+            Self::ProcessGroup => "posix_spawn process-group attributes",
             Self::PosixSpawn => "posix_spawn",
         })
     }
@@ -101,6 +104,23 @@ unsafe extern "C" {
         behavior: i32,
         flavor: i32,
     ) -> libc::c_int;
+}
+
+unsafe fn configure_process_group(attr: *mut libc::posix_spawnattr_t) -> Result<(), SpawnError> {
+    // SAFETY: caller owns an initialized spawn attribute object.
+    let rc = unsafe { libc::posix_spawnattr_setpgroup(attr, 0) };
+    if rc != 0 {
+        return Err(SpawnError::new(SpawnStage::ProcessGroup, rc));
+    }
+    // SAFETY: same initialized attribute object; this selects the pgroup value
+    // installed immediately above.
+    let rc = unsafe {
+        libc::posix_spawnattr_setflags(attr, libc::POSIX_SPAWN_SETPGROUP as libc::c_short)
+    };
+    if rc != 0 {
+        return Err(SpawnError::new(SpawnStage::ProcessGroup, rc));
+    }
+    Ok(())
 }
 
 /// Spawn a child process via `posix_spawn` with exception ports pre-configured.
@@ -217,6 +237,13 @@ fn spawn_with_exception_port_impl(
             return Err(SpawnError::new(SpawnStage::ExceptionPorts, rc));
         }
 
+        // Make the spawned process the leader of a new process group before
+        // applying stdout/stderr file actions.
+        if let Err(error) = configure_process_group(&raw mut attr) {
+            libc::posix_spawnattr_destroy(&raw mut attr);
+            return Err(error);
+        }
+
         let mut file_actions: libc::posix_spawn_file_actions_t = ptr::null_mut();
         let file_actions_ptr = if let Some(pipes) = &pipes {
             let rc = libc::posix_spawn_file_actions_init(&raw mut file_actions);
@@ -303,6 +330,136 @@ fn spawn_with_exception_port_impl(
     Ok(pid)
 }
 
+/// A tiny process that outlives the monitor long enough to kill the monitored
+/// process group if the monitor disappears without running destructors.
+///
+/// The guardian blocks in async-signal-safe `read(2)`. Normal shutdown writes
+/// one disarm byte; monitor death closes the CLOEXEC pipe and produces EOF,
+/// causing a group-wide SIGKILL. It owns no Rust heap state in the fork child.
+pub struct ParentDeathGuard {
+    write_fd: libc::c_int,
+    guardian_pid: libc::pid_t,
+    armed: bool,
+}
+
+impl ParentDeathGuard {
+    /// Install a parent-death guard for `process_group`.
+    ///
+    /// # Errors
+    /// Returns an error if the CLOEXEC pipe or guardian process cannot be
+    /// created.
+    pub fn install(process_group: libc::pid_t) -> Result<Self, String> {
+        if process_group <= 1 {
+            return Err(format!(
+                "parent-death guard requires a positive child PGID, got {process_group}"
+            ));
+        }
+        let mut pipe_fds = [-1; 2];
+        // SAFETY: `pipe_fds` provides storage for exactly two descriptors.
+        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+            return Err(format!(
+                "parent-death guard pipe failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        for fd in pipe_fds {
+            // SAFETY: both descriptors were returned by `pipe` above.
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                let error = std::io::Error::last_os_error();
+                // SAFETY: close each descriptor exactly once on setup failure.
+                unsafe {
+                    libc::close(pipe_fds[0]);
+                    libc::close(pipe_fds[1]);
+                }
+                return Err(format!("parent-death guard CLOEXEC failed: {error}"));
+            }
+        }
+
+        // SAFETY: the fork child calls only async-signal-safe libc functions
+        // before `_exit`, avoiding inherited Rust runtime state.
+        let guardian_pid = unsafe { libc::fork() };
+        if guardian_pid < 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(pipe_fds[0]);
+                libc::close(pipe_fds[1]);
+            }
+            return Err(format!("parent-death guard fork failed: {error}"));
+        }
+        if guardian_pid == 0 {
+            unsafe {
+                libc::close(pipe_fds[1]);
+                let mut disarm = 0_u8;
+                loop {
+                    let read_result = libc::read(
+                        pipe_fds[0],
+                        std::ptr::from_mut(&mut disarm).cast::<libc::c_void>(),
+                        1,
+                    );
+                    if read_result > 0 {
+                        libc::_exit(0);
+                    }
+                    if read_result == 0 {
+                        libc::kill(-process_group, libc::SIGKILL);
+                        libc::_exit(0);
+                    }
+                    if *libc::__error() != libc::EINTR {
+                        libc::kill(-process_group, libc::SIGKILL);
+                        libc::_exit(1);
+                    }
+                }
+            }
+        }
+
+        // SAFETY: the parent needs only the write end.
+        unsafe {
+            libc::close(pipe_fds[0]);
+        }
+        Ok(Self {
+            write_fd: pipe_fds[1],
+            guardian_pid,
+            armed: true,
+        })
+    }
+
+    /// Tell the guardian that normal supervisor cleanup has completed.
+    pub fn disarm(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let byte = 1_u8;
+        // SAFETY: the descriptor is uniquely owned here. Write failure means
+        // the guardian has already exited, so cleanup can continue.
+        unsafe {
+            libc::write(
+                self.write_fd,
+                std::ptr::from_ref(&byte).cast::<libc::c_void>(),
+                1,
+            );
+            libc::close(self.write_fd);
+        }
+        self.write_fd = -1;
+
+        loop {
+            // SAFETY: wait only for the dedicated guardian child.
+            let result = unsafe { libc::waitpid(self.guardian_pid, std::ptr::null_mut(), 0) };
+            if result == self.guardian_pid
+                || result < 0 && nix::errno::Errno::last() != nix::errno::Errno::EINTR
+            {
+                break;
+            }
+        }
+    }
+}
+
+impl Drop for ParentDeathGuard {
+    fn drop(&mut self) {
+        self.disarm();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +539,94 @@ mod tests {
         // SAFETY: `port` is a receive right allocated by this test.
         let destroy_result = unsafe { mach_port_destroy(self_task(), port) };
         assert_eq!(destroy_result, 0, "destroy temporary exception port");
+    }
+
+    #[test]
+    fn spawn_attributes_create_a_dedicated_process_group() {
+        unsafe {
+            let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
+            assert_eq!(libc::posix_spawnattr_init(&raw mut attr), 0);
+            configure_process_group(&raw mut attr).expect("configure child process group");
+
+            let mut flags = 0 as libc::c_short;
+            let mut pgroup = -1 as libc::pid_t;
+            assert_eq!(
+                libc::posix_spawnattr_getflags(&raw const attr, &raw mut flags),
+                0
+            );
+            assert_eq!(
+                libc::posix_spawnattr_getpgroup(&raw const attr, &raw mut pgroup),
+                0
+            );
+            assert_ne!(flags & libc::POSIX_SPAWN_SETPGROUP as libc::c_short, 0);
+            assert_eq!(pgroup, 0, "zero requests child PID as its new PGID");
+            libc::posix_spawnattr_destroy(&raw mut attr);
+        }
+    }
+
+    #[test]
+    fn parent_death_guard_kills_the_owned_process_group_on_pipe_eof() {
+        let mut ready_pipe = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(ready_pipe.as_mut_ptr()) }, 0);
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                libc::close(ready_pipe[0]);
+                if libc::setpgid(0, 0) != 0 {
+                    libc::_exit(2);
+                }
+                let ready = 1_u8;
+                libc::write(
+                    ready_pipe[1],
+                    std::ptr::from_ref(&ready).cast::<libc::c_void>(),
+                    1,
+                );
+                libc::close(ready_pipe[1]);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        assert!(pid > 0, "fork test child");
+        unsafe {
+            libc::close(ready_pipe[1]);
+            let mut ready = 0_u8;
+            assert_eq!(
+                libc::read(
+                    ready_pipe[0],
+                    std::ptr::from_mut(&mut ready).cast::<libc::c_void>(),
+                    1,
+                ),
+                1
+            );
+            libc::close(ready_pipe[0]);
+        }
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+        let mut guard = ParentDeathGuard::install(pid).expect("install parent-death guard");
+
+        // Simulate abrupt monitor death by closing the only parent-side pipe
+        // descriptor without sending the normal disarm byte.
+        guard.armed = false;
+        unsafe {
+            libc::close(guard.write_fd);
+        }
+        guard.write_fd = -1;
+
+        let mut guardian_status = 0;
+        // SAFETY: wait for the dedicated guardian and monitored child only.
+        unsafe {
+            assert_eq!(
+                libc::waitpid(guard.guardian_pid, &raw mut guardian_status, 0),
+                guard.guardian_pid
+            );
+        }
+        assert!(libc::WIFEXITED(guardian_status));
+
+        let mut child_status = 0;
+        unsafe {
+            assert_eq!(libc::waitpid(pid, &raw mut child_status, 0), pid);
+        }
+        assert!(libc::WIFSIGNALED(child_status));
+        assert_eq!(libc::WTERMSIG(child_status), libc::SIGKILL);
     }
 }

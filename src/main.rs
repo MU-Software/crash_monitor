@@ -467,7 +467,7 @@ fn acquire_task_port_or_termination(
 /// back to blocking `waitpid`.
 fn terminate_unmonitorable_child_with<T, P, K, N, S>(
     deadlines: CrashReapDeadlines,
-    mut send_sigterm: T,
+    mut send_initial_signal: T,
     poll: P,
     send_sigkill: K,
     now: N,
@@ -480,59 +480,131 @@ where
     N: FnMut() -> Instant,
     S: FnMut(Duration),
 {
-    send_sigterm()?;
+    send_initial_signal()?;
     reap_after_detected_crash_with(false, deadlines, poll, send_sigkill, now, sleep)
 }
 
-fn terminate_unmonitorable_child(
-    child_pid: nix::unistd::Pid,
-    child_started_at: Instant,
-) -> Result<pipeline::TerminationReason, String> {
-    terminate_unmonitorable_child_with(
-        CrashReapDeadlines {
-            before_sigkill: UNMONITORED_TERMINATION_GRACE_DEADLINE,
-            after_sigkill: UNMONITORED_REAP_AFTER_KILL_DEADLINE,
-        },
-        || match nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGTERM) {
-            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-            Err(error) => Err(format!("failed to terminate unmonitored child: {error}")),
-        },
-        || poll_child_after_crash_once(child_pid, child_started_at),
-        || {
-            nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL)
-                .or_else(|error| {
-                    (error == nix::errno::Errno::ESRCH)
-                        .then_some(())
-                        .ok_or(error)
-                })
-                .map_err(|error| format!("failed to kill unmonitored child: {error}"))
-        },
-        Instant::now,
-        std::thread::sleep,
-    )
+/// Own the complete spawned process group from successful spawn through reap.
+struct ChildProcessGroup {
+    pid: nix::unistd::Pid,
+    pgid: nix::unistd::Pid,
+    started_at: Instant,
+    reaped: bool,
+    parent_death_guard: platform::ParentDeathGuard,
 }
 
-/// Reap a child after a Mach exception was captured. Every terminal wait status
-/// still flows through the same lossless `TerminationReason` conversion.
-fn reap_after_detected_crash(
-    child_pid: nix::unistd::Pid,
-    child_started_at: Instant,
-    sigkill_already_sent: bool,
-) -> Result<pipeline::TerminationReason, String> {
-    reap_after_detected_crash_with(
-        sigkill_already_sent,
-        CrashReapDeadlines {
-            before_sigkill: CRASH_REAP_GRACE_DEADLINE,
-            after_sigkill: CRASH_REAP_AFTER_KILL_DEADLINE,
-        },
-        || poll_child_after_crash_once(child_pid, child_started_at),
-        || {
-            nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL)
-                .map_err(|error| format!("failed to kill child after crash: {error}"))
-        },
-        Instant::now,
-        std::thread::sleep,
-    )
+impl ChildProcessGroup {
+    fn new(pid: nix::unistd::Pid, started_at: Instant) -> Result<Self, String> {
+        // SAFETY: read-only query of the freshly spawned child.
+        let actual_pgid = unsafe { nix::libc::getpgid(pid.as_raw()) };
+        if actual_pgid != pid.as_raw() {
+            return Err(format!(
+                "spawned child {pid} is not its process-group leader (getpgid={actual_pgid})"
+            ));
+        }
+        let parent_death_guard = platform::ParentDeathGuard::install(pid.as_raw())?;
+        Ok(Self {
+            pid,
+            // POSIX_SPAWN_SETPGROUP with pgroup=0 makes the child PID its PGID.
+            pgid: pid,
+            started_at,
+            reaped: false,
+            parent_death_guard,
+        })
+    }
+
+    fn signal(&self, signal: nix::sys::signal::Signal) -> Result<(), String> {
+        nix::sys::signal::killpg(self.pgid, signal)
+            .or_else(|error| {
+                (error == nix::errno::Errno::ESRCH)
+                    .then_some(())
+                    .ok_or(error)
+            })
+            .map_err(|error| {
+                format!(
+                    "failed to send {signal:?} to child process group {}: {error}",
+                    self.pgid
+                )
+            })
+    }
+
+    fn mark_reaped(&mut self) {
+        self.reaped = true;
+        self.parent_death_guard.disarm();
+    }
+
+    fn reap_after_crash(
+        &mut self,
+        sigkill_already_sent: bool,
+    ) -> Result<pipeline::TerminationReason, String> {
+        let result = reap_after_detected_crash_with(
+            sigkill_already_sent,
+            CrashReapDeadlines {
+                before_sigkill: CRASH_REAP_GRACE_DEADLINE,
+                after_sigkill: CRASH_REAP_AFTER_KILL_DEADLINE,
+            },
+            || poll_child_after_crash_once(self.pid, self.started_at),
+            || self.signal(nix::sys::signal::Signal::SIGKILL),
+            Instant::now,
+            std::thread::sleep,
+        );
+        if result.is_ok() {
+            self.mark_reaped();
+        }
+        result
+    }
+
+    fn terminate_and_reap(
+        &mut self,
+        signal: nix::sys::signal::Signal,
+    ) -> Result<pipeline::TerminationReason, String> {
+        let result = terminate_unmonitorable_child_with(
+            CrashReapDeadlines {
+                before_sigkill: UNMONITORED_TERMINATION_GRACE_DEADLINE,
+                after_sigkill: UNMONITORED_REAP_AFTER_KILL_DEADLINE,
+            },
+            || self.signal(signal),
+            || poll_child_after_crash_once(self.pid, self.started_at),
+            || self.signal(nix::sys::signal::Signal::SIGKILL),
+            Instant::now,
+            std::thread::sleep,
+        );
+        if result.is_ok() {
+            self.mark_reaped();
+        }
+        result
+    }
+}
+
+impl Drop for ChildProcessGroup {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+        eprintln!(
+            "[monitor] lifecycle supervisor cleaning up live child process group {}",
+            self.pgid
+        );
+        if let Err(error) = self.terminate_and_reap(nix::sys::signal::Signal::SIGTERM) {
+            eprintln!("[monitor] bounded process-group cleanup failed: {error}");
+        }
+    }
+}
+
+struct MonitorSupervisor {
+    child: ChildProcessGroup,
+    child_task: platform::OwnedMachPort,
+    exception_port: platform::OwnedExceptionPort,
+    event_source: event_source::MacEventSource,
+    shared_memory: Option<Arc<shm::SharedMemory>>,
+}
+
+impl Drop for MonitorSupervisor {
+    fn drop(&mut self) {
+        // Wake the exception listener before its receiver and task/SHM owners
+        // are released. `destroy` is idempotent with the crash cleanup path.
+        self.exception_port.destroy();
+    }
 }
 
 // ═══════════════════════════════════════════════════
@@ -578,8 +650,8 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
 
     // Create exception port BEFORE spawning child.
     // posix_spawn will configure the child to use this port (survives exec).
-    let exc_port = match platform::create_exception_port() {
-        Ok(port) => port,
+    let exception_port = match platform::create_exception_port() {
+        Ok(port) => platform::OwnedExceptionPort::new(port),
         Err(e) => {
             eprintln!("[monitor] Failed to create exception port: {e}");
             return event_loop::EXIT_MONITOR_INTERNAL;
@@ -665,7 +737,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // represented.
     let child_started_at = Instant::now();
     let child_pid_raw = match platform::spawn_with_exception_port_and_output(
-        exc_port,
+        exception_port.raw(),
         &c_path,
         &c_argv,
         &c_envp,
@@ -678,6 +750,29 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         }
     };
     let child_pid = nix::unistd::Pid::from_raw(child_pid_raw);
+    let mut child_group = match ChildProcessGroup::new(child_pid, child_started_at) {
+        Ok(group) => group,
+        Err(error) => {
+            eprintln!("[monitor] Failed to establish child lifecycle ownership: {error}");
+            // The child was already spawned, so fail closed even when the
+            // guardian itself cannot be created.
+            if nix::sys::signal::killpg(child_pid, nix::sys::signal::Signal::SIGKILL).is_err() {
+                let _ = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL);
+            }
+            let _ = reap_after_detected_crash_with(
+                true,
+                CrashReapDeadlines {
+                    before_sigkill: Duration::ZERO,
+                    after_sigkill: UNMONITORED_REAP_AFTER_KILL_DEADLINE,
+                },
+                || poll_child_after_crash_once(child_pid, child_started_at),
+                || Ok(()),
+                Instant::now,
+                std::thread::sleep,
+            );
+            return event_loop::EXIT_MONITOR_INTERNAL;
+        }
+    };
 
     eprintln!("[monitor] Child PID: {child_pid}");
 
@@ -692,6 +787,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let child_task = match acquire_task_port_or_termination(child_pid, child_started_at) {
         Ok(TaskAcquisition::Acquired(task)) => platform::OwnedMachPort::new(task),
         Ok(TaskAcquisition::ChildTerminated(reason)) => {
+            child_group.mark_reaped();
             #[allow(clippy::cast_sign_loss)]
             let child_pid_u32 = child_pid_raw as u32;
             return event_loop::handle_child_termination(&pl, child_pid_u32, process_name, reason)
@@ -707,7 +803,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             // deadlines. Continuing without a task port would silently lose
             // crash detection; blocking here would hang the monitor for the
             // lifetime of a healthy long-running child.
-            match terminate_unmonitorable_child(child_pid, child_started_at) {
+            match child_group.terminate_and_reap(nix::sys::signal::Signal::SIGTERM) {
                 Ok(reason) => {
                     eprintln!("[monitor] Unmonitored child terminated: {reason:?}");
                     #[allow(clippy::cast_sign_loss)]
@@ -726,7 +822,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     };
 
     // Start exception listener thread AFTER task port is acquired
-    let exc_rx = platform::start_listener(exc_port);
+    let exc_rx = platform::start_listener(exception_port.raw());
 
     eprintln!("[monitor] Monitoring active. Press F8 in app for manual snapshot.");
 
@@ -746,7 +842,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Build event source from Mac-specific channels
     #[allow(clippy::cast_sign_loss)] // PID is always positive
     let child_pid_u32 = child_pid_raw as u32;
-    let mut source = match event_source::MacEventSource::new(
+    let source = match event_source::MacEventSource::new(
         exc_rx,
         signal_read_fd,
         child_pid,
@@ -758,22 +854,55 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };
+    let mut supervisor = MonitorSupervisor {
+        child: child_group,
+        child_task,
+        exception_port,
+        event_source: source,
+        shared_memory,
+    };
 
     let event_loop::EventLoopResult {
         mut outcome,
         mut crash_finalization,
         crash_cleanup_required,
         listener_loss_containment_required,
-    } = event_loop::event_loop(
-        &mut source,
-        &pl,
-        child_task.raw(),
-        child_pid_u32,
-        process_name,
-        &|request| platform::send_deferred_reply(request).map_err(|error| error.to_string()),
-        shared_memory.as_ref(),
-        anr_config.as_ref(),
-    );
+    } = {
+        let MonitorSupervisor {
+            child_task,
+            event_source,
+            shared_memory,
+            ..
+        } = &mut supervisor;
+        event_loop::event_loop(
+            event_source,
+            &pl,
+            child_task.raw(),
+            child_pid_u32,
+            process_name,
+            &|request| platform::send_deferred_reply(request).map_err(|error| error.to_string()),
+            shared_memory.as_ref(),
+            anr_config.as_ref(),
+        )
+    };
+
+    if matches!(&outcome, event_loop::MonitorOutcome::ChildTerminated(_)) {
+        supervisor.child.mark_reaped();
+    }
+
+    if let event_loop::MonitorOutcome::ShutdownRequested { signal, .. } = &outcome {
+        let signal = *signal;
+        let termination = nix::sys::signal::Signal::try_from(signal)
+            .map_err(|_| format!("unsupported shutdown signal {signal}"))
+            .and_then(|signal| supervisor.child.terminate_and_reap(signal));
+        outcome = match termination {
+            Ok(reason) => outcome.with_shutdown_termination(Some(reason)),
+            Err(error) => {
+                eprintln!("[monitor] shutdown process-group cleanup failed: {error}");
+                event_loop::MonitorOutcome::MonitorFailure(error)
+            }
+        };
+    }
 
     let task_control_health = pl.platform.supervisor_health();
     let task_control_containment = task_control_health
@@ -792,11 +921,8 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // a Unix signal (SIG_DFL → terminate). Without this, the child gets stuck
     // in an uninterruptible Mach exception wait, immune to even SIGKILL.
     if must_reap_child {
-        // SAFETY: mach_port_destroy removes all rights (receive + send) from
-        // this task. The listener thread's mach_msg will return an error and exit.
-        unsafe {
-            mach2::mach_port::mach_port_destroy(mach2::traps::mach_task_self(), exc_port);
-        }
+        // Destroying the receive right wakes the listener's blocking mach_msg.
+        supervisor.exception_port.destroy();
         if !listener_loss_containment_required {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -812,7 +938,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         } else {
             eprintln!("[monitor] task-control recovery exhausted; sending SIGKILL to child");
         }
-        match nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL) {
+        match supervisor.child.signal(nix::sys::signal::Signal::SIGKILL) {
             Ok(()) => true,
             Err(error) => {
                 eprintln!("[monitor] supervisor SIGKILL escalation failed: {error}");
@@ -828,17 +954,16 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // public outcome remains MonitorFailure, preserving captured evidence and
     // TaskResume diagnostics without allowing reaping to block forever.
     if must_reap_child {
-        let termination =
-            match reap_after_detected_crash(child_pid, child_started_at, supervisor_sigkill_sent) {
-                Ok(reason) => {
-                    eprintln!("[monitor] Contained child terminated: {reason:?}");
-                    Some(reason)
-                }
-                Err(e) => {
-                    eprintln!("[monitor] {e}");
-                    None
-                }
-            };
+        let termination = match supervisor.child.reap_after_crash(supervisor_sigkill_sent) {
+            Ok(reason) => {
+                eprintln!("[monitor] Contained child terminated: {reason:?}");
+                Some(reason)
+            }
+            Err(e) => {
+                eprintln!("[monitor] {e}");
+                None
+            }
+        };
 
         let report_expected = crash_finalization.is_some();
         let report_path = crash_finalization.take().and_then(|finalization| {
@@ -1072,9 +1197,8 @@ mod tests {
             |duration| elapsed.set(elapsed.get() + duration),
         );
 
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("missing entitlement must not acquire a task port"),
+        let Err(error) = result else {
+            panic!("missing entitlement must not acquire a task port");
         };
         assert!(error.contains("acquisition deadline expired"));
         assert!(error.contains("missing entitlement"));

@@ -16,9 +16,10 @@ use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd;
+use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,10 +33,24 @@ use crate::platform;
 // ═══════════════════════════════════════════════════
 
 static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+static PENDING_SIGNALS: AtomicU32 = AtomicU32::new(0);
 
-extern "C" fn sigusr1_handler(_sig: libc::c_int) {
+const PENDING_SIGUSR1: u32 = 1 << 0;
+const PENDING_SIGTERM: u32 = 1 << 1;
+const PENDING_SIGINT: u32 = 1 << 2;
+
+extern "C" fn monitor_signal_handler(sig: libc::c_int) {
     // Signal handlers must not leak errno changes into the interrupted code.
     let saved_errno = nix::errno::Errno::last_raw();
+    let pending = match sig {
+        libc::SIGUSR1 => PENDING_SIGUSR1,
+        libc::SIGTERM => PENDING_SIGTERM,
+        libc::SIGINT => PENDING_SIGINT,
+        _ => 0,
+    };
+    if pending != 0 {
+        PENDING_SIGNALS.fetch_or(pending, Ordering::Release);
+    }
     // SAFETY: libc::write is async-signal-safe (POSIX requirement).
     // No safe alternative exists for writes inside signal handlers.
     let fd = SIGNAL_PIPE_WRITE.load(Ordering::Acquire);
@@ -70,13 +85,19 @@ pub fn setup_signal_pipe() -> Result<OwnedFd, String> {
     // sigaction fails, OnceLock still owns the descriptor and the handler can
     // never observe a closed/reused fd number.
     let sa = SigAction::new(
-        SigHandler::Handler(sigusr1_handler),
+        SigHandler::Handler(monitor_signal_handler),
         SaFlags::SA_RESTART,
         SigSet::empty(),
     );
     unsafe {
-        signal::sigaction(signal::Signal::SIGUSR1, &sa)
-            .map_err(|e| format!("sigaction failed: {e}"))?;
+        for monitored_signal in [
+            signal::Signal::SIGUSR1,
+            signal::Signal::SIGTERM,
+            signal::Signal::SIGINT,
+        ] {
+            signal::sigaction(monitored_signal, &sa)
+                .map_err(|e| format!("sigaction({monitored_signal:?}) failed: {e}"))?;
+        }
     }
     SIGNAL_PIPE_WRITE.store(write_raw_fd, Ordering::Release);
 
@@ -91,19 +112,30 @@ fn install_signal_write_owner(owner: &OnceLock<OwnedFd>, write_fd: OwnedFd) -> R
     Ok(raw_fd)
 }
 
-/// Non-blocking drain of the signal pipe. Returns `true` if a snapshot request
-/// (at least one byte written by `sigusr1_handler`) was pending.
-fn drain_signal_pipe(read_fd: &OwnedFd) -> Result<bool, String> {
-    let mut pending = false;
+/// Drain every pipe byte and return the coalesced signal identities published
+/// by the async-signal-safe handler.
+fn drain_signal_pipe(read_fd: &OwnedFd) -> Result<Vec<i32>, String> {
     let mut buf = [0u8; 64];
     loop {
         match unistd::read(read_fd, &mut buf) {
-            Ok(0) | Err(nix::errno::Errno::EAGAIN) => return Ok(pending),
-            Ok(_) => pending = true,
+            Ok(0) | Err(nix::errno::Errno::EAGAIN) => break,
+            Ok(_) => {}
             Err(nix::errno::Errno::EINTR) => {}
             Err(error) => return Err(format!("signal pipe drain failed: {error}")),
         }
     }
+    let pending = PENDING_SIGNALS.swap(0, Ordering::AcqRel);
+    let mut signals = Vec::with_capacity(3);
+    if pending & PENDING_SIGTERM != 0 {
+        signals.push(libc::SIGTERM);
+    }
+    if pending & PENDING_SIGINT != 0 {
+        signals.push(libc::SIGINT);
+    }
+    if pending & PENDING_SIGUSR1 != 0 {
+        signals.push(libc::SIGUSR1);
+    }
+    Ok(signals)
 }
 
 // ═══════════════════════════════════════════════════
@@ -117,6 +149,7 @@ pub struct MacEventSource {
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
     kqueue: Kqueue,
+    pending_signals: VecDeque<i32>,
 }
 
 impl MacEventSource {
@@ -173,6 +206,7 @@ impl MacEventSource {
             child_pid,
             child_started_at,
             kqueue,
+            pending_signals: VecDeque::new(),
         })
     }
 }
@@ -341,13 +375,21 @@ impl EventSource for MacEventSource {
         }
 
         // Check for SIGUSR1 (manual snapshot) only while the child is alive.
-        match drain_signal_pipe(&self.signal_read_fd) {
-            Ok(true) => {
+        if self.pending_signals.is_empty() {
+            match drain_signal_pipe(&self.signal_read_fd) {
+                Ok(signals) => self.pending_signals.extend(signals),
+                Err(message) => return Some(MonitorEvent::MonitorFailure { message }),
+            }
+        }
+        if let Some(signal) = self.pending_signals.pop_front() {
+            if signal == libc::SIGUSR1 {
                 eprintln!("[monitor] Manual snapshot requested (SIGUSR1)");
                 return Some(MonitorEvent::Snapshot);
             }
-            Ok(false) => {}
-            Err(message) => return Some(MonitorEvent::MonitorFailure { message }),
+            if signal == libc::SIGTERM || signal == libc::SIGINT {
+                eprintln!("[monitor] Shutdown requested by signal {signal}");
+                return Some(MonitorEvent::ShutdownSignal(signal));
+            }
         }
 
         None
