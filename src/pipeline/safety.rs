@@ -23,9 +23,10 @@ use super::{ArtifactKind, ArtifactTransaction};
 
 const SUBPROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const OUTPUT_READER_POLL_INTERVAL: Duration = Duration::from_millis(5);
-const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(250);
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(2);
 const MAX_SUBPROCESS_STREAM_BYTES: usize = 1024 * 1024;
+const MAX_STOP_DRAIN_READS: usize = MAX_SUBPROCESS_STREAM_BYTES / 8192;
 
 /// Cloneable cancellation flag passed to cooperative plugins.
 ///
@@ -382,14 +383,9 @@ fn read_capped(mut reader: impl Read, stop: &AtomicBool) -> StreamCapture {
     let mut bytes = Vec::new();
     let mut truncated = false;
     let mut buffer = [0_u8; 8192];
+    let mut reads_after_stop = 0;
     loop {
-        if stop.load(Ordering::Acquire) {
-            return StreamCapture {
-                bytes,
-                truncated,
-                error: Some("output capture stopped before EOF".to_string()),
-            };
-        }
+        let stopping = stop.load(Ordering::Acquire);
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
@@ -397,9 +393,29 @@ fn read_capped(mut reader: impl Read, stop: &AtomicBool) -> StreamCapture {
                 let retained = remaining.min(count);
                 bytes.extend_from_slice(&buffer[..retained]);
                 truncated |= retained < count;
+                // Once cancellation is requested, still consume data that is
+                // already queued so a closed pipe can reach EOF. Bound those
+                // reads in case an escaped writer continuously refills it.
+                if stopping {
+                    reads_after_stop += 1;
+                }
+                if reads_after_stop >= MAX_STOP_DRAIN_READS {
+                    return StreamCapture {
+                        bytes,
+                        truncated,
+                        error: Some("output capture stopped before EOF".to_string()),
+                    };
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if stop.load(Ordering::Acquire) {
+                    return StreamCapture {
+                        bytes,
+                        truncated,
+                        error: Some("output capture stopped before EOF".to_string()),
+                    };
+                }
                 std::thread::sleep(OUTPUT_READER_POLL_INTERVAL);
             }
             Err(error) => {
@@ -423,10 +439,9 @@ fn join_capture(
     stream: &str,
     handle: JoinHandle<StreamCapture>,
     stop: &AtomicBool,
-    allow_drain: bool,
+    drain_deadline: Option<Instant>,
 ) -> StreamCapture {
-    if allow_drain {
-        let deadline = Instant::now() + OUTPUT_DRAIN_GRACE;
+    if let Some(deadline) = drain_deadline {
         while !handle.is_finished() && Instant::now() < deadline {
             std::thread::sleep(OUTPUT_READER_POLL_INTERVAL);
         }
@@ -694,11 +709,11 @@ pub fn run_plugin_subprocess(
             cleanup,
         );
     }
-    let stop_readers = Arc::new(AtomicBool::new(false));
-    let stdout_stop = stop_readers.clone();
+    let stdout_stop = Arc::new(AtomicBool::new(false));
+    let stdout_reader_stop = stdout_stop.clone();
     let stdout_reader = std::thread::Builder::new()
         .name(format!("{name}-stdout"))
-        .spawn(move || read_capped(stdout, &stdout_stop));
+        .spawn(move || read_capped(stdout, &stdout_reader_stop));
     let stdout_reader = match stdout_reader {
         Ok(handle) => handle,
         Err(error) => {
@@ -710,16 +725,17 @@ pub fn run_plugin_subprocess(
             );
         }
     };
-    let stderr_stop = stop_readers.clone();
+    let stderr_stop = Arc::new(AtomicBool::new(false));
+    let stderr_reader_stop = stderr_stop.clone();
     let stderr_reader = std::thread::Builder::new()
         .name(format!("{name}-stderr"))
-        .spawn(move || read_capped(stderr, &stderr_stop));
+        .spawn(move || read_capped(stderr, &stderr_reader_stop));
     let stderr_reader = match stderr_reader {
         Ok(handle) => handle,
         Err(error) => {
-            stop_readers.store(true, Ordering::Release);
+            stdout_stop.store(true, Ordering::Release);
             let cleanup = kill_and_reap_process_group(&mut child, pgid);
-            let _ = join_capture(name, "stdout", stdout_reader, &stop_readers, false);
+            let _ = join_capture(name, "stdout", stdout_reader, &stdout_stop, None);
             return failed_with_cleanup(
                 context,
                 format!("failed to spawn stderr reader: {error}"),
@@ -783,10 +799,15 @@ pub fn run_plugin_subprocess(
 
     let allow_drain = outcome.is_ok();
     if !allow_drain {
-        stop_readers.store(true, Ordering::Release);
+        stdout_stop.store(true, Ordering::Release);
+        stderr_stop.store(true, Ordering::Release);
     }
-    let stdout = join_capture(name, "stdout", stdout_reader, &stop_readers, allow_drain);
-    let stderr = join_capture(name, "stderr", stderr_reader, &stop_readers, allow_drain);
+    // Both reader threads drain concurrently. Give them one shared grace
+    // deadline so a busy stdout reader cannot either cancel stderr or double
+    // the total bounded wait.
+    let drain_deadline = allow_drain.then(|| Instant::now() + OUTPUT_DRAIN_GRACE);
+    let stdout = join_capture(name, "stdout", stdout_reader, &stdout_stop, drain_deadline);
+    let stderr = join_capture(name, "stderr", stderr_reader, &stderr_stop, drain_deadline);
 
     if outcome.is_ok() && context.is_timed_out() {
         eprintln!("[monitor] plugin {name} completed after its deadline");

@@ -220,7 +220,7 @@ fn subprocess_helper() {
         }
         "escaped-pipe" => {
             let mut command = Command::new("sleep");
-            command.arg("1").process_group(0);
+            command.arg("60").process_group(0);
             let child = command.spawn().expect("spawn escaped pipe holder");
             write_env_file(HELPER_GRANDCHILD_FILE, child.id().to_string());
             // The new process group escapes the supervisor's owned group but
@@ -493,15 +493,18 @@ fn escaped_pipe_holder_cannot_block_output_drain() {
             command.env(HELPER_GRANDCHILD_FILE, &escaped_pid);
         },
     );
+    let supervision_elapsed = started.elapsed();
+    let escaped_pid = read_pid(&escaped_pid);
+    let _ = nix::sys::signal::kill(escaped_pid, nix::sys::signal::Signal::SIGKILL);
+    assert_process_gone(escaped_pid);
 
     assert!(
         matches!(result, PluginRunResult::Failed(error) if error.contains("output capture was incomplete"))
     );
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        supervision_elapsed < Duration::from_secs(3),
         "escaped inherited pipe must not stall the supervisor"
     );
-    assert_process_gone(read_pid(&escaped_pid));
 }
 
 #[derive(Debug, PartialEq, Eq)]
