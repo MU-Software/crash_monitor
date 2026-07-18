@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
@@ -245,6 +246,9 @@ pub struct SessionReport {
 
 /// Maximum report file size to read (256 MB). Prevents OOM on garbage input.
 const MAX_REPORT_SIZE: u64 = 256 * 1024 * 1024;
+const MAX_ZIP_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ZIP_ENTRIES: usize = 256;
+const MAX_ZIP_COMPRESSION_RATIO: u64 = 1_000;
 
 /// Load and parse a crash report from a `.json` file or a `.zip` archive.
 ///
@@ -520,8 +524,7 @@ fn is_zip_path(path: &Path) -> bool {
 
 /// Read a plain (uncompressed) report file, enforcing the size cap.
 fn read_plain_report(path: &Path) -> Result<Vec<u8>, String> {
-    let file = fs::File::open(path)
-        .map_err(|error| format!("cannot open external report '{}': {error}", path.display()))?;
+    let file = open_external_regular_file(path, MAX_REPORT_SIZE)?;
     read_plain_report_file(file, path)
 }
 
@@ -568,8 +571,7 @@ fn read_plain_report_file(mut file: fs::File, path: &Path) -> Result<Vec<u8>, St
 /// archive's stem), else the first `*.json` entry. The decompressed entry
 /// size is capped at `MAX_REPORT_SIZE` (zip-bomb guard).
 fn read_report_json_from_zip(path: &Path) -> Result<Vec<u8>, String> {
-    let file = fs::File::open(path)
-        .map_err(|error| format!("cannot open external ZIP '{}': {error}", path.display()))?;
+    let file = open_external_regular_file(path, MAX_ZIP_ARCHIVE_BYTES)?;
     read_report_json_from_zip_file(path, file)
 }
 
@@ -586,6 +588,22 @@ fn read_private_report_json_from_zip(path: &Path) -> Result<Vec<u8>, String> {
 fn read_report_json_from_zip_file(path: &Path, file: fs::File) -> Result<Vec<u8>, String> {
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("invalid ZIP '{}': {e}", path.display()))?;
+
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return Err(format!(
+            "ZIP contains too many entries ({} > {MAX_ZIP_ENTRIES})",
+            archive.len()
+        ));
+    }
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| format!("cannot inspect ZIP entry: {error}"))?;
+        let name = entry.name();
+        if name.contains('/') || name.contains('\\') {
+            return Err(format!("nested ZIP entry is not allowed: {name:?}"));
+        }
+    }
 
     // `<stem>.zip` contains `<stem>.json`; prefer that over any attachment JSON.
     let preferred = path
@@ -607,11 +625,54 @@ fn read_report_json_from_zip_file(path: &Path, file: fs::File) -> Result<Vec<u8>
             MAX_REPORT_SIZE
         ));
     }
+    let compressed_size = entry.compressed_size();
 
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut entry, &mut bytes)
+    Read::by_ref(&mut entry)
+        .take(MAX_REPORT_SIZE + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| format!("cannot read ZIP entry in '{}': {e}", path.display()))?;
+    if bytes.len() as u64 > MAX_REPORT_SIZE {
+        return Err(format!(
+            "report JSON decompressed beyond the maximum of {MAX_REPORT_SIZE} bytes"
+        ));
+    }
+    let actual_size = bytes.len() as u64;
+    if actual_size > 0
+        && (compressed_size == 0
+            || actual_size / compressed_size.max(1) > MAX_ZIP_COMPRESSION_RATIO)
+    {
+        return Err(format!(
+            "report JSON compression ratio exceeds {MAX_ZIP_COMPRESSION_RATIO}:1"
+        ));
+    }
     Ok(bytes)
+}
+
+fn open_external_regular_file(path: &Path, max_bytes: u64) -> Result<fs::File, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return Err(format!(
+            "input must be a regular file no larger than {max_bytes} bytes: '{}'",
+            path.display()
+        ));
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| format!("cannot safely open '{}': {error}", path.display()))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened '{}': {error}", path.display()))?;
+    if !opened.file_type().is_file() || opened.len() > max_bytes {
+        return Err(format!(
+            "opened input violates file policy: '{}'",
+            path.display()
+        ));
+    }
+    Ok(file)
 }
 
 /// Find the report JSON entry index inside a ZIP archive.

@@ -396,11 +396,11 @@
 
 ### P1-27. report와 ZIP 입력에 streaming 자원 제한을 적용한다
 
-- [ ] plain JSON을 metadata 확인 후 다시 전체 read하는 TOCTOU를 제거하고 open fd에서 최대 크기+1까지만 읽는다.
-- [ ] ZIP entry의 선언 `size()`가 아니라 실제 decompressed stream byte 수를 제한한다.
-- [ ] archive 전체 bytes, entry count, 개별 entry, compression ratio, nesting 정책을 설정한다.
-- [ ] ZIP write는 `fs::read` 대신 streaming copy를 사용해 peak memory를 단일 buffer로 제한한다.
-- [ ] symlink를 `symlink_metadata`와 `O_NOFOLLOW`로 거부한다.
+- [x] plain JSON을 metadata 확인 후 다시 전체 read하는 TOCTOU를 제거하고 open fd에서 최대 크기+1까지만 읽는다.
+- [x] ZIP entry의 선언 `size()`가 아니라 실제 decompressed stream byte 수를 제한한다.
+- [x] archive 전체 bytes, entry count, 개별 entry, compression ratio, nesting 정책을 설정한다.
+- [x] ZIP write는 `fs::read` 대신 streaming copy를 사용해 peak memory를 단일 buffer로 제한한다.
+- [x] symlink를 `symlink_metadata`와 `O_NOFOLLOW`로 거부한다.
 
 범위: `src/pipeline/report.rs`, `src/postprocessors/zip_archiver.rs`.
 

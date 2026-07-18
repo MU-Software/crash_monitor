@@ -387,5 +387,28 @@ fn load_report_errors_on_missing_zip() {
     let err = load_report(Path::new("/nonexistent/crash_test.zip"))
         .err()
         .expect("missing ZIP should error");
-    assert!(err.contains("cannot open"), "unexpected error: {err}");
+    assert!(err.contains("cannot inspect"), "unexpected error: {err}");
+}
+
+#[test]
+fn load_report_rejects_external_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.json");
+    let link = dir.path().join("report.json");
+    std::fs::write(&target, sample_report_json()).unwrap();
+    symlink(&target, &link).unwrap();
+
+    let error = load_report(&link).err().expect("symlink must be rejected");
+    assert!(error.contains("regular file"), "{error}");
+}
+
+#[test]
+fn load_report_rejects_nested_zip_entries() {
+    let json = sample_report_json();
+    let (_dir, zip_path) = make_zip("nested.zip", &[("nested/report.json", json.as_bytes())]);
+
+    let error = load_report(&zip_path)
+        .err()
+        .expect("nested entry must be rejected");
+    assert!(error.contains("nested ZIP entry"), "{error}");
 }
