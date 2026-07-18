@@ -1016,7 +1016,7 @@
 
 ### P2-42. versioned report schema 문서를 serializer와 동기화한다
 
-- [x] `build`, `settings_snapshot`, `environment`, `user_feedback`, diagnostics 등 실제 top-level field를 모두 문서화한다.
+- [x] `build`, `producer_extension`, `environment`, `user_feedback`, diagnostics 등 실제 top-level field를 모두 문서화한다.
 - [x] field type, optionality, privacy classification, producer, version introduction을 명시한다.
 - [x] postprocessor/notifier 결과가 어디에 최종 기록되는지 설명한다.
 - [x] example fixture 또는 schema test로 문서와 serializer drift를 감지한다.

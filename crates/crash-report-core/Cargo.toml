@@ -2,7 +2,14 @@
 name = "crash-report-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Platform-neutral crash report loading and inspection"
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true

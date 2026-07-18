@@ -49,6 +49,9 @@ const DEFAULT_DATA_DIR_NAME: &str = match option_env!("CRASH_MONITOR_DATA_DIR_NA
 
 /// Base directory for crash reporter data: `$CRASH_MONITOR_DATA_DIR` if set,
 /// else `~/.crash_monitor/`.
+// The test build always returns its process-local temporary directory, while
+// production still reports invalid or missing environment configuration.
+#[allow(clippy::unnecessary_wraps)]
 pub fn data_dir_path() -> Result<PathBuf, PathError> {
     #[cfg(test)]
     {

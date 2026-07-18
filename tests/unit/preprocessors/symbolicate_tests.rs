@@ -242,7 +242,7 @@ fn arbitrary_macho_bytes_never_panic() {
         let mut bytes = vec![0_u8; len];
         for byte in &mut bytes {
             state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            *byte = (state >> 16) as u8;
+            *byte = state.to_le_bytes()[2];
         }
         let _ = find_symtab_info(&bytes, &context);
     }

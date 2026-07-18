@@ -261,7 +261,6 @@ impl MonitorOutcome {
 
     /// Return the finalized artifact associated with a detected Mach crash.
     #[must_use]
-    #[allow(dead_code)] // Public through the library; private in the binary's shared module copy.
     pub fn report_path(&self) -> Option<&Path> {
         match self {
             Self::DetectedCrash {
@@ -288,13 +287,11 @@ pub struct EventLoopResult {
 
 impl EventLoopResult {
     #[must_use]
-    #[allow(dead_code)] // Public through the library; private in the binary's shared module copy.
     pub fn exit_code(&self) -> i32 {
         self.outcome.exit_code()
     }
 
     #[must_use]
-    #[allow(dead_code)] // Public through the library; private in the binary's shared module copy.
     pub fn report_path(&self) -> Option<&Path> {
         self.outcome.report_path()
     }
