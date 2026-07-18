@@ -78,6 +78,13 @@ not add an artifact or change any artifact size recorded by the manifest.
 Report loaders prefer this terminal snapshot over the earlier `_diagnostics`
 embedded in `report.json` or `report.zip`.
 
+Consequently, `_diagnostics` records stages known when JSON was serialized;
+post-processors and notifiers that run later record their terminal status only
+in `manifest.json.final_diagnostics`. `user_feedback` is the exception where a
+pre-commit feedback post-processor may update the report value before ZIP and
+manifest publication. Consumers must not expect a notifier result to be patched
+back into the immutable JSON/ZIP artifact.
+
 ## JSON shape
 
 The `report.json` artifact (also stored inside `report.zip`) is a single JSON
@@ -88,12 +95,44 @@ fields remain compatible within version 1, while a breaking field/layout change
 requires a new version and an explicit migration fixture. The exact fields
 depend on which collectors ran, but the top-level shape is:
 
+The checked-in
+[`report_v1_minimal.json`](../tests/fixtures/report_v1_minimal.json) fixture is
+decoded by report compatibility tests. A serializer change that breaks the v1
+minimum therefore requires either an additive/defaulted field or a
+schema-version change plus a new fixture.
+
+### Top-level field contract
+
+All fields were introduced in report schema v1. “Optional” means the key may be
+absent or its collection may be disabled; arrays otherwise serialize as empty.
+
+| Field | JSON type / presence | Producer | Privacy class |
+|---|---|---|---|
+| `header` | object, required | event supervisor | operational identity |
+| `termination` | tagged object, optional | child reaper | diagnostic |
+| `build` | object or null | build-info pre-processor | build identifier |
+| `exception` | object or null | Mach exception decoder | diagnostic |
+| `crash_context` | object or null | producer SHM context collector | producer-defined, potentially sensitive |
+| `threads` | array | thread collector | sensitive addresses; stack bytes highly sensitive |
+| `breadcrumbs` | array or null | producer SHM breadcrumb collector | potentially sensitive activity text |
+| `loaded_images` | array | dylib collector | diagnostic; paths potentially identifying |
+| `memory_map` | array | memory collector | highly sensitive address-space metadata |
+| `heap_summary` | object or null | memory collector | sensitive resource metadata |
+| `session` | object or null | session pre-processor | pseudonymous identifier |
+| `settings_snapshot` | object or null | producer SHM settings collector | producer-defined, potentially sensitive |
+| `fingerprint` | string or null | fingerprint pre-processor | pseudonymous grouping key |
+| `environment` | object or null | environment collector | highly sensitive |
+| `process_output` | object or null, omitted when absent | child-output collector | highly sensitive application text |
+| `attachments` | array | attachment collector | user-controlled, highly sensitive |
+| `user_feedback` | any JSON value or null | feedback post-processor | user-provided, highly sensitive |
+| `_diagnostics` | object, optional | pipeline | operational; error text may contain paths |
+
 ```jsonc
 {
   "header":        { "version": 1, "timestamp", "pid", "process", "type", "collector" },
   "termination":   { "kind": "exited", "exit_code", "runtime_ms" },
+  "build":         { "app_version", "build_number", "git_hash", "git_dirty", "build_type", "build_preset", "build_timestamp", "compiler", "os" },
   "exception":     { "type", "code", "subcode", "raw_codes": ["0x…", …], "signal", "fault_address" },
-  "crash_context": { "annotations": { "<key>": "<value>", … } },   // app state, generic KV
   "threads": [
     {
       "index", "id", "name", "crashed",
@@ -123,9 +162,14 @@ depend on which collectors ran, but the top-level shape is:
     "arch": "arm64", "hostname": "…",
     "variables_source": "spawn_environment_snapshot", "env_vars": { "LANG": "…" }
   },
+  "process_output": {
+    "stdout": { "tail": "…", "truncated": false, "read_error": null },
+    "stderr": { "tail": "…", "truncated": false, "read_error": null }
+  },
   "breadcrumbs":   [ { "timestamp", "category", "message", … } ],
   "fingerprint":   "…",          // hash of the top app frames, for grouping
   "attachments":   [ … ],
+  "user_feedback": { "comment": "…" },
   "_diagnostics":  { "<plugin>": { "status", "duration_ms" }, … }
 }
 ```
