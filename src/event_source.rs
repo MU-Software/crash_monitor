@@ -38,6 +38,7 @@ static PENDING_SIGNALS: AtomicU32 = AtomicU32::new(0);
 const PENDING_SIGUSR1: u32 = 1 << 0;
 const PENDING_SIGTERM: u32 = 1 << 1;
 const PENDING_SIGINT: u32 = 1 << 2;
+const CHILD_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 extern "C" fn monitor_signal_handler(sig: libc::c_int) {
     // Signal handlers must not leak errno changes into the interrupted code.
@@ -148,6 +149,7 @@ pub struct MacEventSource {
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
     kqueue: Kqueue,
+    child_exit_wakeup_registered: bool,
     pending_child_termination: Option<TerminationReason>,
     pending_signals: VecDeque<i32>,
 }
@@ -203,16 +205,16 @@ impl MacEventSource {
             0,
             0,
         );
-        let pending_child_termination = match kqueue.kevent(
+        let (pending_child_termination, child_exit_wakeup_registered) = match kqueue.kevent(
             &[child_change],
             &mut no_events,
             Some(libc::timespec::default()),
         ) {
-            Ok(_) => None,
-            Err(nix::errno::Errno::ESRCH) => Some(reap_child_after_registration_race(
-                child_pid,
-                child_started_at,
-            )?),
+            Ok(_) => (None, true),
+            Err(nix::errno::Errno::ESRCH) => (
+                reap_child_after_registration_race(child_pid, child_started_at)?,
+                false,
+            ),
             Err(error) => {
                 return Err(format!(
                     "registering child kqueue event source failed: {error}"
@@ -227,29 +229,27 @@ impl MacEventSource {
             child_pid,
             child_started_at,
             kqueue,
+            child_exit_wakeup_registered,
             pending_child_termination,
             pending_signals: VecDeque::new(),
         })
     }
 }
 
-/// An `EVFILT_PROC` registration can race with a child that has already
-/// become a zombie. `waitpid` remains the authoritative owner of the terminal
-/// status, so preserve that status as the event source's first child event.
+/// An `EVFILT_PROC` registration can race with a child changing state.
+/// `waitpid` remains authoritative: preserve a terminal status as the first
+/// event, or enable the bounded polling fallback while the child is still live.
 fn reap_child_after_registration_race(
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
-) -> Result<TerminationReason, String> {
+) -> Result<Option<TerminationReason>, String> {
     loop {
         match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
             Ok(status) => {
-                return termination_from_wait_status(status, child_started_at.elapsed()).ok_or_else(
-                    || {
-                        format!(
-                            "child {child_pid} disappeared before kqueue registration but has no terminal wait status"
-                        )
-                    },
-                );
+                return Ok(termination_from_wait_status(
+                    status,
+                    child_started_at.elapsed(),
+                ));
             }
             Err(nix::errno::Errno::EINTR) => {}
             Err(nix::errno::Errno::ECHILD) => {
@@ -462,7 +462,16 @@ impl EventSource for MacEventSource {
         }
 
         loop {
-            let timeout = deadline.map(|deadline| {
+            // A process-filter registration failure followed by WNOHANG can
+            // legitimately report a still-running child on POSIX systems.
+            // Without an OS process wakeup, bound the descriptor wait so the
+            // authoritative waitpid poll remains live even when ANR is off.
+            let effective_deadline = child_wait_deadline(
+                deadline,
+                self.child_exit_wakeup_registered,
+                Instant::now(),
+            );
+            let timeout = effective_deadline.map(|deadline| {
                 duration_to_timespec(deadline.saturating_duration_since(Instant::now()))
             });
             let placeholder = KEvent::new(
@@ -490,6 +499,18 @@ impl EventSource for MacEventSource {
             }
         }
     }
+}
+
+fn child_wait_deadline(
+    deadline: Option<Instant>,
+    child_exit_wakeup_registered: bool,
+    now: Instant,
+) -> Option<Instant> {
+    if child_exit_wakeup_registered {
+        return deadline;
+    }
+    let child_poll = now.checked_add(CHILD_STATUS_POLL_INTERVAL).unwrap_or(now);
+    Some(deadline.map_or(child_poll, |deadline| deadline.min(child_poll)))
 }
 
 fn drain_wake_fd(fd: &OwnedFd) {

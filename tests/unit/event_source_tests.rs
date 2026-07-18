@@ -184,6 +184,24 @@ fn nonterminal_wait_status_is_not_fabricated_into_a_termination() {
 }
 
 #[test]
+fn child_poll_fallback_bounds_an_unregistered_process_wait() {
+    let now = Instant::now();
+    let poll_deadline = now + CHILD_STATUS_POLL_INTERVAL;
+    let earlier_deadline = now + Duration::from_millis(5);
+
+    assert_eq!(child_wait_deadline(None, false, now), Some(poll_deadline));
+    assert_eq!(
+        child_wait_deadline(Some(now + Duration::from_secs(5)), false, now),
+        Some(poll_deadline)
+    );
+    assert_eq!(
+        child_wait_deadline(Some(earlier_deadline), false, now),
+        Some(earlier_deadline)
+    );
+    assert_eq!(child_wait_deadline(None, true, now), None);
+}
+
+#[test]
 fn fatal_listener_error_is_preserved_for_the_supervisor() {
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(platform::ExceptionListenerEvent::Fatal {
