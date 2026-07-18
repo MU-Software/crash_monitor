@@ -133,6 +133,10 @@ non-sensitive plugins are on by default. Raw stack bytes, memory diagnostics,
 environment data, screenshots, attachments, and raw SHM persistence require an
 explicit privacy profile, consent assertion, and evidence-specific opt-in; see
 [privacy.md](privacy.md).
+Attachment source paths must resolve below the monitor's startup working
+directory and name regular, non-symlink files. Start the monitor from the
+application-owned attachment root (or a narrower directory) and do not register
+paths outside it.
 Top-level `"enabled": false` is a report-generation kill switch: child
 supervision and Mach replies continue, but capture, plugins, and artifact
 writes do not run. Per-trigger controls live under `triggers`; see

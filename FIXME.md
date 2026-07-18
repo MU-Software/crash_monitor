@@ -580,12 +580,12 @@
 
 ### P1-46. attachment 입력을 fd 기반 allowlist 정책으로 제한한다
 
-- [ ] child-controlled label과 extension에 safe-character/component allowlist를 적용한다.
-- [ ] source는 허용 root 아래 regular file인지 canonicalization과 open 후 `fstat`로 검증한다.
-- [ ] `O_NOFOLLOW`를 사용하고 symlink, device, directory를 거부한다.
-- [ ] metadata 확인 후 path로 다시 copy하는 TOCTOU를 제거하고 열린 fd에서 capped streaming copy한다.
-- [ ] destination도 predictable prefix/symlink 조작에 안전하게 만든다.
-- [ ] 향후 uploader가 생기기 전후의 privacy/consent 경계를 문서화한다.
+- [x] child-controlled label과 extension에 safe-character/component allowlist를 적용한다.
+- [x] source는 허용 root 아래 regular file인지 canonicalization과 open 후 `fstat`로 검증한다.
+- [x] `O_NOFOLLOW`를 사용하고 symlink, device, directory를 거부한다.
+- [x] metadata 확인 후 path로 다시 copy하는 TOCTOU를 제거하고 열린 fd에서 capped streaming copy한다.
+- [x] destination도 predictable prefix/symlink 조작에 안전하게 만든다.
+- [x] 향후 uploader가 생기기 전후의 privacy/consent 경계를 문서화한다.
 
 범위: `src/collectors/attachment.rs`, artifact store.
 

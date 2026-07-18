@@ -88,21 +88,36 @@ impl Collector for AttachmentCollector {
 /// Finalization-only pre-processor that copies registered attachment files.
 pub struct AttachmentCopier {
     output_dir: Option<PathBuf>,
+    allowed_source_roots: Vec<PathBuf>,
 }
 
 impl AttachmentCopier {
     #[must_use]
     pub fn new() -> Self {
-        Self { output_dir: None }
+        Self {
+            output_dir: None,
+            allowed_source_roots: canonical_allowed_roots(std::iter::once(
+                std::env::current_dir().unwrap_or_default(),
+            )),
+        }
     }
 
     #[cfg(test)]
     #[must_use]
     fn with_dir(output_dir: PathBuf) -> Self {
+        let allowed_source_roots = canonical_allowed_roots(std::iter::once(output_dir.clone()));
         Self {
             output_dir: Some(output_dir),
+            allowed_source_roots,
         }
     }
+}
+
+fn canonical_allowed_roots(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    roots
+        .into_iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect()
 }
 
 impl Default for AttachmentCopier {
@@ -273,17 +288,31 @@ fn copy_bounded<R: Read, W: Write>(
 
 fn copy_registered_attachment(
     source_path: &Path,
+    allowed_source_roots: &[PathBuf],
     destination: &Path,
     temporary_path: PathBuf,
     context: &PluginContext,
 ) -> Result<(u64, Option<String>), String> {
     context.checkpoint()?;
+    let path_metadata = std::fs::symlink_metadata(source_path)
+        .map_err(|error| format!("inspect attachment path failed: {error}"))?;
+    if path_metadata.file_type().is_symlink() {
+        return Err("attachment source symlink is not allowed".to_string());
+    }
+    let canonical_source = std::fs::canonicalize(source_path)
+        .map_err(|error| format!("canonicalize attachment failed: {error}"))?;
+    if !allowed_source_roots
+        .iter()
+        .any(|root| canonical_source.starts_with(root))
+    {
+        return Err("attachment is outside every allowed source root".to_string());
+    }
     let mut source = OpenOptions::new()
         .read(true)
         // O_NOFOLLOW rejects a symlink final component. O_NONBLOCK prevents
         // opening an attacker-controlled FIFO from stalling before fstat.
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(source_path)
+        .open(&canonical_source)
         .map_err(|error| format!("open attachment failed: {error}"))?;
     context.checkpoint()?;
 
@@ -313,11 +342,20 @@ fn copy_registered_attachment(
     Ok((copied, durability_warning))
 }
 
-fn attachment_filename_component(value: &str, fallback: &str) -> String {
+fn attachment_filename_component(
+    value: &str,
+    fallback: &str,
+    max_len: usize,
+    allow_dot: bool,
+) -> String {
     let sanitized: String = value
         .chars()
+        .take(max_len)
         .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+            if character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '_')
+                || (allow_dot && character == '.')
+            {
                 character
             } else {
                 '_'
@@ -371,12 +409,14 @@ impl PreProcessor for AttachmentCopier {
         for att in registered {
             context.checkpoint()?;
             let src = std::path::Path::new(&att.path);
-            let label = attachment_filename_component(&att.label, "attachment");
+            let label = attachment_filename_component(&att.label, "attachment", 64, true);
             let ext = attachment_filename_component(
                 src.extension()
                     .and_then(|extension| extension.to_str())
                     .unwrap_or("bin"),
                 "bin",
+                16,
+                false,
             );
             // Keep duplicate labels and labels that sanitize to the same
             // component distinct. The no-clobber publish above remains the
@@ -390,6 +430,7 @@ impl PreProcessor for AttachmentCopier {
 
             let (size, durability_warning) = match copy_registered_attachment(
                 src,
+                &self.allowed_source_roots,
                 &dest,
                 temporary_path,
                 context,
@@ -603,6 +644,14 @@ mod tests {
         assert_ne!(first_copy, second_copy);
         assert_eq!(std::fs::read(first_copy).unwrap(), b"first");
         assert_eq!(std::fs::read(second_copy).unwrap(), b"second");
+        for copied in &data.raw.attachments {
+            let name = copied.copied_path.file_name().unwrap().to_string_lossy();
+            assert!(
+                name.chars()
+                    .all(|character| character.is_ascii_alphanumeric()
+                        || matches!(character, '-' | '_' | '.'))
+            );
+        }
     }
 
     #[test]
@@ -710,6 +759,39 @@ mod tests {
         data.raw
             .attachment_registrations
             .push(registration("pipe", &source));
+
+        AttachmentCopier::with_dir(tempdir.path().to_path_buf())
+            .process(&event(), &mut data, &PluginContext::without_deadline())
+            .unwrap();
+
+        assert!(data.raw.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachment_copy_rejects_source_outside_allowed_root() {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("source.log");
+        std::fs::write(&source, b"diagnostic").unwrap();
+        let mut data = CollectedData::default();
+        data.raw
+            .attachment_registrations
+            .push(registration("log", &source));
+
+        AttachmentCopier::with_dir(allowed.path().to_path_buf())
+            .process(&event(), &mut data, &PluginContext::without_deadline())
+            .unwrap();
+
+        assert!(data.raw.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachment_copy_rejects_directory_source() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut data = CollectedData::default();
+        data.raw
+            .attachment_registrations
+            .push(registration("directory", tempdir.path()));
 
         AttachmentCopier::with_dir(tempdir.path().to_path_buf())
             .process(&event(), &mut data, &PluginContext::without_deadline())

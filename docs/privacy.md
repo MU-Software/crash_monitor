@@ -70,6 +70,23 @@ only after their transaction reaches the committed sent store; an incomplete
 staging transaction remains subject to startup recovery rather than the sent
 store's age scan.
 
+Registered attachments have an additional filesystem boundary. The production
+copier accepts sources only below the monitor's canonical startup working
+directory. Labels and extensions are reduced to bounded ASCII filename
+components. A source must canonicalize below that root, must not itself be a
+symlink, and must still be a regular file after an `O_NOFOLLOW | O_NONBLOCK`
+open and `fstat`. Bytes are streamed from that already-open descriptor through
+the 50 MiB cap and cooperative deadline; the path is never reopened for copy.
+Destinations use private exclusive temporary files, random UUID names, and
+no-clobber atomic publication.
+
+Attachment collection remains behind the `full` profile, granted consent, and
+explicit attachment toggle whether reports stay local or a future uploader is
+installed. An uploader must treat the committed manifest as its allowlist and
+must not reread producer source paths. Adding transport does not widen consent;
+deployments must separately disclose remote transfer and obtain any required
+upload consent before enabling it.
+
 ## Compatibility
 
 Regular JSON configuration files written for the former opt-out behavior still
