@@ -1025,9 +1025,9 @@
 
 ### P2-43. data directory 보안 정책을 코드와 문서에 맞춘다
 
-- [ ] 이미 문서화된 absolute path 요구를 유지하고 owner, permission, symlink, ACL, existing-directory 처리 정책을 보완한다.
-- [ ] directory/file mode, atomic write, cleanup, multi-instance locking을 설명한다.
-- [ ] 사용자가 잘못된 path를 지정했을 때의 오류와 복구 방법을 제공한다.
+- [x] 이미 문서화된 absolute path 요구를 유지하고 owner, permission, symlink, ACL, existing-directory 처리 정책을 보완한다.
+- [x] directory/file mode, atomic write, cleanup, multi-instance locking을 설명한다.
+- [x] 사용자가 잘못된 path를 지정했을 때의 오류와 복구 방법을 제공한다.
 
 범위: `docs/integration.md`, path/config code.
 

@@ -103,6 +103,51 @@ The child (producer) and the monitor (consumer) must resolve to the *same*
 directory; because both read the same env with the same fallback, they agree
 automatically.
 
+### Managed data-directory security
+
+`CRASH_MONITOR_DATA_DIR` and configured report roots must be absolute. Relative
+paths, `..` traversal, symlink components, non-directory components, ancestors
+writable by an untrusted account, and extended ACLs that grant additional
+access fail closed. Darwin's root-owned `/tmp` and `/var` aliases are resolved
+to `/private/tmp` and `/private/var`; no other symlink exception exists.
+
+Crash Monitor creates and enforces `0700` on the managed data, `crashes`,
+`pending`, `sent`, staging, and report directories. Managed JSON, raw evidence,
+screenshots, attachments, ZIPs, manifests, logs, locks, and temporary files are
+`0600`, independent of umask. Existing managed nodes must be regular files or
+directories owned by the effective user. Owned POSIX mode drift is corrected;
+wrong ownership, unsafe type, or an allowing extended ACL is rejected rather
+than silently replaced. Trusted ancestors are validated but never chmod'ed.
+
+Files are opened relative to validated directory descriptors with
+`O_NOFOLLOW`; new files/directories use exclusive creation. Artifact files are
+written to unique temporary names, synced, and published without clobbering an
+existing destination. A report directory becomes visible only after its exact
+artifact set and manifest are synced and the directory is atomically renamed.
+Startup recovery uses the same validation before publishing a prepared report.
+
+Multiple monitor processes can share one data root: unique `ReportId`
+directories prevent normal name collisions, per-report owner locks keep
+recovery/retention away from a live transaction, and rate-limit, session-log,
+and retention state use bounded process/file locking. A lock conflict skips or
+defers maintenance; it never authorizes overwriting another instance's report.
+
+If startup rejects a configured path, stop all monitors using it and inspect
+each component before changing anything:
+
+```bash
+ls -ldeO /absolute/path /absolute/path/crashes
+chmod 700 /absolute/path /absolute/path/crashes
+chmod -N /absolute/path /absolute/path/crashes  # remove an unintended macOS ACL
+```
+
+Do not recursively `chown` or delete a path until its intended owner and scope
+are independently confirmed. A root-owned or foreign-owned final data
+directory should be replaced by a newly created directory owned by the account
+that runs Crash Monitor, then configured with its absolute path. Preserve
+rejected report directories for investigation; after permissions are repaired,
+restart so manifest recovery can decide whether they are complete.
+
 ## ANR tuning
 
 The watchdog timings default to production-safe values and can be overridden via
