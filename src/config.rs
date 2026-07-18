@@ -20,7 +20,7 @@ use crate::utils::paths;
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CrashReporterConfig {
     pub enabled: bool,
     pub report_dir: Option<String>,

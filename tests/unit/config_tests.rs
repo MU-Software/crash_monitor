@@ -372,7 +372,7 @@ fn test_load_missing_file_returns_default() {
 
 #[test]
 fn test_load_valid_config() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_config_tempdir();
     let path = dir.path().join("crash_reporter.json");
     std::fs::write(
         &path,
@@ -387,8 +387,7 @@ fn test_load_valid_config() {
     )
     .unwrap();
 
-    let config: CrashReporterConfig =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let config = super::load_config_from_path(&path).unwrap();
     assert_eq!(config.filters.disk_space.min_free_mb, 200);
     assert!(config.notifiers.system_notification.enabled);
     // Unspecified fields keep defaults
@@ -396,6 +395,35 @@ fn test_load_valid_config() {
     assert!(config.filters.enabled);
     assert!(config.filters.disk_space.enabled);
     assert_eq!(config.pre_processors.duplicate.window_secs, 60);
+}
+
+#[test]
+fn loader_rejects_unknown_top_level_field() {
+    let dir = private_config_tempdir();
+    let path = dir.path().join("crash_reporter.json");
+    std::fs::write(&path, r#"{ "unexpected": true }"#).unwrap();
+
+    assert!(matches!(
+        super::load_config_from_path(&path),
+        Err(ConfigLoadError::Parse { .. })
+    ));
+}
+
+#[test]
+fn loader_rejects_range_violation() {
+    let dir = private_config_tempdir();
+    let path = dir.path().join("crash_reporter.json");
+    std::fs::write(
+        &path,
+        r#"{ "post_processors": { "retention": { "max_reports": 0 } } }"#,
+    )
+    .unwrap();
+
+    let loaded = super::load_config_from_path(&path).expect("syntax-level load succeeds");
+    assert_eq!(
+        loaded.validate().unwrap_err(),
+        ConfigValidationError::RetentionMaxReportsZero
+    );
 }
 
 #[test]

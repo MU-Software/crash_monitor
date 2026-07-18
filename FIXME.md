@@ -896,9 +896,9 @@
 
 ### P2-28. config와 pipeline factory 테스트를 실제 loader 기준으로 만든다
 
-- [ ] `load_config_from_path` happy path를 직접 호출하고 모든 주요 field를 단언한다.
-- [ ] malformed, unknown field, range violation, missing file을 각각 테스트한다.
-- [ ] default pipeline test가 공유 data directory의 외부 config 상태에 의존하지 않고 config를 직접 주입받게 한다.
+- [x] `load_config_from_path` happy path를 직접 호출하고 모든 주요 field를 단언한다.
+- [x] malformed, unknown field, range violation, missing file을 각각 테스트한다.
+- [x] default pipeline test가 공유 data directory의 외부 config 상태에 의존하지 않고 config를 직접 주입받게 한다.
 
 범위: config and pipeline unit tests.
 
