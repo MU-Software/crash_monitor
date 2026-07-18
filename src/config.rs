@@ -165,11 +165,7 @@ impl ValidatedConfig {
     /// dependency closure have been applied.
     #[must_use]
     pub(crate) fn plugin_enabled(&self, plugin_id: impl AsRef<str>) -> bool {
-        self.enabled
-            && self
-                .enabled_plugins
-                .iter()
-                .any(|enabled| enabled.as_str() == plugin_id.as_ref())
+        self.enabled && self.enabled_plugins.contains(plugin_id.as_ref())
     }
 
     /// Effective immutable sensitive-data policy for capture and persistence.

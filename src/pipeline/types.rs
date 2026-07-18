@@ -44,6 +44,12 @@ impl AsRef<str> for PluginId {
     }
 }
 
+impl std::borrow::Borrow<str> for PluginId {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
 impl PartialEq<&str> for PluginId {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other
