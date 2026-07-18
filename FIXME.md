@@ -349,11 +349,11 @@
 
 ### P1-22. 최소 evidence와 비싼 artifact 작업의 순서를 바로잡는다
 
-- [ ] event reason, PID, timestamp, bounded immutable SHM/capture metadata로 구성된 최소 emergency snapshot을 정의하고 filter/duplicate/collector보다 먼저 확보한다.
-- [ ] collector가 채운 thread data에 의존하는 기존 `write_raw_stage1`은 collector 뒤, preprocessor와 duplicate short-circuit보다 앞에서 실행한다.
-- [ ] filter/rate-limit 또는 duplicate 판정이 앞서 확보한 최소 emergency snapshot까지 제거하지 않게 한다.
-- [ ] attachment는 metadata만 먼저 수집하고 report commit이 결정된 뒤 복사한다.
-- [ ] duplicate, filter rejection, plugin failure, early return에서 이미 만든 임시 artifact를 정리한다.
+- [x] event reason, PID, timestamp, bounded immutable SHM/capture metadata로 구성된 최소 emergency snapshot을 정의하고 filter/duplicate/collector보다 먼저 확보한다.
+- [x] collector가 채운 thread data에 의존하는 기존 `write_raw_stage1`은 collector 뒤, preprocessor와 duplicate short-circuit보다 앞에서 실행한다.
+- [x] filter/rate-limit 또는 duplicate 판정이 앞서 확보한 최소 emergency snapshot까지 제거하지 않게 한다.
+- [x] attachment는 metadata만 먼저 수집하고 report commit이 결정된 뒤 복사한다.
+- [x] duplicate, filter rejection, plugin failure, early return에서 이미 만든 임시 artifact를 정리한다.
 
 범위: `src/pipeline/mod.rs`, `src/pipeline/safety.rs`, `src/collectors/attachment.rs`.
 

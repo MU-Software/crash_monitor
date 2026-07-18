@@ -170,6 +170,39 @@ pub enum PluginStatus {
     Skipped(String),
 }
 
+/// Bounded evidence captured before any extension point can reject or fail an
+/// event. It deliberately contains metadata only: no borrowed SHM views and no
+/// unbounded collector payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencySnapshot {
+    pub report_id: ReportId,
+    pub report_type: ReportType,
+    pub termination: Option<TerminationReason>,
+    pub pid: u32,
+    pub captured_unix_ms: u64,
+    pub raw_breadcrumb_bytes: usize,
+    pub raw_context_bytes: usize,
+}
+
+impl EmergencySnapshot {
+    fn new(event: &CrashEvent, raw_shm: Option<&RawShmSnapshot>) -> Self {
+        let captured_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            });
+        Self {
+            report_id: event.report_id.clone(),
+            report_type: event.report_type,
+            termination: event.termination,
+            pid: event.pid,
+            captured_unix_ms,
+            raw_breadcrumb_bytes: raw_shm.map_or(0, |raw| raw.breadcrumbs.len()),
+            raw_context_bytes: raw_shm.map_or(0, |raw| raw.context.len()),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct PluginDiagnostic {
     pub name: String,
@@ -179,6 +212,9 @@ pub struct PluginDiagnostic {
 
 pub struct Diagnostics {
     pub plugins: Vec<PluginDiagnostic>,
+    /// Minimum immutable evidence survives filter/duplicate/plugin early
+    /// returns even when no report artifact is committed.
+    pub emergency_snapshot: Option<EmergencySnapshot>,
     /// Final report artifact after post-processing (JSON or ZIP, possibly
     /// relocated). `None` means the event was filtered or report creation
     /// failed.
@@ -197,6 +233,7 @@ impl Diagnostics {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
+            emergency_snapshot: None,
             report_path: None,
             start: Instant::now(),
         }
@@ -213,6 +250,16 @@ impl Diagnostics {
 
     pub fn record_immediate(&mut self, name: &str, status: PluginStatus) {
         self.record(name, status, Duration::ZERO);
+    }
+
+    pub fn ensure_emergency_snapshot(
+        &mut self,
+        event: &CrashEvent,
+        raw_shm: Option<&RawShmSnapshot>,
+    ) {
+        if self.emergency_snapshot.is_none() {
+            self.emergency_snapshot = Some(EmergencySnapshot::new(event, raw_shm));
+        }
     }
 
     #[must_use]
@@ -285,7 +332,10 @@ pub struct CapturedEvent {
 
 impl CapturedEvent {
     #[must_use]
-    pub fn new(mut event: CrashEvent, payload: CapturePayload) -> Self {
+    pub fn new(mut event: CrashEvent, mut payload: CapturePayload) -> Self {
+        payload
+            .diagnostics
+            .ensure_emergency_snapshot(&event, payload.raw_shm.as_ref());
         event.crashed_thread = None;
         event.bail_on_suspend_failure = false;
         Self {
@@ -303,8 +353,11 @@ impl CapturedEvent {
     pub(crate) fn with_report_context(
         mut event: CrashEvent,
         report_context: std::sync::Arc<super::ReportContext>,
-        payload: CapturePayload,
+        mut payload: CapturePayload,
     ) -> Self {
+        payload
+            .diagnostics
+            .ensure_emergency_snapshot(&event, payload.raw_shm.as_ref());
         event.crashed_thread = None;
         event.bail_on_suspend_failure = false;
         Self {

@@ -344,6 +344,7 @@ impl Pipeline {
             }
         };
         let mut diagnostics = Diagnostics::new();
+        diagnostics.ensure_emergency_snapshot(event, None);
         let failure_sink = TaskControlFailureSink::new();
         let suspend_guard = match TaskSuspendGuard::acquire(
             self.platform.clone(),
@@ -580,6 +581,28 @@ impl Pipeline {
             }
         };
 
+        // Stage 1 depends on collector-owned thread data, but not on any
+        // preprocessor. Write it before preprocessor/duplicate short-circuits;
+        // ArtifactTransaction::drop removes it on every uncommitted return.
+        let raw_path: Option<PathBuf> = run_transaction_stage(
+            &transaction,
+            "Stage1Raw",
+            PluginExecution::Cooperative,
+            STAGE_TIMEOUT,
+            |_| safety::write_raw_stage1(&transaction, &data.raw.threads),
+        )
+        .into_option();
+
+        if let Some(raw_shm) = &captured.raw_shm {
+            let _ = run_transaction_stage(
+                &transaction,
+                "Stage1Shm",
+                PluginExecution::Cooperative,
+                STAGE_TIMEOUT,
+                |_| safety::write_raw_shm_stage1(&transaction, raw_shm),
+            );
+        }
+
         // Filters run after resume so filesystem and lock contention cannot
         // extend the Mach critical section.
         for filter in &self.filters {
@@ -614,6 +637,11 @@ impl Pipeline {
 
         // ── Pre-processors ──
         for pp in &self.pre_processors {
+            // AttachmentCollector records bounded metadata during capture.
+            // Copy only after duplicate policy has decided to publish.
+            if pp.name() == "AttachmentCopier" {
+                continue;
+            }
             if !pp.is_available() {
                 diagnostics
                     .record_immediate(pp.name(), PluginStatus::Skipped("not available".into()));
@@ -645,25 +673,21 @@ impl Pipeline {
             return std::mem::take(diagnostics);
         }
 
-        // ── Stage 1: Raw data (fail-safe) ──
-        let raw_path: Option<PathBuf> = run_transaction_stage(
-            &transaction,
-            "Stage1Raw",
-            PluginExecution::Cooperative,
-            STAGE_TIMEOUT,
-            |_| safety::write_raw_stage1(&transaction, &data.raw.threads),
-        )
-        .into_option();
-
-        // Stage 1 shm dump (breadcrumbs + context raw bytes)
-        if let Some(raw_shm) = &captured.raw_shm {
-            let _ = run_transaction_stage(
+        for pp in self
+            .pre_processors
+            .iter()
+            .filter(|processor| processor.name() == "AttachmentCopier")
+        {
+            let start = Instant::now();
+            let timeout = plugin_timeout(pp.timeout_secs(), PREPROC_TIMEOUT);
+            let outcome = run_transaction_stage(
                 &transaction,
-                "Stage1Shm",
-                PluginExecution::Cooperative,
-                STAGE_TIMEOUT,
-                |_| safety::write_raw_shm_stage1(&transaction, raw_shm),
+                pp.name(),
+                pp.execution(),
+                timeout,
+                |context| pp.process(event, data, context),
             );
+            diagnostics.record(pp.name(), plugin_status(&outcome), start.elapsed());
         }
 
         // ── Stage 2: Full JSON report + screenshot PNGs ──

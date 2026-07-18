@@ -648,7 +648,13 @@ fn test_filter_blocks_processing() {
         diag.succeeded("MockCollector"),
         "capture must finish before a potentially blocking filter"
     );
+    let emergency = diag
+        .emergency_snapshot
+        .expect("filter rejection must retain minimum evidence");
+    assert_eq!(emergency.pid, event.pid);
+    assert_eq!(emergency.report_type, event.report_type);
     assert!(!json_report_exists(tempdir.path()));
+    assert_eq!(std::fs::read_dir(tempdir.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -2371,13 +2377,22 @@ fn test_duplicate_detected_skips_report() {
         tempdir.path(),
     );
 
-    let _ = pipeline.handle_event(&make_crash_event(), 0);
+    let event = make_crash_event();
+    let diagnostics = pipeline.handle_event(&event, 0);
 
     // Duplicate → Stage 2 report generation is skipped, so no JSON is written.
     assert!(
         !json_report_exists(tempdir.path()),
         "duplicate event should not produce a JSON report"
     );
+    assert_eq!(
+        diagnostics
+            .emergency_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.report_id.as_str()),
+        Some(event.report_id.as_str())
+    );
+    assert_eq!(std::fs::read_dir(tempdir.path()).unwrap().count(), 0);
 }
 
 // ── Post-processor & notifier loop paths ──
