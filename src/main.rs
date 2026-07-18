@@ -647,7 +647,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         eprintln!(
             "[monitor] Entitlement check failed: {reason}\n\
              [monitor] task_for_pid() requires com.apple.security.cs.debugger.\n\
-             [monitor] Run `make build` to rebuild and codesign the release binary."
+             [monitor] Run `make sign` to rebuild and codesign the release binary."
         );
         return event_loop::EXIT_MONITOR_INTERNAL;
     }
@@ -841,7 +841,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             eprintln!(
                 "[monitor] {e}. Cannot inspect crashes or take snapshots.\n\
                  [monitor] This usually means crash_monitor lacks the debugger entitlement.\n\
-                 [monitor] Run `make build` to rebuild and codesign the release binary."
+                 [monitor] Run `make sign` to rebuild and codesign the release binary."
             );
             // An uninspectable child is terminated and reaped within explicit
             // deadlines. Continuing without a task port would silently lose
