@@ -409,7 +409,11 @@ fn format_crash_context(
     // App/domain state is emitted as a generic annotation map (app-agnostic).
     let crash_context = CrashContextReport {
         source: ReportValueSource::ProducerSharedMemory,
-        annotations: ctx.annotations.iter().cloned().collect(),
+        annotations: ctx
+            .annotations
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect(),
         session_id: (!ctx.session_id.is_empty()).then(|| ctx.session_id.clone()),
         session_start_ns: (ctx.session_start_ns != 0).then_some(ctx.session_start_ns),
         heartbeat_counter: ctx.heartbeat_counter,

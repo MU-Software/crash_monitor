@@ -157,7 +157,7 @@ pub struct CrashContextReport {
     #[serde(default)]
     pub source: ReportValueSource,
     #[serde(default)]
-    pub annotations: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

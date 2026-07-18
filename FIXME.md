@@ -746,10 +746,10 @@
 
 ### P2-12. analyze 출력에서 JSON 값과 민감 문자열을 정확히 다룬다
 
-- [ ] string이 아닌 annotation을 빈 문자열로 만들지 않고 JSON 표현으로 출력한다.
-- [ ] context/report field의 누락과 type mismatch를 명확히 표시한다.
-- [ ] output 함수가 `Write` sink를 받아 실제 formatting을 테스트할 수 있게 한다.
-- [ ] test fixture를 현재 annotations/report shape로 갱신한다.
+- [x] string이 아닌 annotation을 빈 문자열로 만들지 않고 JSON 표현으로 출력한다.
+- [x] context/report field의 누락과 type mismatch를 명확히 표시한다.
+- [x] output 함수가 `Write` sink를 받아 실제 formatting을 테스트할 수 있게 한다.
+- [x] test fixture를 현재 annotations/report shape로 갱신한다.
 
 범위: `src/cli/analyze.rs`, analyze tests.
 
