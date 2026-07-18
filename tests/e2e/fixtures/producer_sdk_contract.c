@@ -17,6 +17,21 @@ int main(void) {
     CHECK(region->header.producer_ready == SUT_SHM_PRODUCER_READY);
     CHECK(crash_monitor_add_breadcrumb(&producer, 0, 7, 9, SUT_CRUMB_CAT_APPLICATION_0,
                                        SUT_CRUMB_SEV_INFO, "demo.c", 12, "started") == 0);
+    CHECK(region->breadcrumbs.ring_count == 1u);
+    CHECK(region->header.breadcrumb_registry_generation == 2u);
+    CHECK(crash_monitor_add_breadcrumb(&producer, 0, 7, 10, SUT_CRUMB_CAT_APPLICATION_0,
+                                       SUT_CRUMB_SEV_INFO, "demo.c", 13, "continued") == 0);
+    CHECK(region->breadcrumbs.ring_count == 1u);
+    CHECK(region->header.breadcrumb_registry_generation == 2u);
+    region->header.breadcrumb_registry_generation = 3u;
+    CHECK(crash_monitor_add_breadcrumb(&producer, 1, 8, 11, SUT_CRUMB_CAT_APPLICATION_0,
+                                       SUT_CRUMB_SEV_INFO, "demo.c", 14, "blocked") == 1);
+    CHECK(region->breadcrumbs.ring_count == 1u);
+    region->header.breadcrumb_registry_generation = 4u;
+    CHECK(crash_monitor_add_breadcrumb(&producer, 1, 8, 12, SUT_CRUMB_CAT_APPLICATION_0,
+                                       SUT_CRUMB_SEV_INFO, "demo.c", 15, "registered") == 0);
+    CHECK(region->breadcrumbs.ring_count == 2u);
+    CHECK(region->header.breadcrumb_registry_generation == 6u);
     CHECK(crash_monitor_set_annotation(&producer, "mode", "test") == 0);
     CHECK(crash_monitor_set_extension(&producer, "renderer", "metal") == 0);
     CHECK(crash_monitor_register_attachment(&producer, "log", "/tmp/demo.log") == 0);

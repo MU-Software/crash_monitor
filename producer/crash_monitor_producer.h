@@ -47,9 +47,29 @@ static inline int crash_monitor_add_breadcrumb(crash_monitor_producer_t* produce
                                                 const char* message) {
     if (thread_slot >= SUT_CRUMB_MAX_THREADS || category > SUT_CRUMB_CATEGORY_MAX ||
         severity > SUT_CRUMB_SEVERITY_MAX) return -1;
+    uint32_t ring_count =
+        sut_shm_atomic_u32_load_acquire(&producer->region->breadcrumbs.ring_count);
+    uint32_t registry_odd = 0u;
+    if (ring_count <= thread_slot) {
+        if (!sut_shm_seqlock_try_begin(
+                &producer->region->header.breadcrumb_registry_generation, &registry_odd)) {
+            return 1;
+        }
+        /* Another registrar may have published this slot before we acquired the
+         * registry. Reload while holding the registry writer token so that a
+         * later publication can never overwrite ring_count with a smaller value. */
+        ring_count =
+            sut_shm_atomic_u32_load_acquire(&producer->region->breadcrumbs.ring_count);
+    }
     sut_crumb_ring_t* ring = &producer->region->breadcrumbs.rings[thread_slot];
     uint32_t odd;
-    if (!sut_shm_seqlock_try_begin(&ring->generation, &odd)) return 1;
+    if (!sut_shm_seqlock_try_begin(&ring->generation, &odd)) {
+        if (registry_odd != 0u) {
+            sut_shm_seqlock_end(&producer->region->header.breadcrumb_registry_generation,
+                                registry_odd);
+        }
+        return 1;
+    }
     const uint32_t index = ring->write_idx % SUT_CRUMB_RING_CAPACITY;
     sut_breadcrumb_t* crumb = &ring->buf[index];
     memset(crumb, 0, sizeof(*crumb));
@@ -64,10 +84,13 @@ static inline int crash_monitor_add_breadcrumb(crash_monitor_producer_t* produce
     ring->write_idx = index + 1u;
     ring->count += 1u;
     sut_shm_seqlock_end(&ring->generation, odd);
-    uint32_t count = sut_shm_atomic_u32_load_acquire(&producer->region->breadcrumbs.ring_count);
-    if (count <= thread_slot) {
+    if (ring_count <= thread_slot) {
         sut_shm_atomic_u32_store_release(&producer->region->breadcrumbs.ring_count,
                                          thread_slot + 1u);
+    }
+    if (registry_odd != 0u) {
+        sut_shm_seqlock_end(&producer->region->header.breadcrumb_registry_generation,
+                            registry_odd);
     }
     return 0;
 }
