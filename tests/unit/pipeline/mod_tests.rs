@@ -1390,7 +1390,7 @@ fn test_panicking_collector_keeps_suspend_resume_balanced() {
 
     assert!(diagnostics.plugins.iter().any(|entry| {
         entry.name == "PanickingCollector"
-            && matches!(&entry.status, PluginStatus::Error(error) if error == "panicked")
+            && matches!(&entry.status, PluginStatus::Panic(message) if message == "intentional collector panic")
     }));
     assert_eq!(platform.suspend_count(), 1);
     assert_eq!(platform.resume_count(), 1);

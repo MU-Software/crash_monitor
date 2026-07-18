@@ -216,6 +216,18 @@ fn plugin_status<T>(result: &PluginRunResult<T>) -> PluginStatus {
     }
 }
 
+fn filter_status(name: &str, result: &PluginRunResult<bool>) -> PluginStatus {
+    match result {
+        PluginRunResult::Completed(true) => PluginStatus::Ok,
+        PluginRunResult::Completed(false) => {
+            PluginStatus::Rejected(format!("{name} rejected the event"))
+        }
+        PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
+        PluginRunResult::Panicked(message) => PluginStatus::Panic(message.clone()),
+        PluginRunResult::TimedOut => PluginStatus::TimedOut,
+    }
+}
+
 /// Stable capture contract for a failed suspend. Snapshot-like triggers need
 /// a coherent view and skip capture; fatal crashes retain best-effort evidence
 /// while owning no suspension count.
@@ -666,12 +678,8 @@ impl Pipeline {
                 timeout,
                 |context| filter.should_process(event, context),
             );
+            let status = filter_status(filter.name(), &outcome);
             let pass = outcome.into_option().unwrap_or(true);
-            let status = if pass {
-                PluginStatus::Ok
-            } else {
-                PluginStatus::Rejected(format!("{} rejected the event", filter.name()))
-            };
             diagnostics.record(filter.name(), status, start.elapsed());
             if !pass {
                 return std::mem::take(diagnostics);
@@ -1003,7 +1011,7 @@ impl Pipeline {
                 timeout,
                 |context| filter.should_process(event, context),
             );
-            let status = plugin_status(&outcome);
+            let status = filter_status(filter.name(), &outcome);
             let pass = outcome.into_option().unwrap_or(true);
             diagnostics.record(filter.name(), status, start.elapsed());
             if !pass {

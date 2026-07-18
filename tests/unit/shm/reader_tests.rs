@@ -102,7 +102,7 @@ fn snapshot(shm: &SharedMemory) -> OwnedShmSnapshot {
 fn test_shm_create_snapshot_drop() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     let snapshot = snapshot(&shm);
-    assert!(shm.name().starts_with("/crash_monitor_"));
+    assert!(shm.name().starts_with("/cm_"));
     assert_eq!(shm.read_live_heartbeat(), 0);
     assert!(snapshot.read_breadcrumbs().is_empty());
     // Drop cleans up
