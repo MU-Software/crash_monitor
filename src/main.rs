@@ -878,16 +878,22 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             shared_memory,
             ..
         } = &mut supervisor;
-        event_loop::event_loop(
-            event_source,
-            &pl,
-            child_task.raw(),
-            child_pid_u32,
+        let target = event_loop::MonitoredTarget::new(
+            event_loop::MonitoredTask::new(child_task.raw()),
+            event_loop::ProcessId::new(child_pid_u32),
             process_name,
-            &|request| platform::send_deferred_reply(request).map_err(|error| error.to_string()),
+        );
+        let reply = |request: &mut platform::ReceivedMachMessage| {
+            platform::send_deferred_reply(request).map_err(|error| error.to_string())
+        };
+        let context = event_loop::EventLoopContext::new(
+            &pl,
+            target,
+            &reply,
             shared_memory.as_ref(),
             anr_config.as_ref(),
-        )
+        );
+        event_loop::event_loop(event_source, context)
     };
 
     if matches!(&outcome, event_loop::MonitorOutcome::ChildTerminated(_)) {

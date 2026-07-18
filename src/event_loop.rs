@@ -84,6 +84,94 @@ pub struct AnrConfig {
     pub cooldown_ms: u64,
 }
 
+/// A Mach task port belonging to the process being monitored.
+///
+/// Keeping this distinct from [`ProcessId`] prevents accidentally swapping the
+/// two values at an event-loop call site (both are integer aliases at the FFI
+/// boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitoredTask(mach_port_t);
+
+impl MonitoredTask {
+    #[must_use]
+    pub const fn new(raw: mach_port_t) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> mach_port_t {
+        self.0
+    }
+}
+
+/// The operating-system process identifier for the monitored process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessId(u32);
+
+impl ProcessId {
+    #[must_use]
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// Identity and handles that must always refer to the same monitored process.
+#[derive(Debug, Clone, Copy)]
+pub struct MonitoredTarget<'a> {
+    task: MonitoredTask,
+    pid: ProcessId,
+    process_name: &'a str,
+}
+
+impl<'a> MonitoredTarget<'a> {
+    #[must_use]
+    pub const fn new(task: MonitoredTask, pid: ProcessId, process_name: &'a str) -> Self {
+        Self {
+            task,
+            pid,
+            process_name,
+        }
+    }
+}
+
+/// Stable state required by one invocation of the monitor event loop.
+///
+/// This groups related inputs and leaves the function with only the event
+/// source and one context argument. Typed target handles make invalid task/PID
+/// combinations visible at construction rather than at runtime.
+#[derive(Clone, Copy)]
+pub struct EventLoopContext<'a> {
+    pipeline: &'a Arc<Pipeline>,
+    target: MonitoredTarget<'a>,
+    reply_fn: &'a dyn Fn(&mut ReceivedMachMessage) -> Result<(), String>,
+    shm: Option<&'a Arc<SharedMemory>>,
+    anr_config: Option<&'a AnrConfig>,
+}
+
+impl<'a> EventLoopContext<'a> {
+    #[must_use]
+    pub const fn new(
+        pipeline: &'a Arc<Pipeline>,
+        target: MonitoredTarget<'a>,
+        reply_fn: &'a dyn Fn(&mut ReceivedMachMessage) -> Result<(), String>,
+        shm: Option<&'a Arc<SharedMemory>>,
+        anr_config: Option<&'a AnrConfig>,
+    ) -> Self {
+        Self {
+            pipeline,
+            target,
+            reply_fn,
+            shm,
+            anr_config,
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════
 //  Event loop
 // ═══════════════════════════════════════════════════
@@ -360,17 +448,23 @@ fn finish_anr_monitor_work(
 /// Signal number for SIGKILL — used to identify probable OOM kills.
 const SIGKILL_NUM: i32 = 9;
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub fn event_loop(
-    source: &mut dyn EventSource,
-    pipeline: &Arc<Pipeline>,
-    task: mach_port_t,
-    pid: u32,
-    process_name: &str,
-    reply_fn: &dyn Fn(&mut ReceivedMachMessage) -> Result<(), String>,
-    shm: Option<&Arc<SharedMemory>>,
-    anr_config: Option<&AnrConfig>,
-) -> EventLoopResult {
+#[allow(clippy::too_many_lines)]
+pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -> EventLoopResult {
+    let EventLoopContext {
+        pipeline,
+        target:
+            MonitoredTarget {
+                task,
+                pid,
+                process_name,
+            },
+        reply_fn,
+        shm,
+        anr_config,
+    } = context;
+    let task = task.raw();
+    let pid = pid.raw();
+
     // Worker construction is monitor-owned setup time, so finish it before
     // establishing the first ANR heartbeat/time baseline.
     let mut capture_worker = CaptureWorker::start(pipeline.clone(), task);

@@ -266,9 +266,9 @@
 
 ### P1-13. event-loop API의 상태 묶음과 이름을 정리한다
 
-- [ ] 다수의 위치 인자를 `EventLoopContext` 같은 구조체로 묶어 task와 PID 같은 동일 타입 인자를 뒤바꿀 위험을 없앤다.
-- [ ] watchdog의 `check_interval_ms`처럼 실제로 elapsed time을 받는 인자를 `elapsed_ms`로 고친다.
-- [ ] 잘못된 인자 조합을 만들 수 없는 typed handle을 사용한다.
+- [x] 다수의 위치 인자를 `EventLoopContext` 같은 구조체로 묶어 task와 PID 같은 동일 타입 인자를 뒤바꿀 위험을 없앤다.
+- [x] watchdog의 `check_interval_ms`처럼 실제로 elapsed time을 받는 인자를 `elapsed_ms`로 고친다.
+- [x] 잘못된 인자 조합을 만들 수 없는 typed handle을 사용한다.
 
 범위: `src/event_loop.rs`, `src/watchdog.rs`.
 

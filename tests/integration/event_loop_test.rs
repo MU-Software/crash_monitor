@@ -12,8 +12,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crash_monitor::event_loop::{
-    AnrConfig, EXIT_CHILD_FAILURE, EXIT_MONITOR_INTERNAL, EventSource, MonitorEvent,
-    MonitorOutcome, event_loop,
+    AnrConfig, EXIT_CHILD_FAILURE, EXIT_MONITOR_INTERNAL, EventLoopContext, EventSource,
+    MonitorEvent, MonitorOutcome, MonitoredTarget, MonitoredTask, ProcessId,
+    event_loop as run_event_loop_with_context,
 };
 use crash_monitor::pipeline::{
     CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PluginContext,
@@ -29,6 +30,22 @@ use crash_monitor::shm::{
 };
 
 type ReleaseGate = Arc<(Mutex<bool>, Condvar)>;
+
+#[allow(clippy::too_many_arguments)]
+fn event_loop(
+    source: &mut dyn EventSource,
+    pipeline: &Arc<Pipeline>,
+    task: mach2::port::mach_port_t,
+    pid: u32,
+    process_name: &str,
+    reply_fn: &dyn Fn(&mut ReceivedMachMessage) -> Result<(), String>,
+    shm: Option<&Arc<SharedMemory>>,
+    anr_config: Option<&AnrConfig>,
+) -> crash_monitor::event_loop::EventLoopResult {
+    let target = MonitoredTarget::new(MonitoredTask::new(task), ProcessId::new(pid), process_name);
+    let context = EventLoopContext::new(pipeline, target, reply_fn, shm, anr_config);
+    run_event_loop_with_context(source, context)
+}
 
 // ═══════════════════════════════════════════════════
 //  TestEventSource
