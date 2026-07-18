@@ -162,7 +162,7 @@ fn truncated_register_state_is_rejected_before_fixed_index_access() {
         state: vec![0; 66],
     }];
     let error = get_registers(&plat, 10, &PluginContext::without_deadline()).unwrap_err();
-    assert!(error.contains("need at least 67"));
+    assert!(error.contains("expected 67..=68"));
 }
 
 #[test]
