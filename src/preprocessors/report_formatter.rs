@@ -247,6 +247,14 @@ pub(crate) fn build_diagnostics_json(diagnostics: &Diagnostics) -> Option<serde_
                     "reason": reason,
                 }),
             };
+            let mut status = status;
+            if let Some(object) = status.as_object_mut() {
+                object.insert("started_offset_ms".into(), d.started_offset_ms.into());
+                object.insert("finished_offset_ms".into(), d.finished_offset_ms.into());
+                if let Some(report_id) = &d.report_id {
+                    object.insert("report_id".into(), report_id.as_str().into());
+                }
+            }
             (d.name.clone(), status)
         })
         .collect();

@@ -220,6 +220,14 @@ pub struct PluginDiagnostic {
     pub name: String,
     pub status: PluginStatus,
     pub duration_ms: u64,
+    /// Event identity and monotonic offsets make each stage transition
+    /// attributable without relying on a path that later processors may move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_id: Option<ReportId>,
+    #[serde(default)]
+    pub started_offset_ms: u64,
+    #[serde(default)]
+    pub finished_offset_ms: u64,
 }
 
 pub struct Diagnostics {
@@ -252,11 +260,20 @@ impl Diagnostics {
     }
 
     pub fn record(&mut self, name: &str, status: PluginStatus, duration: Duration) {
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_ms = duration.as_millis() as u64;
+        #[allow(clippy::cast_possible_truncation)]
+        let finished_offset_ms = self.start.elapsed().as_millis() as u64;
         self.plugins.push(PluginDiagnostic {
             name: name.to_string(),
             status,
-            #[allow(clippy::cast_possible_truncation)]
-            duration_ms: duration.as_millis() as u64,
+            duration_ms,
+            report_id: self
+                .emergency_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.report_id.clone()),
+            started_offset_ms: finished_offset_ms.saturating_sub(duration_ms),
+            finished_offset_ms,
         });
     }
 

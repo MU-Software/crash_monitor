@@ -121,6 +121,19 @@ fn test_diagnostics_records_timeout_separately_from_error() {
 }
 
 #[test]
+fn diagnostics_stage_timing_carries_report_identity() {
+    let event = make_crash_event(ReportType::Crash);
+    let mut diagnostics = Diagnostics::new();
+    diagnostics.ensure_emergency_snapshot(&event, None);
+    diagnostics.record("stage", PluginStatus::Ok, Duration::from_millis(3));
+
+    let stage = diagnostics.plugins.first().unwrap();
+    assert_eq!(stage.report_id.as_ref(), Some(&event.report_id));
+    assert!(stage.finished_offset_ms >= stage.started_offset_ms);
+    assert_eq!(stage.duration_ms, 3);
+}
+
+#[test]
 fn test_diagnostics_pipeline_duration() {
     let diag = Diagnostics::new();
     std::thread::sleep(Duration::from_millis(1));

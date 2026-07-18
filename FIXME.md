@@ -372,7 +372,7 @@
 
 - [x] Stage 2 JSON 작성 뒤 발생하는 ZIP, move, retention, feedback, notifier 상태와 총 시간을 별도 final manifest 또는 원자적 final update로 보존한다.
 - [x] diagnostics를 기록하기 위해 notifier가 삭제된 중간 JSON path에 의존하지 않게 한다.
-- [ ] 각 stage의 시작·종료·실패·duration을 report identity와 함께 남긴다.
+- [x] 각 stage의 시작·종료·실패·duration을 report identity와 함께 남긴다.
 
 범위: `src/pipeline/mod.rs`, report/manifest model.
 
