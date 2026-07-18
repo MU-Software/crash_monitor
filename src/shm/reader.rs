@@ -24,7 +24,8 @@ const CONTEXT_COMPILER_LEN: usize = 32;
 const CONTEXT_OS_VERSION_LEN: usize = 32;
 const ANNOTATION_KEY_LEN: usize = 32;
 const ANNOTATION_VALUE_LEN: usize = 64;
-const SETTINGS_EXTRA_LEN: usize = 128;
+const EXTENSION_KEY_LEN: usize = 16;
+const EXTENSION_VALUE_LEN: usize = 20;
 const ATTACHMENT_LABEL_LEN: usize = 32;
 const ATTACHMENT_PATH_LEN: usize = 256;
 const ATTACHMENT_SLOT_COUNT: usize = MAX_ATTACHMENTS;
@@ -607,19 +608,34 @@ impl OwnedShmSnapshot {
             return None;
         }
         let field = |offset| SETTINGS_OFFSET.checked_add(offset);
-        let world_min = field(offset_of!(SutCrashSettingsSnapshot, world_bound_min))?;
-        let world_max = field(offset_of!(SutCrashSettingsSnapshot, world_bound_max))?;
+        let schema_version =
+            self.read_u32(field(offset_of!(SutCrashSettingsSnapshot, schema_version))?)?;
+        if schema_version != SUT_PRODUCER_EXTENSION_VERSION {
+            return None;
+        }
+        let entry_count = usize::try_from(
+            self.read_u32(field(offset_of!(SutCrashSettingsSnapshot, entry_count))?)?,
+        )
+        .ok()?;
+        if entry_count > usize::try_from(SUT_PRODUCER_EXTENSION_MAX_ENTRIES).ok()? {
+            return None;
+        }
+        let entries_offset = field(offset_of!(SutCrashSettingsSnapshot, entries))?;
+        let entry_stride = size_of::<SutProducerExtensionEntry>();
+        let mut values = Vec::with_capacity(entry_count);
+        for index in 0..entry_count {
+            let base = entries_offset.checked_add(index.checked_mul(entry_stride)?)?;
+            let key = self.read_string(base, EXTENSION_KEY_LEN)?;
+            let value =
+                self.read_string(base.checked_add(EXTENSION_KEY_LEN)?, EXTENSION_VALUE_LEN)?;
+            if key.is_empty() {
+                return None;
+            }
+            values.push((key, value));
+        }
         Some(RawSettingsSnapshot {
-            world_bound_min: self.read_i32_triplet(world_min)?,
-            world_bound_max: self.read_i32_triplet(world_max)?,
-            palette_count: self
-                .read_i32(field(offset_of!(SutCrashSettingsSnapshot, palette_count))?)?,
-            history_max: self
-                .read_i32(field(offset_of!(SutCrashSettingsSnapshot, history_max))?)?,
-            extra: self.read_string(
-                field(offset_of!(SutCrashSettingsSnapshot, extra))?,
-                SETTINGS_EXTRA_LEN,
-            )?,
+            schema_version,
+            values,
         })
     }
 
@@ -863,14 +879,6 @@ impl OwnedShmSnapshot {
 
     fn read_i32(&self, offset: usize) -> Option<i32> {
         Some(i32::from_ne_bytes(self.read_array(offset)?))
-    }
-
-    fn read_i32_triplet(&self, offset: usize) -> Option<[i32; 3]> {
-        Some([
-            self.read_i32(offset)?,
-            self.read_i32(offset.checked_add(size_of::<i32>())?)?,
-            self.read_i32(offset.checked_add(size_of::<i32>() * 2)?)?,
-        ])
     }
 
     fn read_string(&self, offset: usize, len: usize) -> Option<String> {

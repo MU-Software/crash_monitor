@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::shm::types::{
     CRUMB_MAX_THREADS, CRUMB_RING_CAPACITY, FOOTER_OFFSET, SCREENSHOT_HEIGHT, SCREENSHOT_SLOTS,
-    SCREENSHOT_WIDTH, SHM_CANARY, SHM_MAGIC, SHM_PRODUCER_NOT_READY, SHM_TOTAL_SIZE, SHM_VERSION,
-    ShmHeader,
+    SCREENSHOT_WIDTH, SETTINGS_OFFSET, SHM_CANARY, SHM_MAGIC, SHM_PRODUCER_NOT_READY,
+    SHM_TOTAL_SIZE, SHM_VERSION, SUT_PRODUCER_EXTENSION_VERSION, ShmHeader,
 };
 
 /// Low-level owner of one mapped POSIX shared-memory object.
@@ -242,6 +242,9 @@ pub fn create_shared_memory(monitor_pid: u32) -> Result<ShmMapping, String> {
         (*header).settings_generation = 0;
         (*header).attachments_generation = 0;
         (*header).producer_ready = SHM_PRODUCER_NOT_READY;
+        base.add(SETTINGS_OFFSET)
+            .cast::<u32>()
+            .write(SUT_PRODUCER_EXTENSION_VERSION);
     }
 
     // Write canary

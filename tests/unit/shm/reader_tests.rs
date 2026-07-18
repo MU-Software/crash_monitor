@@ -557,46 +557,37 @@ fn test_read_settings_populated() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     unsafe {
         let base = shm.base_ptr();
-        write_val::<[i32; 3]>(
+        write_val::<u32>(
             base,
-            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, world_bound_min),
-            [-1, -2, -3],
+            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, entry_count),
+            1,
         );
-        write_val::<[i32; 3]>(
-            base,
-            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, world_bound_max),
-            [1, 2, 3],
-        );
-        write_val::<i32>(
-            base,
-            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, palette_count),
-            16,
-        );
-        write_val::<i32>(
-            base,
-            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, history_max),
-            50,
-        );
+        let entry = SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, entries);
+        write_cstr(base, entry, "mode");
+        write_cstr(base, entry + EXTENSION_KEY_LEN, "diagnostic");
     }
 
     let s = snapshot(&shm)
         .read_settings()
         .expect("settings should read");
-    assert_eq!(s.world_bound_min, [-1, -2, -3]);
-    assert_eq!(s.world_bound_max, [1, 2, 3]);
-    assert_eq!(s.palette_count, 16);
-    assert_eq!(s.history_max, 50);
+    assert_eq!(s.schema_version, 1);
+    assert_eq!(s.values, [("mode".into(), "diagnostic".into())]);
 }
 
 #[test]
-fn test_malformed_settings_extra_rejects_settings_and_preserves_context() {
+fn test_malformed_extension_key_rejects_extension_and_preserves_context() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
-    let extra = std::mem::offset_of!(SutCrashSettingsSnapshot, extra);
+    let entries = std::mem::offset_of!(SutCrashSettingsSnapshot, entries);
     unsafe {
+        write_val::<u32>(
+            shm.base_ptr(),
+            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, entry_count),
+            1,
+        );
         write_bytes(
             shm.base_ptr(),
-            SETTINGS_OFFSET + extra,
-            &[b'E'; SETTINGS_EXTRA_LEN],
+            SETTINGS_OFFSET + entries,
+            &[b'E'; EXTENSION_KEY_LEN],
         );
         write_cstr(
             shm.base_ptr(),
@@ -612,10 +603,10 @@ fn test_malformed_settings_extra_rejects_settings_and_preserves_context() {
         "stable"
     );
     let raw = owned.raw_context_bytes_owned();
-    let raw_extra = size_of::<SutCrashContext>() + extra;
+    let raw_extra = size_of::<SutCrashContext>() + entries;
     assert_eq!(
-        &raw[raw_extra..raw_extra + SETTINGS_EXTRA_LEN],
-        &[b'E'; SETTINGS_EXTRA_LEN]
+        &raw[raw_extra..raw_extra + EXTENSION_KEY_LEN],
+        &[b'E'; EXTENSION_KEY_LEN]
     );
 }
 
@@ -1228,10 +1219,10 @@ fn test_odd_context_is_dropped_without_retry_and_stable_settings_survive() {
             CONTEXT_OFFSET + std::mem::offset_of!(SutCrashContext, app_version),
             "torn",
         );
-        write_val::<i32>(
+        write_val::<u32>(
             base,
-            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, palette_count),
-            23,
+            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, entry_count),
+            0,
         );
     }
 
@@ -1247,12 +1238,12 @@ fn test_odd_context_is_dropped_without_retry_and_stable_settings_survive() {
         }]
     );
     assert!(owned.read_context().is_none());
-    assert_eq!(
+    assert!(
         owned
             .read_settings()
-            .expect("stable settings")
-            .palette_count,
-        23
+            .expect("stable extension")
+            .values
+            .is_empty()
     );
 
     let raw = owned.raw_context_bytes_owned();
@@ -1413,10 +1404,10 @@ fn test_odd_settings_and_attachments_are_dropped_independently() {
             SECTION1_OFFSET + std::mem::offset_of!(ShmHeader, attachments_generation),
             7,
         );
-        write_val::<i32>(
+        write_val::<u32>(
             base,
-            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, palette_count),
-            99,
+            SETTINGS_OFFSET + std::mem::offset_of!(SutCrashSettingsSnapshot, entry_count),
+            0,
         );
         write_val::<u32>(
             base,

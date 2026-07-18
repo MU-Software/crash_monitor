@@ -2,7 +2,6 @@
 //! No raw data type imports — receives pre-formatted data from `report_formatter`.
 
 use crate::platform;
-use crate::preprocessors::report_formatter;
 use crate::utils::paths::{
     create_private_file, open_private_directory, open_private_file, publish_private_path,
 };
@@ -20,9 +19,7 @@ use super::artifact::{
     ArtifactKind, ArtifactTransaction, MANIFEST_FILE_NAME, MANIFEST_SCHEMA_VERSION, ReportId,
     load_manifest,
 };
-use super::types::{
-    CollectedData, CrashEvent, Diagnostics, ReportType, TerminationEvidence, TerminationReason,
-};
+use super::types::{CrashEvent, ReportType, TerminationEvidence, TerminationReason};
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
 
@@ -55,7 +52,7 @@ pub struct CrashReport {
     pub heap_summary: Option<HeapSummary>,
     #[serde(default)]
     pub session: Option<SessionReport>,
-    #[serde(default)]
+    #[serde(default, rename = "producer_extension", alias = "settings_snapshot")]
     pub settings_snapshot: Option<SettingsSnapshotReport>,
     #[serde(default)]
     pub fingerprint: Option<String>,
@@ -71,6 +68,24 @@ pub struct CrashReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub diagnostics: Option<serde_json::Value>,
+}
+
+/// Formatting output owned by the report-model layer. Formatter
+/// implementations produce this value; the model never imports a formatter.
+pub struct FormattedReportData {
+    pub threads: Vec<ThreadReport>,
+    pub loaded_images: Vec<LoadedImageReport>,
+    pub memory_map: Vec<VmRegionReport>,
+    pub heap_summary: Option<HeapSummary>,
+    pub session: Option<SessionReport>,
+    pub diagnostics_json: Option<serde_json::Value>,
+    pub breadcrumbs: Vec<BreadcrumbReport>,
+    pub crash_context: Option<CrashContextReport>,
+    pub build: Option<BuildReport>,
+    pub settings_snapshot: Option<SettingsSnapshotReport>,
+    pub attachments: Vec<serde_json::Value>,
+    pub environment: Option<EnvironmentReport>,
+    pub process_output: Option<crate::platform::ChildOutputSnapshot>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -181,11 +196,8 @@ pub struct BreadcrumbReport {
 pub struct SettingsSnapshotReport {
     #[serde(default)]
     pub source: ReportValueSource,
-    pub world_bounds: [i32; 6],
-    pub palette_count: i32,
-    pub history_max: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra: Option<String>,
+    pub schema_version: u32,
+    pub values: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -877,8 +889,8 @@ pub fn report_filename(report_type: ReportType, pid: u32) -> String {
 #[must_use]
 pub fn build_report(
     event: &CrashEvent,
-    data: &CollectedData,
-    diagnostics: &Diagnostics,
+    formatted: FormattedReportData,
+    fingerprint: Option<String>,
 ) -> CrashReport {
     let header = ReportHeader::new(event);
 
@@ -914,8 +926,6 @@ pub fn build_report(
         None
     };
 
-    let formatted = report_formatter::format(data, diagnostics);
-
     CrashReport {
         header,
         termination: event.termination,
@@ -929,7 +939,7 @@ pub fn build_report(
         heap_summary: formatted.heap_summary,
         session: formatted.session,
         settings_snapshot: formatted.settings_snapshot,
-        fingerprint: data.fingerprint.clone(),
+        fingerprint,
         environment: formatted.environment,
         process_output: formatted.process_output,
         attachments: formatted.attachments,

@@ -4,7 +4,10 @@ use mach2::port::mach_port_t;
 use std::path::Path;
 
 use super::safety::PluginContext;
-use super::types::{CollectedData, CrashEvent, PluginTimeout, Priority, ReportResult};
+use super::types::{
+    CollectedData, CrashEvent, DependencyKind, PluginDependency, PluginId, PluginTimeout, Priority,
+    ReportResult,
+};
 
 /// Capability boundary used by live-task capture isolation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,11 @@ pub enum PostProcessorPhase {
 /// constant-time accessors over cached state and must not perform blocking I/O.
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &'static str;
+    /// Typed identity used for registration, dependency validation, and skip
+    /// decisions. `name` remains the human-readable diagnostics label.
+    fn id(&self) -> PluginId {
+        PluginId::new(self.name())
+    }
     fn execution(&self) -> PluginExecution;
     fn priority(&self) -> Priority;
     /// Required data dependencies within the same category.
@@ -67,6 +75,20 @@ pub trait Plugin: Send + Sync {
     /// plugin.
     fn order_after(&self) -> &'static [&'static str] {
         &[]
+    }
+    /// Normalize both dependency classes into typed graph edges.
+    fn dependencies(&self) -> Vec<PluginDependency> {
+        self.hard_dependencies()
+            .iter()
+            .map(|id| PluginDependency {
+                plugin: PluginId::new(id),
+                kind: DependencyKind::Hard,
+            })
+            .chain(self.order_after().iter().map(|id| PluginDependency {
+                plugin: PluginId::new(id),
+                kind: DependencyKind::OrderOnly,
+            }))
+            .collect()
     }
     /// Runtime platform availability check.
     fn is_available(&self) -> bool {

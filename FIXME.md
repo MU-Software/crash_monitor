@@ -652,64 +652,64 @@
 
 ### P2-02. pipeline layering과 composition root를 분리한다
 
-- [ ] report model이 formatter 구현을 import하고 formatter가 report model을 다시 import하는 cycle을 제거한다.
-- [ ] report model, formatting, orchestration, default plugin assembly를 별도 module로 나눈다.
-- [ ] platform-neutral trait/event loop에서 `mach_port_t`를 제거하고 opaque `TaskHandle`/capture context를 사용한다.
-- [ ] `Pipeline` public mutable field를 private immutable state와 validated builder로 바꾼다.
-- [ ] builder가 항상 dependency/order validation을 실행하게 한다.
+- [x] report model이 formatter 구현을 import하고 formatter가 report model을 다시 import하는 cycle을 제거한다.
+- [x] report model, formatting, orchestration, default plugin assembly를 별도 module로 나눈다.
+- [x] platform-neutral trait/event loop에서 `mach_port_t`를 제거하고 opaque `TaskHandle`/capture context를 사용한다.
+- [x] `Pipeline` public mutable field를 private immutable state와 validated builder로 바꾼다.
+- [x] builder가 항상 dependency/order validation을 실행하게 한다.
 
 범위: `src/pipeline`, `src/preprocessors/report_formatter.rs`, `src/event_loop.rs`.
 
 ### P2-03. `ReportContext`와 `ArtifactStore`를 공통 기반으로 둔다
 
-- [ ] `ReportId`, output root, manifest, privacy policy, byte budget, deadlines를 immutable context에 묶는다.
-- [ ] collector/postprocessor가 global path 계산을 다시 하지 않고 context/store만 사용하게 한다.
-- [ ] artifact 등록, atomic commit, cleanup, retention을 store의 단일 contract로 제공한다.
-- [ ] logical report transaction의 상태 전이를 타입과 문서로 정의한다.
+- [x] `ReportId`, output root, manifest, privacy policy, byte budget, deadlines를 immutable context에 묶는다.
+- [x] collector/postprocessor가 global path 계산을 다시 하지 않고 context/store만 사용하게 한다.
+- [x] artifact 등록, atomic commit, cleanup, retention을 store의 단일 contract로 제공한다.
+- [x] logical report transaction의 상태 전이를 타입과 문서로 정의한다.
 
 범위: pipeline/report/artifact modules.
 
 ### P2-04. child와 capture resource를 supervisor state machine으로 관리한다
 
-- [ ] PID, process group, task port, exception port, listener, SHM, suspend guard의 소유 상태를 한곳에서 관리한다.
-- [ ] start, monitoring, capturing, finalizing, terminating, reaped 상태와 허용 전이를 정의한다.
-- [ ] 각 상태에서 오류·signal·panic이 발생해도 정리 순서가 결정적이게 한다.
+- [x] PID, process group, task port, exception port, listener, SHM, suspend guard의 소유 상태를 한곳에서 관리한다.
+- [x] start, monitoring, capturing, finalizing, terminating, reaped 상태와 허용 전이를 정의한다.
+- [x] 각 상태에서 오류·signal·panic이 발생해도 정리 순서가 결정적이게 한다.
 
 범위: `src/main.rs`, `src/event_loop.rs`, platform guards.
 
 ### P2-05. config는 한 번 load·validate한 immutable 값만 사용한다
 
-- [ ] main과 pipeline factory의 이중 `load_config`를 제거한다.
-- [ ] missing file과 malformed/read-error를 구분하고 오류를 조용히 default로 바꾸지 않는다.
-- [ ] unknown field를 warning 또는 deny하고 모든 numeric range를 validate한다.
-- [ ] `max_events=0`, retention 0, ANR threshold/interval, timeout 등 sentinel과 범위를 문서화한다.
-- [ ] JSON을 primary source로 하고 ANR/timeout environment override는 명시적인 test/ops override로 제한한다.
-- [ ] `check-config` command를 제공하고 `config::is_enabled`는 실제로 사용하거나 제거한다.
+- [x] main과 pipeline factory의 이중 `load_config`를 제거한다.
+- [x] missing file과 malformed/read-error를 구분하고 오류를 조용히 default로 바꾸지 않는다.
+- [x] unknown field를 warning 또는 deny하고 모든 numeric range를 validate한다.
+- [x] `max_events=0`, retention 0, ANR threshold/interval, timeout 등 sentinel과 범위를 문서화한다.
+- [x] JSON을 primary source로 하고 ANR/timeout environment override는 명시적인 test/ops override로 제한한다.
+- [x] `check-config` command를 제공하고 `config::is_enabled`는 실제로 사용하거나 제거한다.
 
 범위: `src/config.rs`, `src/main.rs`, pipeline factory.
 
 ### P2-06. plugin identity와 dependency 모델을 typed하게 만든다
 
-- [ ] 문자열 이름 대신 stable typed `PluginId`를 사용한다.
-- [ ] dependency graph를 topological order로 계산하고 cycle을 진단한다.
-- [ ] hard data dependency와 단순 실행 순서를 별개 타입/field로 표현한다.
-- [ ] 모든 category에 같은 uniqueness, dependency, skip contract를 적용한다.
+- [x] 문자열 이름 대신 stable typed `PluginId`를 사용한다.
+- [x] dependency graph를 topological order로 계산하고 cycle을 진단한다.
+- [x] hard data dependency와 단순 실행 순서를 별개 타입/field로 표현한다.
+- [x] 모든 category에 같은 uniqueness, dependency, skip contract를 적용한다.
 
 범위: pipeline traits/types/builder.
 
 ### P2-07. app-specific SHM field를 generic extension schema로 옮긴다
 
-- [ ] TOOL/WORLD/UNDO/MESH, palette/history/world-bound와 voxel category를 core schema에서 제거하거나 versioned extension으로 격리한다.
-- [ ] generic annotations/settings/category extension contract를 정의한다.
-- [ ] context collector와 dialog/help의 이전 host-project 예시를 generic wording으로 바꾼다.
+- [x] TOOL/WORLD/UNDO/MESH, palette/history/world-bound와 voxel category를 core schema에서 제거하거나 versioned extension으로 격리한다.
+- [x] generic annotations/settings/category extension contract를 정의한다.
+- [x] context collector와 dialog/help의 이전 host-project 예시를 generic wording으로 바꾼다.
 
 범위: `schema/crash_shm.h`, formatter/collectors/docs.
 
 ### P2-08. 실제 producer SDK와 올바른 SSOT 문서를 제공한다
 
-- [ ] heartbeat, breadcrumb, context, attachment, screenshot publication API를 C/C++/Rust 중 지원 대상 언어에 제공한다.
-- [ ] 존재하지 않는 `sut_crash_reporter.h` 참조를 실제 `schema/crash_shm.h`와 binding flow로 교체한다.
-- [ ] release/acquire, ready handshake, version negotiation, size/alignment contract를 SDK와 함께 테스트한다.
+- [x] heartbeat, breadcrumb, context, attachment, screenshot publication API를 C/C++/Rust 중 지원 대상 언어에 제공한다.
+- [x] 존재하지 않는 `sut_crash_reporter.h` 참조를 실제 `schema/crash_shm.h`와 binding flow로 교체한다.
+- [x] release/acquire, ready handshake, version negotiation, size/alignment contract를 SDK와 함께 테스트한다.
 
 범위: schema, `src/shm/mod.rs`, producer packages, integration docs.
 
@@ -726,19 +726,19 @@
 
 ### P2-10. generated binding과 workspace 설정의 drift를 막는다
 
-- [ ] generated binding을 check-in하고 CI에서 schema drift를 검사하거나 bindgen/libclang toolchain을 명확히 pin한다.
-- [ ] 약 50MB screenshot struct에 bindgen이 `Copy`/`Debug`를 파생하지 않게 `no_copy`/`no_debug`를 설정한다.
-- [ ] `SutCrumbState` 등 다른 수백 KiB generated struct도 크기 기준으로 `no_copy`/`no_debug` 적용 여부를 검토한다.
-- [ ] `workspace.package`, shared dependencies, shared lints를 member crate가 상속하게 한다.
-- [ ] 사용하지 않는 `uuid`는 제거하거나 실제 `ReportId` 구현에 사용한다.
+- [x] generated binding을 check-in하고 CI에서 schema drift를 검사하거나 bindgen/libclang toolchain을 명확히 pin한다.
+- [x] 약 50MB screenshot struct에 bindgen이 `Copy`/`Debug`를 파생하지 않게 `no_copy`/`no_debug`를 설정한다.
+- [x] `SutCrumbState` 등 다른 수백 KiB generated struct도 크기 기준으로 `no_copy`/`no_debug` 적용 여부를 검토한다.
+- [x] `workspace.package`, shared dependencies, shared lints를 member crate가 상속하게 한다.
+- [x] 사용하지 않는 `uuid`는 제거하거나 실제 `ReportId` 구현에 사용한다.
 
 범위: `build.rs`, `Cargo.toml`, member manifests.
 
 ### P2-11. dialog UI와 mock의 CLI contract를 통일한다
 
-- [ ] wrapping label로 만든 입력란을 표준 editable `NSTextField` 또는 `NSTextView`로 바꾼다.
-- [ ] real/mock helper가 `--mock-input`, `--dry-run`, skip exit semantics와 출력 schema를 공유한다.
-- [ ] dialog title에 이전 제품명을 하드코딩하지 않고 process name 또는 설정값을 사용한다.
+- [x] wrapping label로 만든 입력란을 표준 editable `NSTextField` 또는 `NSTextView`로 바꾼다.
+- [x] real/mock helper가 `--mock-input`, `--dry-run`, skip exit semantics와 출력 schema를 공유한다.
+- [x] dialog title에 이전 제품명을 하드코딩하지 않고 process name 또는 설정값을 사용한다.
 
 범위: `crates/crash_dialog_macos`, `crates/crash_dialog_mock`.
 

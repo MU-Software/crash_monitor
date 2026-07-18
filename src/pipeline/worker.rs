@@ -866,8 +866,13 @@ fn emergency_finalize_captured(pipeline: &Pipeline, mut captured: CapturedEvent)
     // any other extension point so resource exhaustion cannot enter another
     // unbounded plugin path.
     let json_path = {
-        let mut report =
-            super::report::build_report(&captured.event, &captured.data, &captured.diagnostics);
+        let formatted =
+            crate::preprocessors::report_formatter::format(&captured.data, &captured.diagnostics);
+        let mut report = super::report::build_report(
+            &captured.event,
+            formatted,
+            captured.data.fingerprint.clone(),
+        );
         match super::report::write_report(&transaction, &mut report, &[]) {
             Ok(path) => Some(path),
             Err(error) => {

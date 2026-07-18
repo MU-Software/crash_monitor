@@ -27,6 +27,11 @@ fn main() {
         // blocklisting it drops bindgen's redundant alias. Severity is defined
         // by fixed-width SUT_* macros so its constants remain generated.
         .blocklist_type("sut_crumb_category.*")
+        // Never make enormous wire-layout structs implicitly copyable or
+        // printable. A copied `sut_screenshot_section`/`sut_shm_region` is
+        // roughly 50 MiB and `sut_crumb_state` is hundreds of KiB.
+        .no_copy("sut_(crumb_ring|crumb_state|screenshot_section|shm_region)")
+        .no_debug("sut_(crumb_ring|crumb_state|screenshot_section|shm_region)")
         // No Default derive; owned snapshots are decoded from checked byte
         // ranges instead of materializing bindgen-generated C structs.
         .derive_default(false)

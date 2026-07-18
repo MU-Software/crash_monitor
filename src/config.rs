@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::pipeline::types::{DependencyKind, PluginCategory};
+use crate::pipeline::types::{DependencyKind, PluginCategory, PluginId};
 use crate::utils::paths;
 
 // ═══════════════════════════════════════════════════
@@ -26,6 +26,7 @@ pub struct CrashReporterConfig {
     pub report_dir: Option<String>,
     pub privacy: PrivacyConfig,
     pub triggers: TriggersConfig,
+    pub watchdog: WatchdogConfig,
     pub filters: FilterConfig,
     pub collectors: CollectorConfig,
     pub pre_processors: PreProcessorConfig,
@@ -40,7 +41,7 @@ pub struct CrashReporterConfig {
 /// file is a deployment-time consent declaration; it does not display or
 /// substitute for an application UI.
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PrivacyConfig {
     pub level: PrivacyLevel,
     pub consent: ConsentState,
@@ -142,7 +143,7 @@ pub struct ValidatedConfig {
     /// Trigger policy with the `triggers.enabled` category switch resolved.
     pub triggers: ValidatedTriggersConfig,
     diagnostics: Vec<ConfigValidationDiagnostic>,
-    enabled_plugins: BTreeSet<&'static str>,
+    enabled_plugins: BTreeSet<PluginId>,
     collection_policy: CollectionPolicy,
     config: CrashReporterConfig,
 }
@@ -163,14 +164,24 @@ impl ValidatedConfig {
     /// Effective plugin enablement after category switches and hard
     /// dependency closure have been applied.
     #[must_use]
-    pub(crate) fn plugin_enabled(&self, plugin_id: &str) -> bool {
-        self.enabled && self.enabled_plugins.contains(plugin_id)
+    pub(crate) fn plugin_enabled(&self, plugin_id: impl AsRef<str>) -> bool {
+        self.enabled
+            && self
+                .enabled_plugins
+                .iter()
+                .any(|enabled| enabled.as_str() == plugin_id.as_ref())
     }
 
     /// Effective immutable sensitive-data policy for capture and persistence.
     #[must_use]
     pub const fn collection_policy(&self) -> CollectionPolicy {
         self.collection_policy
+    }
+
+    /// Validated watchdog timings from the immutable startup config.
+    #[must_use]
+    pub const fn watchdog(&self) -> WatchdogConfig {
+        self.config.watchdog
     }
 }
 
@@ -240,6 +251,10 @@ pub enum ConfigValidationError {
     /// no encryption writer. Startup fails before any report is captured.
     ApplicationEncryptionUnavailable,
     RetentionMaxReportsZero,
+    InvalidNumericRange {
+        field: &'static str,
+        requirement: &'static str,
+    },
     DuplicatePluginId {
         plugin_id: String,
         first_category: PluginCategory,
@@ -272,6 +287,9 @@ impl std::fmt::Display for ConfigValidationError {
             Self::RetentionMaxReportsZero => f.write_str(
                 "post_processors.retention.max_reports must be greater than zero when retention is enabled",
             ),
+            Self::InvalidNumericRange { field, requirement } => {
+                write!(f, "{field} {requirement}")
+            }
             Self::DuplicatePluginId {
                 plugin_id,
                 first_category,
@@ -392,6 +410,41 @@ impl CrashReporterConfig {
         {
             return Err(ConfigValidationError::RetentionMaxReportsZero);
         }
+        for (invalid, field) in [
+            (
+                self.filters.rate_limiter.enabled && self.filters.rate_limiter.window_secs == 0,
+                "filters.rate_limiter.window_secs",
+            ),
+            (
+                self.pre_processors.fingerprint.enabled
+                    && self.pre_processors.fingerprint.top_frames == 0,
+                "pre_processors.fingerprint.top_frames",
+            ),
+            (
+                self.pre_processors.duplicate.enabled
+                    && self.pre_processors.duplicate.window_secs == 0,
+                "pre_processors.duplicate.window_secs",
+            ),
+            (
+                self.post_processors.log_rotator.enabled
+                    && self.post_processors.log_rotator.max_size_mb == 0,
+                "post_processors.log_rotator.max_size_mb",
+            ),
+            (self.watchdog.warmup_ms == 0, "watchdog.warmup_ms"),
+            (self.watchdog.threshold_ms == 0, "watchdog.threshold_ms"),
+            (
+                self.watchdog.check_interval_ms == 0,
+                "watchdog.check_interval_ms",
+            ),
+            (self.watchdog.cooldown_ms == 0, "watchdog.cooldown_ms"),
+        ] {
+            if invalid {
+                return Err(ConfigValidationError::InvalidNumericRange {
+                    field,
+                    requirement: "must be greater than zero when enabled",
+                });
+            }
+        }
         let trigger_category_enabled = self.triggers.enabled;
         let triggers = ValidatedTriggersConfig {
             crash: trigger_category_enabled && self.triggers.crash.enabled,
@@ -422,6 +475,7 @@ impl Default for CrashReporterConfig {
             report_dir: None,
             privacy: PrivacyConfig::default(),
             triggers: TriggersConfig::default(),
+            watchdog: WatchdogConfig::default(),
             filters: FilterConfig::default(),
             collectors: CollectorConfig::default(),
             pre_processors: PreProcessorConfig::default(),
@@ -453,7 +507,7 @@ impl Default for CrashReporterConfig {
 /// switch remains authoritative and has no implicit emergency-evidence
 /// exception.
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TriggersConfig {
     pub enabled: bool,
     pub crash: PluginToggle,
@@ -462,6 +516,30 @@ pub struct TriggersConfig {
     pub oom_detection: PluginToggle,
     pub anr: PluginToggle,
     pub snapshot: PluginToggle,
+}
+
+/// ANR watchdog timing configuration in milliseconds.
+///
+/// JSON is authoritative. Environment overrides are applied by the binary
+/// only when the operations/test override gate is explicitly enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WatchdogConfig {
+    pub warmup_ms: u64,
+    pub threshold_ms: u64,
+    pub check_interval_ms: u64,
+    pub cooldown_ms: u64,
+}
+
+impl Default for WatchdogConfig {
+    fn default() -> Self {
+        Self {
+            warmup_ms: 10_000,
+            threshold_ms: 5_000,
+            check_interval_ms: 2_000,
+            cooldown_ms: 60_000,
+        }
+    }
 }
 
 impl Default for TriggersConfig {
@@ -485,7 +563,7 @@ impl Default for TriggersConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FilterConfig {
     pub enabled: bool,
     pub disk_space: DiskSpaceConfig,
@@ -503,7 +581,7 @@ impl Default for FilterConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DiskSpaceConfig {
     pub enabled: bool,
     pub min_free_mb: u64,
@@ -519,7 +597,7 @@ impl Default for DiskSpaceConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RateLimiterConfig {
     pub enabled: bool,
     pub max_events: usize,
@@ -541,7 +619,7 @@ impl Default for RateLimiterConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CollectorConfig {
     pub enabled: bool,
     pub thread: ThreadCollectorConfig,
@@ -575,7 +653,7 @@ impl Default for CollectorConfig {
 /// Thread-state collection with a separate opt-in for raw stack bytes.
 /// Registers and backtraces remain the minimal diagnostic baseline.
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ThreadCollectorConfig {
     pub enabled: bool,
     pub stack_memory: bool,
@@ -595,7 +673,7 @@ impl Default for ThreadCollectorConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PreProcessorConfig {
     pub enabled: bool,
     pub session: PluginToggle,
@@ -621,7 +699,7 @@ impl Default for PreProcessorConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FingerprintConfig {
     pub enabled: bool,
     pub top_frames: usize,
@@ -637,7 +715,7 @@ impl Default for FingerprintConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DuplicateConfig {
     pub enabled: bool,
     pub window_secs: u64,
@@ -657,7 +735,7 @@ impl Default for DuplicateConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PostProcessorConfig {
     pub enabled: bool,
     pub raw_cleanup: PluginToggle,
@@ -687,7 +765,7 @@ impl Default for PostProcessorConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LogRotatorConfig {
     pub enabled: bool,
     pub max_size_mb: u64,
@@ -703,7 +781,7 @@ impl Default for LogRotatorConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetentionConfig {
     pub enabled: bool,
     pub max_reports: usize,
@@ -727,7 +805,7 @@ impl Default for RetentionConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct NotifierConfig {
     pub enabled: bool,
     pub console: PluginToggle,
@@ -746,7 +824,7 @@ impl Default for NotifierConfig {
 
 /// Only plugin disabled by default (`bool` defaults to `false`).
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SystemNotificationConfig {
     pub enabled: bool,
 }
@@ -756,7 +834,7 @@ pub struct SystemNotificationConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PluginToggle {
     pub enabled: bool,
 }
@@ -1206,7 +1284,7 @@ fn find_dependency_cycle(
 // ═══════════════════════════════════════════════════
 fn resolve_plugin_enablement(
     config: &CrashReporterConfig,
-) -> Result<(BTreeSet<&'static str>, Vec<ConfigValidationDiagnostic>), ConfigValidationError> {
+) -> Result<(BTreeSet<PluginId>, Vec<ConfigValidationDiagnostic>), ConfigValidationError> {
     let categories: Vec<(PluginCategory, Vec<PluginGraphNode>)> = [
         PluginCategory::Filter,
         PluginCategory::Collector,
@@ -1244,7 +1322,7 @@ fn resolve_plugin_enablement(
 
     let mut diagnostics = sensitive_collector_diagnostics(config);
     let requested = configured_plugin_toggles(config);
-    let enabled: BTreeSet<&'static str> = requested
+    let enabled: BTreeSet<PluginId> = requested
         .into_iter()
         .filter_map(|(id, requested)| requested.then_some(id))
         .collect();
@@ -1297,7 +1375,8 @@ fn sensitive_collector_enabled(
     plugin_id: &str,
     toggle: bool,
 ) -> bool {
-    config.collectors.enabled && toggle && privacy_allows_collector(&config.privacy, plugin_id)
+    is_enabled(config.enabled, config.collectors.enabled, toggle)
+        && privacy_allows_collector(&config.privacy, plugin_id)
 }
 
 fn sensitive_collector_diagnostics(
@@ -1351,7 +1430,7 @@ fn sensitive_evidence_diagnostics(config: &CrashReporterConfig) -> Vec<ConfigVal
 
 fn resolve_collection_policy(
     config: &CrashReporterConfig,
-    enabled_plugins: &BTreeSet<&'static str>,
+    enabled_plugins: &BTreeSet<PluginId>,
 ) -> CollectionPolicy {
     if !config.enabled {
         return CollectionPolicy::MINIMAL;
@@ -1362,16 +1441,19 @@ fn resolve_collection_policy(
             && config.collectors.thread.enabled
             && config.collectors.thread.stack_memory
             && privacy_allows_diagnostic_evidence(&config.privacy),
-        capture_shm_screenshots: enabled_plugins.contains("ScreenshotCollector"),
-        capture_shm_attachments: enabled_plugins.contains("AttachmentCollector"),
+        capture_shm_screenshots: enabled_plugins.contains(&PluginId::new("ScreenshotCollector")),
+        capture_shm_attachments: enabled_plugins.contains(&PluginId::new("AttachmentCollector")),
         persist_raw_shm: config.privacy.raw_shm && privacy_allows_full_evidence(&config.privacy),
     }
 }
 
-fn close_plugin_enablement(
+fn close_plugin_enablement<T>(
     specs: &[PluginSpec],
-    mut enabled: BTreeSet<&'static str>,
-) -> (BTreeSet<&'static str>, Vec<ConfigValidationDiagnostic>) {
+    mut enabled: BTreeSet<T>,
+) -> (BTreeSet<T>, Vec<ConfigValidationDiagnostic>)
+where
+    T: Copy + Ord + AsRef<str>,
+{
     let mut diagnostics = Vec::new();
 
     // Repeated removal computes the greatest hard-dependency-closed subset of
@@ -1379,22 +1461,26 @@ fn close_plugin_enablement(
     loop {
         let mut removed = None;
         for spec in specs {
-            if !enabled.contains(spec.id) {
-                continue;
-            }
-            if let Some(dependency) = spec
-                .hard_dependencies
+            let Some(enabled_id) = enabled
                 .iter()
-                .find(|dependency| !enabled.contains(**dependency))
-            {
-                removed = Some((*spec, *dependency));
+                .find(|enabled| enabled.as_ref() == spec.id)
+                .copied()
+            else {
+                continue;
+            };
+            if let Some(dependency) = spec.hard_dependencies.iter().find(|dependency| {
+                !enabled
+                    .iter()
+                    .any(|enabled| enabled.as_ref() == **dependency)
+            }) {
+                removed = Some((*spec, enabled_id, *dependency));
                 break;
             }
         }
-        let Some((spec, dependency)) = removed else {
+        let Some((spec, enabled_id, dependency)) = removed else {
             break;
         };
-        enabled.remove(spec.id);
+        enabled.remove(&enabled_id);
         diagnostics.push(ConfigValidationDiagnostic::DependentDisabled {
             category: spec.category,
             plugin_id: spec.id.to_string(),
@@ -1406,30 +1492,30 @@ fn close_plugin_enablement(
 }
 
 #[allow(clippy::too_many_lines)] // explicit mapping is the config/plugin SSOT boundary
-fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str, bool)> {
+fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(PluginId, bool)> {
     vec![
         (
-            "DiskSpaceFilter",
+            PluginId::new("DiskSpaceFilter"),
             config.filters.enabled && config.filters.disk_space.enabled,
         ),
         (
-            "RateLimiter",
+            PluginId::new("RateLimiter"),
             config.filters.enabled && config.filters.rate_limiter.enabled,
         ),
         (
-            "ThreadCollector",
+            PluginId::new("ThreadCollector"),
             config.collectors.enabled && config.collectors.thread.enabled,
         ),
         (
-            "BreadcrumbCollector",
+            PluginId::new("BreadcrumbCollector"),
             config.collectors.enabled && config.collectors.breadcrumb.enabled,
         ),
         (
-            "ContextCollector",
+            PluginId::new("ContextCollector"),
             config.collectors.enabled && config.collectors.context.enabled,
         ),
         (
-            "MemoryCollector",
+            PluginId::new("MemoryCollector"),
             sensitive_collector_enabled(
                 config,
                 "MemoryCollector",
@@ -1437,11 +1523,11 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "DylibCollector",
+            PluginId::new("DylibCollector"),
             config.collectors.enabled && config.collectors.dylib.enabled,
         ),
         (
-            "ScreenshotCollector",
+            PluginId::new("ScreenshotCollector"),
             sensitive_collector_enabled(
                 config,
                 "ScreenshotCollector",
@@ -1449,7 +1535,7 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "AttachmentCollector",
+            PluginId::new("AttachmentCollector"),
             sensitive_collector_enabled(
                 config,
                 "AttachmentCollector",
@@ -1457,7 +1543,7 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "EnvironmentCollector",
+            PluginId::new("EnvironmentCollector"),
             sensitive_collector_enabled(
                 config,
                 "EnvironmentCollector",
@@ -1465,7 +1551,7 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "ProcessOutputCollector",
+            PluginId::new("ProcessOutputCollector"),
             sensitive_collector_enabled(
                 config,
                 "ProcessOutputCollector",
@@ -1473,67 +1559,67 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "SessionEnricher",
+            PluginId::new("SessionEnricher"),
             config.pre_processors.enabled && config.pre_processors.session.enabled,
         ),
         (
-            "SymbolResolver",
+            PluginId::new("SymbolResolver"),
             config.pre_processors.enabled && config.pre_processors.symbolizer.enabled,
         ),
         (
-            "Fingerprinter",
+            PluginId::new("Fingerprinter"),
             config.pre_processors.enabled && config.pre_processors.fingerprint.enabled,
         ),
         (
-            "BuildInfoEnricher",
+            PluginId::new("BuildInfoEnricher"),
             config.pre_processors.enabled && config.pre_processors.build_info.enabled,
         ),
         (
-            "DuplicateDetector",
+            PluginId::new("DuplicateDetector"),
             config.pre_processors.enabled && config.pre_processors.duplicate.enabled,
         ),
         (
-            "Sanitizer",
+            PluginId::new("Sanitizer"),
             config.pre_processors.enabled && config.pre_processors.sanitizer.enabled,
         ),
         (
-            "RawCleanup",
+            PluginId::new("RawCleanup"),
             config.post_processors.enabled && config.post_processors.raw_cleanup.enabled,
         ),
         (
-            "SessionRecorder",
+            PluginId::new("SessionRecorder"),
             config.post_processors.enabled && config.post_processors.session_recorder.enabled,
         ),
         (
-            "PNGConverter",
+            PluginId::new("PNGConverter"),
             config.post_processors.enabled && config.post_processors.png_converter.enabled,
         ),
         (
-            "FeedbackDialog",
+            PluginId::new("FeedbackDialog"),
             config.post_processors.enabled && config.post_processors.feedback_dialog.enabled,
         ),
         (
-            "ZIPArchiver",
+            PluginId::new("ZIPArchiver"),
             config.post_processors.enabled && config.post_processors.zip_archiver.enabled,
         ),
         (
-            "MoveToSent",
+            PluginId::new("MoveToSent"),
             config.post_processors.enabled && config.post_processors.move_to_sent.enabled,
         ),
         (
-            "LogRotator",
+            PluginId::new("LogRotator"),
             config.post_processors.enabled && config.post_processors.log_rotator.enabled,
         ),
         (
-            "RetentionManager",
+            PluginId::new("RetentionManager"),
             config.post_processors.enabled && config.post_processors.retention.enabled,
         ),
         (
-            "ConsoleNotifier",
+            PluginId::new("ConsoleNotifier"),
             config.notifiers.enabled && config.notifiers.console.enabled,
         ),
         (
-            "SystemNotification",
+            PluginId::new("SystemNotification"),
             config.notifiers.enabled && config.notifiers.system_notification.enabled,
         ),
     ]
@@ -1544,7 +1630,6 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
 
 /// Three-level AND check: global → category → plugin.
 #[must_use]
-#[allow(dead_code)] // retained as the public hierarchical-toggle helper
 pub fn is_enabled(global: bool, category: bool, plugin: bool) -> bool {
     global && category && plugin
 }
@@ -1573,6 +1658,14 @@ pub fn load_config() -> Result<CrashReporterConfig, ConfigLoadError> {
 /// unavailable required encryption, or an invalid plugin registry.
 pub fn load_validated_config() -> Result<ValidatedConfig, ConfigLoadError> {
     load_config()?.validate().map_err(ConfigLoadError::from)
+}
+
+/// Load and validate a specific file through the exact startup path.
+///
+/// # Errors
+/// Returns explicit safety, read, parse, or validation errors.
+pub fn load_validated_config_from_path(path: &Path) -> Result<ValidatedConfig, ConfigLoadError> {
+    load_config_from_path(path)?.validate().map_err(Into::into)
 }
 
 fn load_config_from_data_dir() -> Result<CrashReporterConfig, ConfigLoadError> {

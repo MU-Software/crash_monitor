@@ -1,0 +1,11 @@
+[package]
+name = "crash_dialog_contract"
+version.workspace = true
+edition.workspace = true
+description = "Shared command-line and output contract for crash feedback dialogs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true

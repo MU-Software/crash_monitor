@@ -52,6 +52,18 @@ struct MockFilter {
     allow: bool,
 }
 
+#[test]
+fn pipeline_builder_always_validates_the_completed_registry() {
+    let mut builder = PipelineBuilder::new(Arc::new(MockPlatform::default()));
+    builder
+        .add_filter(Box::new(MockFilter { allow: true }))
+        .add_filter(Box::new(MockFilter { allow: true }));
+    assert!(matches!(
+        builder.build(),
+        Err(crate::config::ConfigValidationError::DuplicatePluginId { .. })
+    ));
+}
+
 impl Plugin for MockFilter {
     fn name(&self) -> &'static str {
         "MockFilter"
@@ -230,15 +242,25 @@ fn write_shm_app_version_bytes(shm: &crate::shm::SharedMemory, value: &str) {
 }
 
 fn write_shm_history_max(shm: &crate::shm::SharedMemory, value: i32) {
-    let offset = crate::shm::SETTINGS_OFFSET
-        + std::mem::offset_of!(crate::shm::SutCrashSettingsSnapshot, history_max);
+    let count_offset = crate::shm::SETTINGS_OFFSET
+        + std::mem::offset_of!(crate::shm::SutCrashSettingsSnapshot, entry_count);
+    let entry_offset = crate::shm::SETTINGS_OFFSET
+        + std::mem::offset_of!(crate::shm::SutCrashSettingsSnapshot, entries);
+    let key = b"test_value\0";
+    let rendered = format!("{value}\0");
     // SAFETY: the test owns this mapping and writes one in-bounds schema field
     // before any snapshot operation starts.
     unsafe {
         std::ptr::copy_nonoverlapping(
-            value.to_ne_bytes().as_ptr(),
-            shm.base_ptr().add(offset),
-            std::mem::size_of::<i32>(),
+            1_u32.to_ne_bytes().as_ptr(),
+            shm.base_ptr().add(count_offset),
+            4,
+        );
+        std::ptr::copy_nonoverlapping(key.as_ptr(), shm.base_ptr().add(entry_offset), key.len());
+        std::ptr::copy_nonoverlapping(
+            rendered.as_ptr(),
+            shm.base_ptr().add(entry_offset + 16),
+            rendered.len(),
         );
     }
 }
@@ -558,9 +580,9 @@ fn test_torn_context_snapshot_is_diagnosed_and_sanitized_without_live_reaccess()
             .raw
             .settings_snapshot
             .as_ref()
-            .expect("stable settings remain readable")
-            .history_max,
-        321
+            .expect("stable extension remains readable")
+            .values,
+        [("test_value".into(), "321".into())]
     );
 
     let raw_context = &captured
@@ -574,14 +596,10 @@ fn test_torn_context_snapshot_is_diagnosed_and_sanitized_without_live_reaccess()
         "the rejected context bytes must be zeroed"
     );
     let history_max_offset =
-        context_len + std::mem::offset_of!(crate::shm::SutCrashSettingsSnapshot, history_max);
+        context_len + std::mem::offset_of!(crate::shm::SutCrashSettingsSnapshot, entries) + 16;
     assert_eq!(
-        i32::from_ne_bytes(
-            raw_context[history_max_offset..history_max_offset + std::mem::size_of::<i32>()]
-                .try_into()
-                .unwrap()
-        ),
-        321,
+        &raw_context[history_max_offset..history_max_offset + 3],
+        b"321",
         "the stable settings bytes must be preserved"
     );
     let expected_stage1 = raw_context.clone();

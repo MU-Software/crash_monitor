@@ -28,7 +28,9 @@ pub use ffi::{
     sut_breadcrumb_t as SutBreadcrumb, sut_crash_annotation_t as SutCrashAnnotation,
     sut_crash_context_t as SutCrashContext,
     sut_crash_settings_snapshot_t as SutCrashSettingsSnapshot, sut_crumb_ring_t as SutCrumbRing,
-    sut_crumb_state_t as SutCrumbState, sut_screenshot_section_t as SutScreenshotSection,
+    sut_crumb_state_t as SutCrumbState,
+    sut_producer_extension_entry_t as SutProducerExtensionEntry,
+    sut_screenshot_section_t as SutScreenshotSection,
     sut_shm_attachment_section_t as ShmAttachmentSection,
     sut_shm_attachment_slot_t as ShmAttachmentSlot, sut_shm_header_t as ShmHeader,
     sut_shm_region_t as SutShmRegion,
@@ -43,6 +45,8 @@ pub const SHM_VERSION: u32 = ffi::SUT_SHM_VERSION;
 pub const SHM_CANARY: u32 = ffi::SUT_SHM_CANARY;
 pub const SHM_PRODUCER_NOT_READY: u32 = ffi::SUT_SHM_PRODUCER_NOT_READY;
 pub const SHM_PRODUCER_READY: u32 = ffi::SUT_SHM_PRODUCER_READY;
+pub const SUT_PRODUCER_EXTENSION_VERSION: u32 = ffi::SUT_PRODUCER_EXTENSION_VERSION;
+pub const SUT_PRODUCER_EXTENSION_MAX_ENTRIES: u32 = ffi::SUT_PRODUCER_EXTENSION_MAX_ENTRIES;
 
 // Schema-derived from crash_shm.h #defines (via bindgen).
 pub const CRUMB_RING_CAPACITY: usize = ffi::SUT_CRUMB_RING_CAPACITY as usize;
@@ -200,14 +204,11 @@ pub struct RawCrashContext {
     pub os_version: String,
 }
 
-/// Settings snapshot converted to Rust-native types.
+/// Versioned, application-neutral producer extension.
 #[derive(Debug, Clone)]
 pub struct RawSettingsSnapshot {
-    pub world_bound_min: [i32; 3],
-    pub world_bound_max: [i32; 3],
-    pub palette_count: i32,
-    pub history_max: i32,
-    pub extra: String,
+    pub schema_version: u32,
+    pub values: Vec<(String, String)>,
 }
 
 /// An attachment file registered by the C app.

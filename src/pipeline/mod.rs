@@ -4,6 +4,7 @@
 
 pub mod artifact;
 pub mod capture_isolation;
+pub mod defaults;
 pub mod report;
 pub mod safety;
 pub mod traits;
@@ -22,8 +23,14 @@ use crate::platform::{
 
 pub use crate::config::CollectionPolicy;
 pub use artifact::{
-    ArtifactKind, ArtifactTransaction, CommittedReport, ReportContext, ReportId, ReportManifest,
-    load_manifest, recover_prepared_reports, scavenge_stale_pending,
+    ArtifactKind, ArtifactStore, ArtifactTransaction, ArtifactTransactionState, CommittedReport,
+    ReportContext, ReportId, ReportManifest, ReportPolicy, load_manifest, recover_prepared_reports,
+    scavenge_stale_pending,
+};
+#[cfg(target_os = "macos")]
+pub use defaults::{
+    default_macos_pipeline_from_config, default_macos_pipeline_from_config_with_environment,
+    default_macos_pipeline_from_config_with_runtime,
 };
 pub use safety::{
     CancellationToken, PluginContext, PluginRunResult, SubprocessOutput,
@@ -35,8 +42,8 @@ pub use traits::{
 };
 pub use types::{
     CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, DependencyKind,
-    Diagnostics, PluginCategory, PluginDiagnostic, PluginStatus, PluginTimeout, Priority,
-    RawShmSnapshot, ReportResult, ReportType, TerminationReason,
+    Diagnostics, PluginCategory, PluginDependency, PluginDiagnostic, PluginId, PluginStatus,
+    PluginTimeout, Priority, RawShmSnapshot, ReportResult, ReportType, TerminationReason,
 };
 
 /// Immutable per-trigger report policy installed in a [`Pipeline`].
@@ -102,6 +109,7 @@ impl From<crate::config::ValidatedTriggersConfig> for TriggerPolicy {
 //  Pipeline
 // ═══════════════════════════════════════════════════
 
+#[cfg(any(test, feature = "test-support"))]
 pub struct Pipeline {
     /// Authoritative process-wide report-generation kill switch.
     pub enabled: bool,
@@ -122,6 +130,105 @@ pub struct Pipeline {
     pub platform: Arc<dyn PlatformOps>,
     /// Override for report output directory. If None, uses default `pending_dir()`.
     pub output_dir: Option<PathBuf>,
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub struct Pipeline {
+    enabled: bool,
+    triggers: TriggerPolicy,
+    collection_policy: CollectionPolicy,
+    filters: Vec<Box<dyn Filter>>,
+    collectors: Vec<Box<dyn Collector>>,
+    pre_processors: Vec<Box<dyn PreProcessor>>,
+    post_processors: Vec<Box<dyn PostProcessor>>,
+    notifiers: Vec<Box<dyn Notifier>>,
+    shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
+    platform: Arc<dyn PlatformOps>,
+    output_dir: Option<PathBuf>,
+}
+
+/// Validated composition root for custom pipeline assembly.
+pub struct PipelineBuilder {
+    pipeline: Pipeline,
+}
+
+impl PipelineBuilder {
+    #[must_use]
+    pub fn new(platform: Arc<dyn PlatformOps>) -> Self {
+        Self {
+            pipeline: Pipeline {
+                enabled: true,
+                triggers: TriggerPolicy::ALL_ENABLED,
+                collection_policy: CollectionPolicy::MINIMAL,
+                filters: Vec::new(),
+                collectors: Vec::new(),
+                pre_processors: Vec::new(),
+                post_processors: Vec::new(),
+                notifiers: Vec::new(),
+                shm: None,
+                platform,
+                output_dir: None,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.pipeline.enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn triggers(mut self, triggers: TriggerPolicy) -> Self {
+        self.pipeline.triggers = triggers;
+        self
+    }
+
+    #[must_use]
+    pub fn collection_policy(mut self, policy: CollectionPolicy) -> Self {
+        self.pipeline.collection_policy = policy;
+        self
+    }
+
+    pub fn add_filter(&mut self, plugin: Box<dyn Filter>) -> &mut Self {
+        self.pipeline.filters.push(plugin);
+        self
+    }
+
+    pub fn add_collector(&mut self, plugin: Box<dyn Collector>) -> &mut Self {
+        self.pipeline.collectors.push(plugin);
+        self
+    }
+
+    pub fn add_pre_processor(&mut self, plugin: Box<dyn PreProcessor>) -> &mut Self {
+        self.pipeline.pre_processors.push(plugin);
+        self
+    }
+
+    pub fn add_post_processor(&mut self, plugin: Box<dyn PostProcessor>) -> &mut Self {
+        self.pipeline.post_processors.push(plugin);
+        self
+    }
+
+    pub fn add_notifier(&mut self, plugin: Box<dyn Notifier>) -> &mut Self {
+        self.pipeline.notifiers.push(plugin);
+        self
+    }
+
+    #[must_use]
+    pub fn output_dir(mut self, output_dir: PathBuf) -> Self {
+        self.pipeline.output_dir = Some(output_dir);
+        self
+    }
+
+    /// Finish topological ordering and always validate identity/dependencies.
+    ///
+    /// # Errors
+    /// Returns structured duplicate, missing dependency, cycle, or ordering
+    /// validation failures.
+    pub fn build(self) -> Result<Pipeline, crate::config::ConfigValidationError> {
+        self.pipeline.finish_registration()
+    }
 }
 
 // Category-specific cooperative deadlines.
@@ -240,6 +347,11 @@ fn suspend_failure_policy(event: &CrashEvent) -> SuspendFailurePolicy {
 }
 
 impl Pipeline {
+    #[must_use]
+    pub(crate) fn platform(&self) -> &Arc<dyn PlatformOps> {
+        &self.platform
+    }
+
     /// Finalize plugin registration by applying deterministic execution order
     /// and rejecting an ambiguous runtime registry.
     ///
@@ -307,9 +419,13 @@ impl Pipeline {
         &self,
         event: &CrashEvent,
     ) -> Result<Arc<ReportContext>, String> {
-        Ok(Arc::new(ReportContext::new(
+        Ok(Arc::new(ReportContext::with_policy(
             event,
             &self.resolved_output_root()?,
+            ReportPolicy {
+                privacy: self.collection_policy,
+                ..ReportPolicy::default()
+            },
         )))
     }
 
@@ -749,7 +865,9 @@ impl Pipeline {
             PluginExecution::Cooperative,
             STAGE_TIMEOUT,
             |_| {
-                let mut crash_report = report::build_report(event, data, diagnostics);
+                let formatted = crate::preprocessors::report_formatter::format(data, diagnostics);
+                let mut crash_report =
+                    report::build_report(event, formatted, data.fingerprint.clone());
                 report::write_report(&transaction, &mut crash_report, &screenshots)
             },
         )
@@ -1039,7 +1157,9 @@ impl Pipeline {
             PluginExecution::Cooperative,
             STAGE_TIMEOUT,
             |_| {
-                let mut crash_report = report::build_report(event, &data, &diagnostics);
+                let formatted = crate::preprocessors::report_formatter::format(&data, &diagnostics);
+                let mut crash_report =
+                    report::build_report(event, formatted, data.fingerprint.clone());
                 report::write_report(&transaction, &mut crash_report, &[])
             },
         )
@@ -1276,27 +1396,25 @@ impl Pipeline {
         let phases = self
             .post_processors
             .iter()
-            .map(|plugin| (plugin.name(), plugin.phase()))
+            .map(|plugin| (plugin.id(), plugin.phase()))
             .collect::<std::collections::BTreeMap<_, _>>();
         for plugin in &self.post_processors {
-            for (dependencies, kind) in [
-                (plugin.hard_dependencies(), DependencyKind::Hard),
-                (plugin.order_after(), DependencyKind::OrderOnly),
-            ] {
-                for dependency in dependencies {
-                    if phases.get(dependency).is_some_and(|dependency_phase| {
+            for dependency in plugin.dependencies() {
+                if phases
+                    .get(&dependency.plugin)
+                    .is_some_and(|dependency_phase| {
                         post_processor_phase_rank(*dependency_phase)
                             > post_processor_phase_rank(plugin.phase())
-                    }) {
-                        return Err(
-                            crate::config::ConfigValidationError::InvalidDependencyOrder {
-                                category: PluginCategory::PostProcessor,
-                                plugin_id: plugin.name().to_string(),
-                                dependency: (*dependency).to_string(),
-                                kind,
-                            },
-                        );
-                    }
+                    })
+                {
+                    return Err(
+                        crate::config::ConfigValidationError::InvalidDependencyOrder {
+                            category: PluginCategory::PostProcessor,
+                            plugin_id: plugin.id().to_string(),
+                            dependency: dependency.plugin.to_string(),
+                            kind: dependency.kind,
+                        },
+                    );
                 }
             }
         }
@@ -1369,15 +1487,11 @@ fn stable_plugin_order<T: Plugin + ?Sized>(
             .iter()
             .enumerate()
             .filter(|(_, (_, plugin))| {
-                plugin
-                    .hard_dependencies()
-                    .iter()
-                    .chain(plugin.order_after())
-                    .all(|dependency| {
-                        !remaining
-                            .iter()
-                            .any(|(_, pending)| pending.name() == *dependency)
-                    })
+                plugin.dependencies().iter().all(|dependency| {
+                    !remaining
+                        .iter()
+                        .any(|(_, pending)| pending.id() == dependency.plugin)
+                })
             })
             .min_by_key(|(_, (insertion_index, plugin))| {
                 (
@@ -1430,16 +1544,18 @@ fn plugin_graph_nodes<T: Plugin + ?Sized>(
     plugins
         .iter()
         .map(|plugin| crate::config::PluginGraphNode {
-            id: plugin.name().to_string(),
+            id: plugin.id().to_string(),
             hard_dependencies: plugin
-                .hard_dependencies()
+                .dependencies()
                 .iter()
-                .map(|dependency| (*dependency).to_string())
+                .filter(|dependency| dependency.kind == DependencyKind::Hard)
+                .map(|dependency| dependency.plugin.to_string())
                 .collect(),
             order_dependencies: plugin
-                .order_after()
+                .dependencies()
                 .iter()
-                .map(|dependency| (*dependency).to_string())
+                .filter(|dependency| dependency.kind == DependencyKind::OrderOnly)
+                .map(|dependency| dependency.plugin.to_string())
                 .collect(),
         })
         .collect()
@@ -1481,11 +1597,11 @@ pub fn default_macos_pipeline(
 /// IDs or dependency graph are invalid.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_lines)] // pipeline factory — splitting would scatter registration logic
-pub fn default_macos_pipeline_from_config(
+pub(crate) fn assemble_macos_pipeline_from_config(
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
     validated: &crate::config::ValidatedConfig,
 ) -> Result<Pipeline, crate::config::ConfigValidationError> {
-    default_macos_pipeline_from_config_with_environment(shm, validated, None)
+    assemble_macos_pipeline_from_config_with_environment(shm, validated, None)
 }
 
 /// Build the default pipeline while injecting the exact environment that will
@@ -1496,12 +1612,12 @@ pub fn default_macos_pipeline_from_config(
 /// registry or dependency graph is invalid.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_lines)]
-pub fn default_macos_pipeline_from_config_with_environment(
+pub(crate) fn assemble_macos_pipeline_from_config_with_environment(
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
     validated: &crate::config::ValidatedConfig,
     child_environment: Option<std::sync::Arc<crate::collectors::ChildEnvironmentSnapshot>>,
 ) -> Result<Pipeline, crate::config::ConfigValidationError> {
-    default_macos_pipeline_from_config_with_runtime(shm, validated, child_environment, None)
+    assemble_macos_pipeline_from_config_with_runtime(shm, validated, child_environment, None)
 }
 
 /// Build the default pipeline with monitor-owned spawn-time inputs.
@@ -1511,7 +1627,7 @@ pub fn default_macos_pipeline_from_config_with_environment(
 /// registry or dependency graph is invalid.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_lines)]
-pub fn default_macos_pipeline_from_config_with_runtime(
+pub(crate) fn assemble_macos_pipeline_from_config_with_runtime(
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
     validated: &crate::config::ValidatedConfig,
     child_environment: Option<std::sync::Arc<crate::collectors::ChildEnvironmentSnapshot>>,
@@ -1559,7 +1675,7 @@ pub fn default_macos_pipeline_from_config_with_runtime(
     let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform::default());
 
     // Dependency closure and category switches were resolved at config load.
-    let on = |plugin_id: &str| validated.plugin_enabled(plugin_id);
+    let on = |plugin_id: &'static str| validated.plugin_enabled(PluginId::new(plugin_id));
 
     // ── Filters ──
     let mut filters: Vec<Box<dyn Filter>> = vec![];

@@ -350,15 +350,9 @@ fn test_settings_round_trip() {
     unsafe {
         let settings = base.add(SETTINGS_OFFSET);
 
-        // world_bound_min: [i32; 3] at offset 0
-        write_val::<i32>(settings, 0, -150);
-        write_val::<i32>(settings, 4, 0);
-        write_val::<i32>(settings, 8, -150);
-
-        // world_bound_max: [i32; 3] at offset 12
-        write_val::<i32>(settings, 12, 150);
-        write_val::<i32>(settings, 16, 300);
-        write_val::<i32>(settings, 20, 150);
+        write_val::<u32>(settings, 4, 1);
+        std::ptr::copy_nonoverlapping(b"mode\0".as_ptr(), settings.add(8), 5);
+        std::ptr::copy_nonoverlapping(b"round-trip\0".as_ptr(), settings.add(24), 11);
     }
 
     let s = shm
@@ -366,8 +360,8 @@ fn test_settings_round_trip() {
         .expect("snapshot")
         .read_settings()
         .expect("read_settings should succeed");
-    assert_eq!(s.world_bound_min, [-150, 0, -150]);
-    assert_eq!(s.world_bound_max, [150, 300, 150]);
+    assert_eq!(s.schema_version, 1);
+    assert_eq!(s.values, [("mode".into(), "round-trip".into())]);
 }
 
 #[test]

@@ -21,6 +21,23 @@ use std::sync::Mutex;
 
 use crate::pipeline::PluginContext;
 
+/// Opaque platform task capability used by orchestration code. Only the
+/// macOS adapter converts it to a Mach port name at the FFI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TaskHandle(u32);
+
+impl TaskHandle {
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub(crate) const fn into_mach_port(self) -> mach_port_t {
+        self.0
+    }
+}
+
 /// ABI-aligned ARM64 register state returned by `thread_get_state`.
 ///
 /// The kernel flavor has a 68-word capacity. Consumers currently access

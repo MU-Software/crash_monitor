@@ -157,10 +157,10 @@ fn test_invalid_annotation_counts_reject_context_and_preserve_settings() {
                 CONTEXT_OFFSET + offset_of!(SutCrashContext, annotation_count),
                 annotation_count,
             );
-            write_val::<i32>(
+            write_val::<u32>(
                 shm.base_ptr(),
-                SETTINGS_OFFSET + offset_of!(SutCrashSettingsSnapshot, palette_count),
-                23,
+                SETTINGS_OFFSET + offset_of!(SutCrashSettingsSnapshot, entry_count),
+                0,
             );
         }
 
@@ -169,12 +169,12 @@ fn test_invalid_annotation_counts_reject_context_and_preserve_settings() {
             snapshot.read_context().is_none(),
             "annotation_count {annotation_count} must reject its context"
         );
-        assert_eq!(
+        assert!(
             snapshot
                 .read_settings()
-                .expect("independent settings survive")
-                .palette_count,
-            23
+                .expect("independent extension survives")
+                .values
+                .is_empty()
         );
     }
 }

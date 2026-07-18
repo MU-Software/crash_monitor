@@ -1,5 +1,6 @@
 //! Native macOS NSAlert feedback dialog.
 
+use objc2::MainThreadOnly;
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
     NSTextField, NSView,
@@ -56,8 +57,8 @@ pub fn show_feedback_dialog(
             height: 80.0,
         },
     );
-    let text_field = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
-    text_field.setFrame(frame);
+    let text_field = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
+    text_field.setStringValue(&NSString::from_str(""));
     text_field.setEditable(true);
     text_field.setSelectable(true);
 

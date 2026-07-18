@@ -153,9 +153,9 @@ absent or its collection may be disabled; arrays otherwise serialize as empty.
     "annotations": { "key": "value" },
     "session_id": "…", "session_start_ns": 123, "heartbeat_counter": 55
   },
-  "settings_snapshot": {
-    "source": "producer_shared_memory", "world_bounds": [0, 0, 0, 1, 1, 1],
-    "palette_count": 8, "history_max": 64, "extra": "…"
+  "producer_extension": {
+    "source": "producer_shared_memory", "schema_version": 1,
+    "values": { "render_mode": "diagnostic" }
   },
   "environment": {
     "kernel_release": "24.3.0", "kernel_version": "Darwin Kernel Version …",

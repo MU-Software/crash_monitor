@@ -1,7 +1,7 @@
 //! Collector: Crash context + settings snapshot from shared memory.
 //!
-//! Reads producer-defined annotations and build/session context.
-//! and settings from the event's owned shared-memory snapshot.
+//! Reads generic annotations, build info, and the versioned producer extension
+//! from the event's owned shared-memory snapshot.
 //! Self-contained — all payload parsing uses the event's `OwnedShmSnapshot`.
 
 use mach2::port::mach_port_t;

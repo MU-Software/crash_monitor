@@ -5,22 +5,16 @@
 //! the full `FeedbackPostProcessor` pipeline (spawn → read stdout → patch JSON)
 //! without user interaction.
 
-use clap::Parser;
+use crash_dialog_contract::{DialogArgs, DialogOutcome, Parser};
+use std::process::ExitCode;
 
-#[derive(Parser)]
-#[command(name = "crash_dialog_mock")]
-struct Args {
-    #[arg(long, rename_all = "verbatim")]
-    r#type: String,
-
-    #[arg(long)]
-    process: String,
-
-    #[arg(long)]
-    timestamp: String,
-}
-
-fn main() {
-    let _args = Args::parse();
-    print!("e2e-mock-feedback");
+fn main() -> ExitCode {
+    let args = DialogArgs::parse();
+    if args.dry_run {
+        return ExitCode::SUCCESS;
+    }
+    let feedback = args
+        .mock_input
+        .or_else(|| Some("e2e-mock-feedback".to_string()));
+    DialogOutcome::from_optional_text(feedback).emit()
 }

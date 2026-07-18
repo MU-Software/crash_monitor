@@ -24,4 +24,4 @@ name = "crash_dialog_mock"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+crash_dialog_contract = { path = "../crash_dialog_contract" }

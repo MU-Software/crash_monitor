@@ -8,12 +8,13 @@ atomic alignment, schema version, and memory ordering.
 ## Single source of truth
 
 [`schema/crash_shm.h`](../schema/crash_shm.h) is the authoritative layout. It
-defines the 64-byte header, breadcrumb rings, crash context, settings,
+defines the 64-byte header, breadcrumb rings, crash context, producer extension,
 attachments, screenshots, and their fixed-size constants. The current ABI is
-**schema version 4**.
+**schema version 5**.
 
-- C producers include `crash_shm.h` and use the publication helpers in
-  [`schema/crash_shm_atomic.h`](../schema/crash_shm_atomic.h).
+- C producers include the supported
+  [`producer/crash_monitor_producer.h`](../producer/crash_monitor_producer.h)
+  SDK, which wraps the schema and atomic publication helpers.
 - The Rust monitor generates the C structure mirrors from the schema with
   `bindgen` (see [`build.rs`](../build.rs)).
 - Both headers and the Rust mirror use compile-time size, alignment, and key
@@ -22,8 +23,8 @@ attachments, screenshots, and their fixed-size constants. The current ABI is
 
 A producer must verify both `SUT_SHM_MAGIC` and the exact `SUT_SHM_VERSION`
 before deriving payload addresses or writing anything. The monitor likewise
-accepts only its exact schema version. Version 4 rejects versions 1, 2, and 3,
-and a version 4 producer must not write an older version. There is no fallback
+accepts only its exact schema version. Version 5 rejects every older version,
+and a version 5 producer must not write an older version. There is no fallback
 based on common sizes or preserved offsets: on any version mismatch, the
 producer leaves the region alone and the consumer omits its SHM payload.
 Producer and monitor releases therefore have to upgrade in lockstep. In
@@ -129,12 +130,12 @@ sanitization for torn generations is a separate publication-integrity rule.
 
 ## Report field provenance
 
-Stable crash-context and settings publications are serialized as the typed
-`crash_context` and `settings_snapshot` report objects. Both carry
+Stable crash-context and producer-extension publications are serialized as the typed
+`crash_context` and `producer_extension` report objects. Both carry
 `source = "producer_shared_memory"`. `session_id`, `session_start_ns`, and
 `heartbeat_counter` therefore describe the producer's last published state,
 not values synthesized by the monitor. Empty `session_id`, zero
-`session_start_ns`, and empty `settings.extra` mean unavailable and are omitted;
+`session_start_ns` and an empty extension map mean unavailable;
 the heartbeat counter is always emitted, including zero. Producer readiness is
 validated separately and is not inferred from that counter.
 
@@ -223,11 +224,13 @@ from before readiness is never considered a hang. A heartbeat operation
 publishes no other context field and does not participate in
 `context_generation`.
 
-### Settings
+### Producer extension
 
-The producer begins `header.settings_generation`, writes the complete settings
-snapshot, and ends it. An odd or changed value drops the settings unit without
-retrying or affecting other sections.
+The producer begins `header.settings_generation`, writes extension schema
+version 1 plus up to four bounded generic key/value entries, and ends it. An
+odd/changed generation, unsupported version, invalid count, or malformed string
+drops the extension without affecting other sections. Product concepts belong
+in these values or generic annotations, never in the core wire layout.
 
 ### Attachments
 

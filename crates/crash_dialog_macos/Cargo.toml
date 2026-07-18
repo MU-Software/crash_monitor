@@ -1,7 +1,7 @@
 [package]
 name = "crash_dialog_macos"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "macOS native feedback dialog for crash/snapshot reports"
 authors.workspace = true
@@ -19,7 +19,7 @@ name = "crash_dialog_macos"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+crash_dialog_contract = { path = "../crash_dialog_contract" }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = [

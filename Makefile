@@ -24,6 +24,8 @@ E2E_CHILD := tests/e2e/fixtures/crash_app
 E2E_SRC   := tests/e2e/fixtures/crash_app.c
 SHM_ATOMIC_TEST     := target/shm_atomic_contract_test
 SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
+PRODUCER_SDK_TEST := target/producer_sdk_contract_test
+PRODUCER_SDK_TEST_SRC := tests/e2e/fixtures/producer_sdk_contract.c
 
 # cargo-llvm-cov discovers rustup's llvm-tools-preview. LLVM_COV and
 # LLVM_PROFDATA remain supported as explicit caller-provided overrides.
@@ -35,7 +37,7 @@ COV_ENV_FILE := target/llvm-cov.env
 
 .PHONY: build build-unsigned check-sign-identity sign sign-adhoc package verify-package e2e-build lint test \
         unit-test integration-test e2e e2e-test e2e-required e2e-child shm-atomic-test \
-        schema-check ci-fast coverage unit-coverage \
+        producer-sdk-test schema-check ci-fast coverage unit-coverage \
         integration-coverage e2e-coverage clean
 
 # ── Compile / sign / package ──────────────────────────────────
@@ -99,11 +101,18 @@ $(SHM_ATOMIC_TEST): $(SHM_ATOMIC_TEST_SRC) schema/crash_shm.h schema/crash_shm_a
 shm-atomic-test: $(SHM_ATOMIC_TEST)
 	./$(SHM_ATOMIC_TEST)
 
-schema-check: shm-atomic-test
+$(PRODUCER_SDK_TEST): $(PRODUCER_SDK_TEST_SRC) producer/crash_monitor_producer.h schema/crash_shm.h schema/crash_shm_atomic.h
+	mkdir -p $(@D)
+	cc -std=c11 -Wall -Wextra -Werror -I schema -I producer -o $@ $<
+
+producer-sdk-test: $(PRODUCER_SDK_TEST)
+	./$(PRODUCER_SDK_TEST)
+
+schema-check: shm-atomic-test producer-sdk-test
 	cargo check --workspace --all-targets
 
 # ── Tests ─────────────────────────────────────────────────────
-unit-test: shm-atomic-test
+unit-test: shm-atomic-test producer-sdk-test
 	cargo test --lib
 
 integration-test:

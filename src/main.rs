@@ -65,6 +65,12 @@ enum Commands {
         #[arg(long)]
         request_json: String,
     },
+    /// Validate configuration without starting a monitored child.
+    CheckConfig {
+        /// File to check; omit to use the standard data-directory config.
+        #[arg(long)]
+        config: Option<String>,
+    },
     /// Run the monitor with a child process
     Run {
         /// Path to the child executable
@@ -113,6 +119,23 @@ fn env_u64(key: &str, default: u64) -> u64 {
         eprintln!("[monitor] Warning: {key}={val:?} is not a valid u64, using default {default}");
         default
     })
+}
+
+fn watchdog_config_with_explicit_env_overrides(
+    config: config::WatchdogConfig,
+) -> config::WatchdogConfig {
+    if std::env::var_os("CRASH_MONITOR_ALLOW_ENV_OVERRIDES").as_deref() != Some(OsStr::new("1")) {
+        return config;
+    }
+    config::WatchdogConfig {
+        warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", config.warmup_ms),
+        threshold_ms: env_u64("CRASH_MONITOR_ANR_THRESHOLD_MS", config.threshold_ms),
+        check_interval_ms: env_u64(
+            "CRASH_MONITOR_ANR_CHECK_INTERVAL_MS",
+            config.check_interval_ms,
+        ),
+        cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", config.cooldown_ms),
+    }
 }
 
 const CRASH_MONITOR_SHM_ENV: &str = "CRASH_MONITOR_SHM";
@@ -604,6 +627,63 @@ struct MonitorSupervisor {
     exception_port: platform::OwnedExceptionPort,
     event_source: event_source::MacEventSource,
     shared_memory: Option<Arc<shm::SharedMemory>>,
+    lifecycle: SupervisorLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorState {
+    Starting,
+    Monitoring,
+    Capturing,
+    Finalizing,
+    Terminating,
+    Reaped,
+}
+
+#[derive(Debug)]
+struct SupervisorLifecycle {
+    state: SupervisorState,
+}
+
+impl SupervisorLifecycle {
+    const CLEANUP_ORDER: [&'static str; 6] = [
+        "suspend_guard",
+        "exception_listener",
+        "exception_port",
+        "task_port",
+        "shared_memory",
+        "child_process_group",
+    ];
+
+    const fn new() -> Self {
+        Self {
+            state: SupervisorState::Starting,
+        }
+    }
+
+    fn transition(&mut self, next: SupervisorState) -> Result<(), String> {
+        let allowed = matches!(
+            (self.state, next),
+            (SupervisorState::Starting, SupervisorState::Monitoring)
+                | (SupervisorState::Starting, SupervisorState::Terminating)
+                | (SupervisorState::Monitoring, SupervisorState::Capturing)
+                | (SupervisorState::Monitoring, SupervisorState::Finalizing)
+                | (SupervisorState::Monitoring, SupervisorState::Terminating)
+                | (SupervisorState::Capturing, SupervisorState::Monitoring)
+                | (SupervisorState::Capturing, SupervisorState::Finalizing)
+                | (SupervisorState::Capturing, SupervisorState::Terminating)
+                | (SupervisorState::Finalizing, SupervisorState::Terminating)
+                | (SupervisorState::Terminating, SupervisorState::Reaped)
+        );
+        if !allowed {
+            return Err(format!(
+                "invalid supervisor transition {:?} -> {next:?}",
+                self.state
+            ));
+        }
+        self.state = next;
+        Ok(())
+    }
 }
 
 impl Drop for MonitorSupervisor {
@@ -611,6 +691,7 @@ impl Drop for MonitorSupervisor {
         // Wake the exception listener before its receiver and task/SHM owners
         // are released. `destroy` is idempotent with the crash cleanup path.
         self.exception_port.destroy();
+        debug_assert_eq!(SupervisorLifecycle::CLEANUP_ORDER[2], "exception_port");
     }
 }
 
@@ -840,14 +921,15 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Configuration alone does not arm it: the child must publish its first
     // heartbeat and the shared-memory producer-ready handshake. Environment
     // overrides allow E2E tests to use shorter timeouts.
-    let anr_config = pl
-        .report_enabled(pipeline::ReportType::Anr)
-        .then(|| event_loop::AnrConfig {
-            warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", 10_000),
-            threshold_ms: env_u64("CRASH_MONITOR_ANR_THRESHOLD_MS", 5_000),
-            check_interval_ms: env_u64("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", 2_000),
-            cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", 60_000),
-        });
+    let anr_config = pl.report_enabled(pipeline::ReportType::Anr).then(|| {
+        let watchdog = watchdog_config_with_explicit_env_overrides(validated_config.watchdog());
+        event_loop::AnrConfig {
+            warmup_ms: watchdog.warmup_ms,
+            threshold_ms: watchdog.threshold_ms,
+            check_interval_ms: watchdog.check_interval_ms,
+            cooldown_ms: watchdog.cooldown_ms,
+        }
+    });
 
     // Build event source from Mac-specific channels
     #[allow(clippy::cast_sign_loss)] // PID is always positive
@@ -870,7 +952,12 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         exception_port,
         event_source: source,
         shared_memory,
+        lifecycle: SupervisorLifecycle::new(),
     };
+    if let Err(error) = supervisor.lifecycle.transition(SupervisorState::Monitoring) {
+        eprintln!("[monitor] {error}");
+        return event_loop::EXIT_MONITOR_INTERNAL;
+    }
 
     let event_loop::EventLoopResult {
         mut outcome,
@@ -902,6 +989,11 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         event_loop::event_loop(event_source, context)
     };
 
+    if crash_finalization.is_some() {
+        let _ = supervisor.lifecycle.transition(SupervisorState::Capturing);
+        let _ = supervisor.lifecycle.transition(SupervisorState::Finalizing);
+    }
+
     if matches!(&outcome, event_loop::MonitorOutcome::ChildTerminated(_)) {
         supervisor.child.mark_reaped();
     }
@@ -920,7 +1012,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         };
     }
 
-    let task_control_health = pl.platform.supervisor_health();
+    let task_control_health = pl.platform().supervisor_health();
     let task_control_containment = task_control_health
         .task_control_failures
         .iter()
@@ -970,8 +1062,14 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // public outcome remains MonitorFailure, preserving captured evidence and
     // TaskResume diagnostics without allowing reaping to block forever.
     if must_reap_child {
+        if supervisor.lifecycle.state != SupervisorState::Terminating {
+            let _ = supervisor
+                .lifecycle
+                .transition(SupervisorState::Terminating);
+        }
         let termination = match supervisor.child.reap_after_crash(supervisor_sigkill_sent) {
             Ok(reason) => {
+                let _ = supervisor.lifecycle.transition(SupervisorState::Reaped);
                 eprintln!("[monitor] Contained child terminated: {reason:?}");
                 Some(reason)
             }
@@ -999,6 +1097,15 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         outcome = outcome.with_crash_result(termination, report_path);
     }
 
+    if matches!(&outcome, event_loop::MonitorOutcome::ChildTerminated(_)) {
+        if supervisor.lifecycle.state == SupervisorState::Monitoring {
+            let _ = supervisor
+                .lifecycle
+                .transition(SupervisorState::Terminating);
+        }
+        let _ = supervisor.lifecycle.transition(SupervisorState::Reaped);
+    }
+
     outcome.exit_code()
 }
 
@@ -1016,6 +1123,30 @@ fn main() {
                 Err(error) => {
                     eprintln!("[capture-helper] {error}");
                     1
+                }
+            }
+        }
+        Commands::CheckConfig { config: path } => {
+            let result = path
+                .as_deref()
+                .map_or_else(config::load_validated_config, |path| {
+                    config::load_validated_config_from_path(std::path::Path::new(path))
+                });
+            match result {
+                Ok(validated) => {
+                    println!(
+                        "configuration valid (reporting {})",
+                        if validated.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    );
+                    0
+                }
+                Err(error) => {
+                    eprintln!("invalid configuration: {error}");
+                    2
                 }
             }
         }
@@ -1052,6 +1183,28 @@ mod tests {
         );
         assert!(rendered.contains("Commands:"), "{rendered}");
         assert!(!rendered.contains("[run] <app_path>"), "{rendered}");
+    }
+
+    #[test]
+    fn supervisor_state_machine_rejects_skips_and_defines_cleanup_order() {
+        let mut lifecycle = SupervisorLifecycle::new();
+        assert!(lifecycle.transition(SupervisorState::Finalizing).is_err());
+        lifecycle.transition(SupervisorState::Monitoring).unwrap();
+        lifecycle.transition(SupervisorState::Capturing).unwrap();
+        lifecycle.transition(SupervisorState::Finalizing).unwrap();
+        lifecycle.transition(SupervisorState::Terminating).unwrap();
+        lifecycle.transition(SupervisorState::Reaped).unwrap();
+        assert_eq!(
+            SupervisorLifecycle::CLEANUP_ORDER,
+            [
+                "suspend_guard",
+                "exception_listener",
+                "exception_port",
+                "task_port",
+                "shared_memory",
+                "child_process_group"
+            ]
+        );
     }
 
     fn entitlement_plist(value: &str) -> Vec<u8> {
