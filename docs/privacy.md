@@ -93,6 +93,40 @@ object inherits the new values for fields it omits and may therefore delete
 older reports sooner. Pin every retention field explicitly before upgrading if
 the former operational limits must be preserved.
 
+## Local storage boundary
+
+Crash Monitor creates every managed data, staging, pending, sent, and report
+directory with mode `0700`. Report JSON, raw SHM dumps, RGBA/PNG attachments,
+ZIP archives, manifests, session/log files, and their temporary files use mode
+`0600`. Descriptor-based mode correction makes those results independent of
+the process umask. Existing managed nodes must be owned by the effective user;
+unsafe types and extended ACLs are rejected, while owned POSIX mode drift is
+corrected to the exact private mode.
+
+Path traversal opens each component relative to an already validated directory
+descriptor with no-follow semantics. Symlinks, untrusted writable ancestors,
+and ACLs that grant additional access fail closed. New files use exclusive
+creation, and final artifact publication uses an exclusive atomic rename so a
+concurrent or attacker-created destination is never replaced. The source inode
+and its private permissions are checked again after rename before publication
+reports success. Report-directory commit and recovery also revalidate the
+manifest bytes, exact artifact set, and recorded sizes immediately before that
+rename. A report becomes visible only as a complete manifest-validated
+transaction. Directory-sync failures after that publication boundary are
+surfaced as durability warnings; they do not relabel the already visible report
+as unpublished.
+
+These filesystem controls isolate other accounts, not arbitrary code already
+running as the same effective UID. Such a process is inside the same local
+trust boundary and can alter user-owned files after publication; deployments
+that require stronger isolation must run the monitor under a dedicated account
+or an equivalent sandbox.
+
+User-selected CLI export locations are not converted into managed `0700`
+directories. Their existing safe parent mode is preserved, but the parent is
+still validated against symlink, untrusted-write, and allowing-ACL attacks, and
+the newly exported file is `0600`.
+
 ## Retention
 
 Automatic retention is enabled by default and bounds the sent-report store to
