@@ -604,10 +604,10 @@
 
 ### P1-48. feedback helper의 pipe와 timeout을 교착 없이 처리한다
 
-- [ ] helper 실행 중 stdout/stderr를 concurrent하게 drain하거나 bounded file/buffer로 받는다.
-- [ ] pipe capacity를 넘는 출력 때문에 helper 종료와 parent wait가 서로 기다리지 않게 한다.
-- [ ] timeout 시 helper process를 정리하고 partial output과 timeout diagnostics를 보존한다.
-- [ ] feedback UI는 critical capture/Mach reply 경로 밖에서만 실행한다.
+- [x] helper 실행 중 stdout/stderr를 concurrent하게 drain하거나 bounded file/buffer로 받는다.
+- [x] pipe capacity를 넘는 출력 때문에 helper 종료와 parent wait가 서로 기다리지 않게 한다.
+- [x] timeout 시 helper process를 정리하고 partial output과 timeout diagnostics를 보존한다.
+- [x] feedback UI는 critical capture/Mach reply 경로 밖에서만 실행한다.
 
 범위: `src/postprocessors/feedback.rs`.
 

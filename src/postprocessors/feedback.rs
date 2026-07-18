@@ -113,7 +113,12 @@ impl PostProcessor for FeedbackPostProcessor {
                 // Propagate the nested helper deadline to the outer plugin
                 // runner so diagnostics record `TimedOut`, not `Error`.
                 context.cancellation_token().cancel();
-                return Err("feedback dialog timed out".to_string());
+                return Err(isolated_context
+                    .subprocess_timeout_diagnostic()
+                    .map_or_else(
+                        || "feedback dialog timed out".to_string(),
+                        |partial| format!("feedback dialog timed out; {partial}"),
+                    ));
             }
             PluginRunResult::Failed(error) => return Err(error),
             PluginRunResult::Panicked(message) => {

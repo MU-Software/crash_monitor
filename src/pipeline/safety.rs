@@ -78,6 +78,7 @@ pub struct PluginContext {
     report_context: Option<Arc<crate::pipeline::ReportContext>>,
     subprocess_boundary: Arc<AtomicU8>,
     subprocess_cleanup_failure: Arc<OnceLock<String>>,
+    subprocess_timeout_diagnostic: Arc<OnceLock<String>>,
 }
 
 const SUBPROCESS_UNUSED: u8 = 0;
@@ -95,6 +96,7 @@ impl PluginContext {
             report_context: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
+            subprocess_timeout_diagnostic: Arc::new(OnceLock::new()),
         }
     }
 
@@ -111,6 +113,7 @@ impl PluginContext {
             report_context: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
+            subprocess_timeout_diagnostic: Arc::new(OnceLock::new()),
         }
     }
 
@@ -132,6 +135,7 @@ impl PluginContext {
             report_context: None,
             subprocess_boundary: Arc::new(AtomicU8::new(SUBPROCESS_UNUSED)),
             subprocess_cleanup_failure: Arc::new(OnceLock::new()),
+            subprocess_timeout_diagnostic: Arc::new(OnceLock::new()),
         }
     }
 
@@ -208,6 +212,7 @@ impl PluginContext {
             report_context: self.report_context.clone(),
             subprocess_boundary: self.subprocess_boundary.clone(),
             subprocess_cleanup_failure: self.subprocess_cleanup_failure.clone(),
+            subprocess_timeout_diagnostic: self.subprocess_timeout_diagnostic.clone(),
         }
     }
 
@@ -238,6 +243,26 @@ impl PluginContext {
         self.subprocess_cleanup_failure
             .get()
             .map(std::string::String::as_str)
+    }
+
+    fn record_subprocess_timeout_output(&self, stdout: &StreamCapture, stderr: &StreamCapture) {
+        const DIAGNOSTIC_TAIL_BYTES: usize = 4096;
+        fn tail(bytes: &[u8]) -> String {
+            let start = bytes.len().saturating_sub(DIAGNOSTIC_TAIL_BYTES);
+            String::from_utf8_lossy(&bytes[start..]).into_owned()
+        }
+        let diagnostic = format!(
+            "partial stdout={:?}{}; partial stderr={:?}{}",
+            tail(&stdout.bytes),
+            if stdout.truncated { " (truncated)" } else { "" },
+            tail(&stderr.bytes),
+            if stderr.truncated { " (truncated)" } else { "" },
+        );
+        let _ = self.subprocess_timeout_diagnostic.set(diagnostic);
+    }
+
+    pub(crate) fn subprocess_timeout_diagnostic(&self) -> Option<&str> {
+        self.subprocess_timeout_diagnostic.get().map(String::as_str)
     }
 
     #[must_use]
@@ -821,6 +846,13 @@ pub fn run_plugin_subprocess(
     let drain_deadline = allow_drain.then(|| Instant::now() + OUTPUT_DRAIN_GRACE);
     let stdout = join_capture(name, "stdout", stdout_reader, &stdout_stop, drain_deadline);
     let stderr = join_capture(name, "stderr", stderr_reader, &stderr_stop, drain_deadline);
+
+    if matches!(outcome, Err(PluginRunResult::TimedOut)) {
+        context.record_subprocess_timeout_output(&stdout, &stderr);
+        if let Some(diagnostic) = context.subprocess_timeout_diagnostic() {
+            eprintln!("[monitor] plugin {name} timeout output: {diagnostic}");
+        }
+    }
 
     if outcome.is_ok() && context.is_timed_out() {
         eprintln!("[monitor] plugin {name} completed after its deadline");

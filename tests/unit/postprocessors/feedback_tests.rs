@@ -179,7 +179,10 @@ fn test_dialog_timeout_kills_child() {
     // process group, so the grandchild dies too — killing only the direct
     // child (the shell) would orphan the `sleep`.
     let pidfile = dir.path().join("grandchild.pid");
-    let body = format!("sleep 999 &\necho $! > {}\nwait", pidfile.display());
+    let body = format!(
+        "echo partial-feedback-output\necho partial-feedback-error >&2\nsleep 999 &\necho $! > {}\nwait",
+        pidfile.display()
+    );
     let script = make_mock_script(dir.path(), "mock_hang.sh", &body);
     let report_path = write_test_report(dir.path());
 
@@ -199,13 +202,15 @@ fn test_dialog_timeout_kills_child() {
 
     let start = std::time::Instant::now();
     let context = PluginContext::without_deadline();
-    let res = pp.process(&event, &mut result, &context);
+    let error = pp.process(&event, &mut result, &context).unwrap_err();
     let elapsed = start.elapsed();
 
     assert!(
-        matches!(res, Err(error) if error.contains("timed out")),
-        "timeout must not be hidden as success"
+        error.contains("timed out"),
+        "timeout must remain diagnostic"
     );
+    assert!(error.contains("partial-feedback-output"));
+    assert!(error.contains("partial-feedback-error"));
     assert!(
         context.is_timed_out(),
         "nested subprocess timeout must propagate to pipeline diagnostics"
@@ -236,6 +241,36 @@ fn test_dialog_timeout_kills_child() {
         gone,
         "grandchild sleep (pid {gpid}) leaked after timeout kill"
     );
+}
+
+#[test]
+fn test_large_stdout_and_stderr_do_not_deadlock_feedback_helper() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = make_mock_script(
+        dir.path(),
+        "mock_verbose.sh",
+        "head -c 1200000 /dev/zero\nhead -c 1200000 /dev/zero >&2",
+    );
+    let report_path = write_test_report(dir.path());
+    let pp = FeedbackPostProcessor::with_timeout(script, Duration::from_secs(5));
+    let mut result = ReportResult {
+        artifact_paths: Vec::new(),
+        raw_path: None,
+        json_path: Some(report_path),
+        session: None,
+    };
+
+    let started = std::time::Instant::now();
+    let error = pp
+        .process(
+            &make_crash_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap_err();
+
+    assert!(error.contains("feedback output exceeded"));
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
