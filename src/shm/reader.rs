@@ -1313,9 +1313,10 @@ impl SharedMemory {
     ///
     /// # Errors
     /// Returns an error if the platform shm creation fails.
-    pub fn create(monitor_pid: u32) -> Result<Self, String> {
+    pub fn create(monitor_pid: u32) -> Result<Self, crate::errors::ShmError> {
         crate::platform::macos::ffi::shm::create_shared_memory(monitor_pid)
             .map(|mapping| Self { mapping })
+            .map_err(crate::errors::ShmError::from)
     }
 
     /// The shm name (e.g., `/crash_monitor_12345`) for passing via environment variable.

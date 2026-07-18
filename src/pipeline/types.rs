@@ -203,7 +203,6 @@ impl CrashEvent {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(dead_code)] // Phase 4+: used for plugin ordering by priority
 pub enum Priority {
     Critical,
     High,
@@ -498,7 +497,7 @@ pub enum CaptureOutcome {
 pub struct CollectedData {
     pub raw: RawData,
     pub session: Option<SessionReport>,
-    /// Crash fingerprint hash (set by `Fingerprinter` pre-processor, Phase 5).
+    /// Crash fingerprint hash set by the `Fingerprinter` pre-processor.
     pub fingerprint: Option<String>,
     /// Structured build metadata (set by `BuildInfoEnricher` pre-processor).
     pub build_info: Option<crate::preprocessors::build_info::BuildInfo>,

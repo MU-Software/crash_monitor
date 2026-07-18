@@ -13,14 +13,14 @@ pub fn run(report_path: &str, thread_index: u32) -> i32 {
     let report = match report::load_report(Path::new(report_path)) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            std::eprintln!("error: {e}");
             return 1;
         }
     };
 
     let thread_count = report.threads.len();
     let Some(thread) = report.threads.get(thread_index as usize) else {
-        eprintln!(
+        std::eprintln!(
             "error: thread index {thread_index} out of range (report has {thread_count} threads: 0..{})",
             thread_count.saturating_sub(1)
         );
@@ -38,7 +38,7 @@ pub fn run(report_path: &str, thread_index: u32) -> i32 {
     let bytes = match base64::engine::general_purpose::STANDARD.decode(&stack.hex_dump) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("error: base64 decode failed: {e}");
+            std::eprintln!("error: base64 decode failed: {e}");
             return 1;
         }
     };

@@ -164,7 +164,6 @@ pub trait Filter: Plugin {
 }
 
 /// Notifier — fire-and-forget notification after report generation.
-#[allow(dead_code)] // Phase 6+
 pub trait Notifier: Plugin {
     /// Send a notification about the generated report.
     ///

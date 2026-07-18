@@ -68,6 +68,8 @@ sha2 = "0.10"
 addr2line = { version = "0.24", default-features = false, features = ["std", "loader"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [build-dependencies]
 # Generates the Rust mirror of the C<->Rust shm layout from crash_shm.h (SSOT).

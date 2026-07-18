@@ -209,6 +209,16 @@ impl ReportContext {
     pub const fn policy(&self) -> ReportPolicy {
         self.policy
     }
+
+    #[must_use]
+    pub const fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    #[must_use]
+    pub const fn report_type(&self) -> ReportType {
+        self.report_type
+    }
 }
 
 /// Stable artifact role recorded in the exact manifest.
@@ -333,7 +343,7 @@ impl CommittedReport {
         ensure_private_directory(&self.report_dir)
             .map_err(|error| format!("committed report directory is not private: {error}"))?;
 
-        let mut manifest = load_manifest(&self.manifest_path)?;
+        let mut manifest = load_manifest_inner(&self.manifest_path)?;
         if manifest.schema_version != MANIFEST_SCHEMA_VERSION
             || manifest.report_id != self.report_id
         {
@@ -401,8 +411,8 @@ impl ArtifactTransaction {
     /// # Errors
     /// Returns an error if the output root or unique staging directory cannot
     /// be created.
-    pub fn begin(report: ReportContext) -> Result<Arc<Self>, String> {
-        Self::begin_shared(Arc::new(report))
+    pub fn begin(report: ReportContext) -> Result<Arc<Self>, crate::errors::ArtifactError> {
+        Self::begin_shared(Arc::new(report)).map_err(crate::errors::ArtifactError::from)
     }
 
     pub(crate) fn begin_shared(report: Arc<ReportContext>) -> Result<Arc<Self>, String> {
@@ -878,7 +888,11 @@ impl Drop for ArtifactTransaction {
 /// # Errors
 /// Returns an error when the output root cannot be safely enumerated. Unsafe
 /// individual candidates are logged and left hidden for later inspection.
-pub fn recover_prepared_reports(output_root: &Path) -> Result<usize, String> {
+pub fn recover_prepared_reports(output_root: &Path) -> Result<usize, crate::errors::ArtifactError> {
+    recover_prepared_reports_inner(output_root).map_err(Into::into)
+}
+
+fn recover_prepared_reports_inner(output_root: &Path) -> Result<usize, String> {
     match fs::symlink_metadata(output_root) {
         Ok(_) => ensure_private_directory(output_root)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -899,7 +913,14 @@ pub fn recover_prepared_reports(output_root: &Path) -> Result<usize, String> {
 /// # Errors
 /// Returns an error if the root cannot be boundedly enumerated, a candidate is
 /// unsafe, or an abandoned candidate cannot be durably removed.
-pub fn scavenge_stale_pending(output_root: &Path, max_age: Duration) -> Result<usize, String> {
+pub fn scavenge_stale_pending(
+    output_root: &Path,
+    max_age: Duration,
+) -> Result<usize, crate::errors::ArtifactError> {
+    scavenge_stale_pending_inner(output_root, max_age).map_err(Into::into)
+}
+
+fn scavenge_stale_pending_inner(output_root: &Path, max_age: Duration) -> Result<usize, String> {
     let mut removed = 0;
     let now = SystemTime::now();
     for (index, entry) in fs::read_dir(output_root)
@@ -1141,7 +1162,11 @@ fn recover_prepared_entry_with_hook(
 /// # Errors
 /// Returns an error if the manifest is missing, unsafe, oversized, unreadable,
 /// or does not deserialize into the supported schema.
-pub fn load_manifest(path: &Path) -> Result<ReportManifest, String> {
+pub fn load_manifest(path: &Path) -> Result<ReportManifest, crate::errors::ArtifactError> {
+    load_manifest_inner(path).map_err(Into::into)
+}
+
+fn load_manifest_inner(path: &Path) -> Result<ReportManifest, String> {
     let bytes = read_manifest_file(path).map_err(|error| match error {
         ManifestReadError::NotFound => {
             format!(

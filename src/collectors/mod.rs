@@ -27,7 +27,7 @@ pub struct RawData {
     pub images: Vec<dylib::RawImageData>,
     pub memory_map: Vec<crate::platform::VmRegionInfo>,
     pub heap: memory::RawHeapData,
-    // Phase 4: shared memory data
+    // Owned shared-memory evidence collectors.
     pub breadcrumbs: Vec<crate::shm::RawBreadcrumb>,
     pub crash_context: Option<crate::shm::RawCrashContext>,
     pub settings_snapshot: Option<crate::shm::RawSettingsSnapshot>,

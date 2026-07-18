@@ -329,7 +329,7 @@ fn subprocess_adapter_cancellation_maps_to_pipeline_timeout_status() {
                 PluginRunResult::Completed(_) => {
                     Err("subprocess unexpectedly completed".to_string())
                 }
-                PluginRunResult::Failed(error) => Err(error),
+                PluginRunResult::Failed(error) => Err(error.to_string()),
                 PluginRunResult::Panicked(message) => {
                     Err(format!("subprocess supervisor panicked: {message}"))
                 }

@@ -4,7 +4,8 @@
 //! in shared memory. Time before the producer is ready, and time spent doing
 //! monitor-owned work, is never counted as application hang time.
 //!
-//! Design doc: `docs/plans/crash_reporter.md` L417-487
+//! The event loop supplies elapsed application-running time and excludes
+//! monitor-owned capture intervals from the watchdog clock.
 
 use std::time::Instant;
 

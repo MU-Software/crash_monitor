@@ -16,7 +16,7 @@ pub fn run(report_path: &str) -> i32 {
     let report = match report::load_report(Path::new(report_path)) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            std::eprintln!("error: {e}");
             return 1;
         }
     };

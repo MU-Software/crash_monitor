@@ -364,7 +364,7 @@ fn reap_helper_nonblocking(pid: nix::unistd::Pid) -> Result<Option<i32>, nix::er
 fn plugin_status<T>(outcome: &PluginRunResult<T>) -> PluginStatus {
     match outcome {
         PluginRunResult::Completed(_) => PluginStatus::Ok,
-        PluginRunResult::Failed(error) => PluginStatus::Error(error.clone()),
+        PluginRunResult::Failed(error) => PluginStatus::Error(error.to_string()),
         PluginRunResult::Panicked(message) => PluginStatus::Panic(message.clone()),
         PluginRunResult::TimedOut => PluginStatus::TimedOut,
     }
