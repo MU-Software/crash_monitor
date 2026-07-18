@@ -337,6 +337,18 @@ fn test_default_parameter_values() {
     assert_eq!(config.post_processors.retention.max_age_days, 7);
 }
 
+#[test]
+fn retention_rejects_zero_report_limit_when_enabled() {
+    let config: CrashReporterConfig = serde_json::from_str(
+        r#"{"post_processors":{"retention":{"enabled":true,"max_reports":0}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.validate().unwrap_err(),
+        ConfigValidationError::RetentionMaxReportsZero
+    );
+}
+
 fn private_config_tempdir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     crate::utils::paths::ensure_private_directory(dir.path()).unwrap();

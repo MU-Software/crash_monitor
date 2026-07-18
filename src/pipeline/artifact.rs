@@ -12,7 +12,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Local;
 use nix::fcntl::{Flock, FlockArg};
@@ -830,6 +830,66 @@ pub fn recover_prepared_reports(output_root: &Path) -> Result<usize, String> {
         }
     }
     recover_prepared_reports_with_limits(output_root, RecoveryLimits::default())
+}
+
+/// Remove old, unlocked, incomplete staging transactions using a bounded flat
+/// scan. Prepared manifests are handled by recovery first; live instances are
+/// protected by the advisory directory lock.
+pub fn scavenge_stale_pending(output_root: &Path, max_age: Duration) -> Result<usize, String> {
+    let mut removed = 0;
+    let now = SystemTime::now();
+    for (index, entry) in fs::read_dir(output_root)
+        .map_err(|error| format!("cannot scan pending root: {error}"))?
+        .enumerate()
+    {
+        if index >= MAX_RECOVERY_ROOT_ENTRIES {
+            return Err("pending scavenger root entry limit exceeded".into());
+        }
+        let entry = entry.map_err(|error| format!("cannot read pending entry: {error}"))?;
+        let name = entry.file_name();
+        if staging_report_id(&name.to_string_lossy()).is_none()
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("cannot inspect pending entry: {error}"))?;
+        let age = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .unwrap_or(Duration::ZERO);
+        if age <= max_age {
+            continue;
+        }
+        let Some(_owner) = try_lock_report_directory(&entry.path())? else {
+            continue;
+        };
+        let mut children = Vec::new();
+        for (child_index, child) in fs::read_dir(entry.path())
+            .map_err(|error| format!("cannot scan stale pending entry: {error}"))?
+            .enumerate()
+        {
+            if child_index >= MAX_RECOVERY_REPORT_ENTRIES {
+                return Err("stale pending entry limit exceeded".into());
+            }
+            let child = child.map_err(|error| format!("cannot read stale child: {error}"))?;
+            if !child.file_type().is_ok_and(|kind| kind.is_file()) {
+                return Err("stale pending transaction contains a non-file entry".into());
+            }
+            children.push(child.path());
+        }
+        for child in children {
+            fs::remove_file(child)
+                .map_err(|error| format!("cannot remove stale artifact: {error}"))?;
+        }
+        fs::remove_dir(entry.path())
+            .map_err(|error| format!("cannot remove stale pending directory: {error}"))?;
+        removed += 1;
+    }
+    sync_directory(output_root)?;
+    Ok(removed)
 }
 
 #[derive(Clone, Copy)]
@@ -2357,5 +2417,36 @@ mod tests {
         assert!(published_dir.join(MANIFEST_FILE_NAME).exists());
         assert!(published_dir.join("report.json").exists());
         assert_eq!(recover_prepared_reports(&published_pending).unwrap(), 0);
+    }
+
+    #[test]
+    fn stale_pending_scavenger_skips_live_owner_then_removes_abandoned_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = root.path().join("pending");
+        std::fs::create_dir(&pending).unwrap();
+        let event = event();
+        let transaction = ArtifactTransaction::begin(ReportContext::new(&event, &pending)).unwrap();
+        transaction
+            .write_bytes("partial.txt", ArtifactKind::ThreadRaw, b"partial")
+            .unwrap();
+        let staging = transaction.staging_dir().to_path_buf();
+        let old = filetime::FileTime::from_unix_time(1, 0);
+        filetime::set_file_mtime(&staging, old).unwrap();
+
+        assert_eq!(
+            scavenge_stale_pending(&pending, Duration::from_secs(1)).unwrap(),
+            0
+        );
+        assert!(staging.exists());
+
+        drop(transaction);
+        create_private_directory(&staging).unwrap();
+        create_private_file(&staging.join("partial.txt")).unwrap();
+        filetime::set_file_mtime(&staging, old).unwrap();
+        assert_eq!(
+            scavenge_stale_pending(&pending, Duration::from_secs(1)).unwrap(),
+            1
+        );
+        assert!(!staging.exists());
     }
 }

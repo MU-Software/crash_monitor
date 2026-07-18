@@ -131,6 +131,12 @@ impl PostProcessor for RetentionManager {
     ) -> Result<(), String> {
         context.checkpoint()?;
         let dir = self.target_dir(context)?;
+        if let Some(transaction) = context.artifact_transaction() {
+            crate::pipeline::artifact::scavenge_stale_pending(
+                transaction.report_context().output_root(),
+                self.max_age,
+            )?;
+        }
         let current_report_dir = context.committed_report().map(|report| report.report_dir);
         validate_retention_root(&dir)?;
         let _retention_lock = acquire_retention_lock(&dir, context)?;

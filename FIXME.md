@@ -416,10 +416,10 @@
 
 ### P1-29. retention을 logical report 단위로 적용한다
 
-- [ ] 개별 file 수가 아니라 report directory/manifest 단위로 count, size, delete한다.
-- [ ] JSON만 지워지거나 attachment만 남는 부분 삭제를 막는다.
-- [ ] `max_reports=0`의 의미를 disabled로 명시하거나 config validation에서 거부한다.
-- [ ] `pending` 실패 잔여물에도 age/size 기반 보존 정책을 적용한다.
+- [x] 개별 file 수가 아니라 report directory/manifest 단위로 count, size, delete한다.
+- [x] JSON만 지워지거나 attachment만 남는 부분 삭제를 막는다.
+- [x] `max_reports=0`의 의미를 disabled로 명시하거나 config validation에서 거부한다.
+- [x] `pending` 실패 잔여물에도 age/size 기반 보존 정책을 적용한다.
 
 범위: `src/postprocessors/retention.rs`, config/docs.
 

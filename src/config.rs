@@ -239,6 +239,7 @@ pub enum ConfigValidationError {
     /// Application-layer artifact encryption was required, but this build has
     /// no encryption writer. Startup fails before any report is captured.
     ApplicationEncryptionUnavailable,
+    RetentionMaxReportsZero,
     DuplicatePluginId {
         plugin_id: String,
         first_category: PluginCategory,
@@ -267,6 +268,9 @@ impl std::fmt::Display for ConfigValidationError {
         match self {
             Self::ApplicationEncryptionUnavailable => f.write_str(
                 "privacy.encryption='required' cannot be satisfied: application-layer report encryption is not implemented",
+            ),
+            Self::RetentionMaxReportsZero => f.write_str(
+                "post_processors.retention.max_reports must be greater than zero when retention is enabled",
             ),
             Self::DuplicatePluginId {
                 plugin_id,
@@ -383,6 +387,10 @@ impl CrashReporterConfig {
         // encryption requirement is irrelevant while reporting is disabled.
         if self.enabled && self.privacy.encryption == EncryptionPolicy::Required {
             return Err(ConfigValidationError::ApplicationEncryptionUnavailable);
+        }
+        if self.post_processors.retention.enabled && self.post_processors.retention.max_reports == 0
+        {
+            return Err(ConfigValidationError::RetentionMaxReportsZero);
         }
         let trigger_category_enabled = self.triggers.enabled;
         let triggers = ValidatedTriggersConfig {
