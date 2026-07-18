@@ -971,8 +971,8 @@
 
 ### P2-37. disk-space 계산을 64-bit와 overflow에 안전하게 만든다
 
-- [ ] macOS에서 64-bit `statfs` 계열을 사용하거나 block count 곱셈의 overflow/saturation을 처리한다.
-- [ ] 매우 큰 volume과 API 오류를 테스트한다.
+- [x] macOS에서 64-bit `statfs` 계열을 사용하거나 block count 곱셈의 overflow/saturation을 처리한다.
+- [x] 매우 큰 volume과 API 오류를 테스트한다.
 
 범위: `src/filters/disk_space.rs`. 이 항목은 일반 환경의 즉시 장애라기보다 portability hardening이다.
 
