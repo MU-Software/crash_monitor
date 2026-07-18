@@ -8,12 +8,13 @@ atomic alignment, schema version, and memory ordering.
 ## Single source of truth
 
 [`schema/crash_shm.h`](../schema/crash_shm.h) is the authoritative layout. It
-defines the 64-byte header, breadcrumb rings, crash context, settings,
+defines the 64-byte header, breadcrumb rings, crash context, producer extension,
 attachments, screenshots, and their fixed-size constants. The current ABI is
-**schema version 4**.
+**schema version 5**.
 
-- C producers include `crash_shm.h` and use the publication helpers in
-  [`schema/crash_shm_atomic.h`](../schema/crash_shm_atomic.h).
+- C producers include the supported
+  [`producer/crash_monitor_producer.h`](../producer/crash_monitor_producer.h)
+  SDK, which wraps the schema and atomic publication helpers.
 - The Rust monitor generates the C structure mirrors from the schema with
   `bindgen` (see [`build.rs`](../build.rs)).
 - Both headers and the Rust mirror use compile-time size, alignment, and key
@@ -22,8 +23,8 @@ attachments, screenshots, and their fixed-size constants. The current ABI is
 
 A producer must verify both `SUT_SHM_MAGIC` and the exact `SUT_SHM_VERSION`
 before deriving payload addresses or writing anything. The monitor likewise
-accepts only its exact schema version. Version 4 rejects versions 1, 2, and 3,
-and a version 4 producer must not write an older version. There is no fallback
+accepts only its exact schema version. Version 5 rejects every older version,
+and a version 5 producer must not write an older version. There is no fallback
 based on common sizes or preserved offsets: on any version mismatch, the
 producer leaves the region alone and the consumer omits its SHM payload.
 Producer and monitor releases therefore have to upgrade in lockstep. In

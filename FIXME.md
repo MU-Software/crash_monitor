@@ -707,9 +707,9 @@
 
 ### P2-08. 실제 producer SDK와 올바른 SSOT 문서를 제공한다
 
-- [ ] heartbeat, breadcrumb, context, attachment, screenshot publication API를 C/C++/Rust 중 지원 대상 언어에 제공한다.
-- [ ] 존재하지 않는 `sut_crash_reporter.h` 참조를 실제 `schema/crash_shm.h`와 binding flow로 교체한다.
-- [ ] release/acquire, ready handshake, version negotiation, size/alignment contract를 SDK와 함께 테스트한다.
+- [x] heartbeat, breadcrumb, context, attachment, screenshot publication API를 C/C++/Rust 중 지원 대상 언어에 제공한다.
+- [x] 존재하지 않는 `sut_crash_reporter.h` 참조를 실제 `schema/crash_shm.h`와 binding flow로 교체한다.
+- [x] release/acquire, ready handshake, version negotiation, size/alignment contract를 SDK와 함께 테스트한다.
 
 범위: schema, `src/shm/mod.rs`, producer packages, integration docs.
 

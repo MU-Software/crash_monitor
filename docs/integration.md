@@ -43,11 +43,12 @@ At startup the child should:
    region name before `exec`.
 2. `shm_open` + `mmap` the complete schema-sized region, then verify both the
    header magic and the exact `SUT_SHM_VERSION`. The current schema is version
-   4; versions 1, 2, and 3 are rejected with no fallback, even though their
+   5; older versions are rejected with no fallback, even though some older
    total size and many offsets are unchanged. A mismatch means the producer
    must not derive payload addresses or write to the mapping.
-3. Write into the shared sections using the acquire/release and nonblocking
-   seqlock helpers from `schema/crash_shm_atomic.h` (see
+3. Include `producer/crash_monitor_producer.h` and use its heartbeat,
+   breadcrumb, annotation, extension, attachment, and screenshot APIs. It uses
+   the acquire/release and nonblocking seqlock helpers from the SSOT schema (see
    [shared-memory.md](shared-memory.md)):
    - **breadcrumbs** — a short trail of recent activity;
    - **annotations** — domain state as `key`/`value` string pairs;

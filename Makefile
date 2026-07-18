@@ -28,6 +28,8 @@ E2E_CHILD := tests/e2e/fixtures/crash_app
 E2E_SRC   := tests/e2e/fixtures/crash_app.c
 SHM_ATOMIC_TEST     := target/shm_atomic_contract_test
 SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
+PRODUCER_SDK_TEST := target/producer_sdk_contract_test
+PRODUCER_SDK_TEST_SRC := tests/e2e/fixtures/producer_sdk_contract.c
 
 # Homebrew LLVM tools for cargo-llvm-cov (macOS).
 LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
@@ -40,7 +42,7 @@ LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
 .PHONY: build e2e-build lint test unit-test integration-test e2e-test e2e-child shm-atomic-test \
-        coverage unit-coverage integration-coverage e2e-coverage clean
+        producer-sdk-test coverage unit-coverage integration-coverage e2e-coverage clean
 
 # ── Build (release + codesign) ────────────────────────────────
 build:
@@ -73,8 +75,15 @@ $(SHM_ATOMIC_TEST): $(SHM_ATOMIC_TEST_SRC) schema/crash_shm.h schema/crash_shm_a
 shm-atomic-test: $(SHM_ATOMIC_TEST)
 	./$(SHM_ATOMIC_TEST)
 
+$(PRODUCER_SDK_TEST): $(PRODUCER_SDK_TEST_SRC) producer/crash_monitor_producer.h schema/crash_shm.h schema/crash_shm_atomic.h
+	mkdir -p $(@D)
+	cc -std=c11 -Wall -Wextra -Werror -I schema -I producer -o $@ $<
+
+producer-sdk-test: $(PRODUCER_SDK_TEST)
+	./$(PRODUCER_SDK_TEST)
+
 # ── Tests ─────────────────────────────────────────────────────
-unit-test: shm-atomic-test
+unit-test: shm-atomic-test producer-sdk-test
 	cargo test --lib
 
 integration-test:
