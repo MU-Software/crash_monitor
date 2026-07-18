@@ -554,9 +554,9 @@
 
 ### P1-43. 수집한 SHM context를 report에서 잃지 않는다
 
-- [ ] `session_id`, `session_start_ns`, heartbeat 관련 값, `settings.extra`를 typed report field에 매핑한다.
-- [ ] 값의 producer/source와 optional semantics를 문서화한다.
-- [ ] serializer, loader, CLI, docs가 같은 schema를 사용한다.
+- [x] `session_id`, `session_start_ns`, heartbeat 관련 값, `settings.extra`를 typed report field에 매핑한다.
+- [x] 값의 producer/source와 optional semantics를 문서화한다.
+- [x] serializer, loader, CLI, docs가 같은 schema를 사용한다.
 
 범위: `src/shm/reader.rs`, `src/preprocessors/report_formatter.rs`, report schema.
 

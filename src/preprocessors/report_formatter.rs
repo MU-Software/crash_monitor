@@ -12,8 +12,9 @@ use crate::collectors::dylib::{self, RawImageData};
 use crate::collectors::memory::RawHeapData;
 use crate::collectors::thread::RawThreadData;
 use crate::pipeline::report::{
-    BacktraceFrame, HeapSummary, HeapZoneReport, LoadedImageReport, SessionReport,
-    StackMemoryReport, TaskVmSummaryReport, ThreadReport, VmRegionReport,
+    BacktraceFrame, CrashContextReport, HeapSummary, HeapZoneReport, LoadedImageReport,
+    ReportValueSource, SessionReport, SettingsSnapshotReport, StackMemoryReport,
+    TaskVmSummaryReport, ThreadReport, VmRegionReport,
 };
 use crate::pipeline::{CollectedData, Diagnostics, PluginStatus};
 use crate::platform::VmRegionInfo;
@@ -35,9 +36,9 @@ pub struct FormattedData {
     pub session: Option<SessionReport>,
     pub diagnostics_json: Option<serde_json::Value>,
     pub breadcrumbs: Vec<serde_json::Value>,
-    pub crash_context: Option<serde_json::Value>,
+    pub crash_context: Option<CrashContextReport>,
     pub build: Option<serde_json::Value>,
-    pub settings_snapshot: Option<serde_json::Value>,
+    pub settings_snapshot: Option<SettingsSnapshotReport>,
     pub attachments: Vec<serde_json::Value>,
     pub environment: Option<serde_json::Value>,
     pub process_output: Option<crate::platform::ChildOutputSnapshot>,
@@ -395,24 +396,24 @@ fn format_crash_context(
     ctx: Option<&crate::shm::RawCrashContext>,
     settings: Option<&crate::shm::RawSettingsSnapshot>,
 ) -> (
+    Option<CrashContextReport>,
     Option<serde_json::Value>,
-    Option<serde_json::Value>,
-    Option<serde_json::Value>,
+    Option<SettingsSnapshotReport>,
 ) {
     let Some(ctx) = ctx else {
         return (None, None, format_settings(settings));
     };
 
     // App/domain state is emitted as a generic annotation map (app-agnostic).
-    let annotations: serde_json::Map<String, serde_json::Value> = ctx
-        .annotations
-        .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-        .collect();
+    let annotations: BTreeMap<String, String> = ctx.annotations.iter().cloned().collect();
 
-    let crash_context = serde_json::json!({
-        "annotations": annotations,
-    });
+    let crash_context = CrashContextReport {
+        source: ReportValueSource::ProducerSharedMemory,
+        annotations,
+        session_id: (!ctx.session_id.is_empty()).then(|| ctx.session_id.clone()),
+        session_start_ns: (ctx.session_start_ns != 0).then_some(ctx.session_start_ns),
+        heartbeat_counter: ctx.heartbeat_counter,
+    };
 
     let build = serde_json::json!({
         "app_version": ctx.app_version,
@@ -431,16 +432,22 @@ fn format_crash_context(
 
 fn format_settings(
     settings: Option<&crate::shm::RawSettingsSnapshot>,
-) -> Option<serde_json::Value> {
+) -> Option<SettingsSnapshotReport> {
     let s = settings?;
-    Some(serde_json::json!({
-        "world_bounds": [
-            s.world_bound_min[0], s.world_bound_min[1], s.world_bound_min[2],
-            s.world_bound_max[0], s.world_bound_max[1], s.world_bound_max[2],
+    Some(SettingsSnapshotReport {
+        source: ReportValueSource::ProducerSharedMemory,
+        world_bounds: [
+            s.world_bound_min[0],
+            s.world_bound_min[1],
+            s.world_bound_min[2],
+            s.world_bound_max[0],
+            s.world_bound_max[1],
+            s.world_bound_max[2],
         ],
-        "palette_count": s.palette_count,
-        "history_max": s.history_max,
-    }))
+        palette_count: s.palette_count,
+        history_max: s.history_max,
+        extra: (!s.extra.is_empty()).then(|| s.extra.clone()),
+    })
 }
 
 // ═══════════════════════════════════════════════════

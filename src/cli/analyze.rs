@@ -137,18 +137,25 @@ fn print_crash_context(report: &CrashReport) {
     };
     // App state is a generic annotation map — print it verbatim (no app-specific
     // field names, so the tool stays domain-agnostic).
-    let Some(annotations) = ctx
-        .get("annotations")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return;
-    };
-    if annotations.is_empty() {
+    if let Some(session_id) = &ctx.session_id {
+        let start = ctx
+            .session_start_ns
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        println!(
+            "Producer session: {session_id} (start_ns: {start}, heartbeat: {})",
+            ctx.heartbeat_counter
+        );
+    } else {
+        println!("Producer heartbeat: {}", ctx.heartbeat_counter);
+    }
+
+    if ctx.annotations.is_empty() {
         return;
     }
-    let joined = annotations
+    let joined = ctx
+        .annotations
         .iter()
-        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
+        .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(" | ");
     println!("Context: {joined}");

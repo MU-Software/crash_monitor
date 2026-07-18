@@ -127,6 +127,20 @@ sanitization for torn generations is a separate publication-integrity rule.
 
 ## Capture ownership boundary
 
+## Report field provenance
+
+Stable crash-context and settings publications are serialized as the typed
+`crash_context` and `settings_snapshot` report objects. Both carry
+`source = "producer_shared_memory"`. `session_id`, `session_start_ns`, and
+`heartbeat_counter` therefore describe the producer's last published state,
+not values synthesized by the monitor. Empty `session_id`, zero
+`session_start_ns`, and empty `settings.extra` mean unavailable and are omitted;
+the heartbeat counter is always emitted, including zero. Producer readiness is
+validated separately and is not inferred from that counter.
+
+The report's top-level `session` object has a different source: it is the
+monitor-maintained session lock. Consumers should not merge the two identities.
+
 The live mapping is not exposed as ordinary Rust references or borrowed byte
 slices. After the monitor successfully suspends the child, it allocates one
 zero-filled schema-sized destination and copies only privacy-authorized sections

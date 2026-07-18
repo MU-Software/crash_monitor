@@ -40,7 +40,7 @@ pub struct CrashReport {
     #[serde(default)]
     pub exception: Option<ExceptionReport>,
     #[serde(default)]
-    pub crash_context: Option<serde_json::Value>, // Phase 4
+    pub crash_context: Option<CrashContextReport>,
     #[serde(default)]
     pub threads: Vec<ThreadReport>,
     #[serde(default)]
@@ -54,7 +54,7 @@ pub struct CrashReport {
     #[serde(default)]
     pub session: Option<SessionReport>,
     #[serde(default)]
-    pub settings_snapshot: Option<serde_json::Value>,
+    pub settings_snapshot: Option<SettingsSnapshotReport>,
     #[serde(default)]
     pub fingerprint: Option<String>,
     #[serde(default)]
@@ -269,6 +269,43 @@ pub struct SessionReport {
     pub id: String,
     pub start: String,
     pub duration_s: u64,
+}
+
+/// Origin of values copied from the producer-owned shared-memory region.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportValueSource {
+    #[default]
+    ProducerSharedMemory,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CrashContextReport {
+    #[serde(default)]
+    pub source: ReportValueSource,
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
+    /// Producer session identifier. Omitted when the fixed-width field is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Producer monotonic session-start timestamp. Zero means unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_start_ns: Option<u64>,
+    /// Last producer heartbeat counter observed in the stable context snapshot.
+    #[serde(default)]
+    pub heartbeat_counter: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SettingsSnapshotReport {
+    #[serde(default)]
+    pub source: ReportValueSource,
+    pub world_bounds: [i32; 6],
+    pub palette_count: i32,
+    pub history_max: i32,
+    /// Producer-defined extension payload. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════

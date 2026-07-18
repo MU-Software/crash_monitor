@@ -332,13 +332,14 @@ fn test_format_settings_some() {
         world_bound_max: [10, 20, 30],
         palette_count: 8,
         history_max: 64,
-        extra: String::new(),
+        extra: "opaque-settings-v1".to_string(),
     };
     let json = format_settings(Some(&s)).expect("Some");
-    assert_eq!(json["palette_count"], 8);
-    assert_eq!(json["history_max"], 64);
-    assert_eq!(json["world_bounds"][0], -10);
-    assert_eq!(json["world_bounds"][5], 30);
+    assert_eq!(json.palette_count, 8);
+    assert_eq!(json.history_max, 64);
+    assert_eq!(json.world_bounds[0], -10);
+    assert_eq!(json.world_bounds[5], 30);
+    assert_eq!(json.extra.as_deref(), Some("opaque-settings-v1"));
 }
 
 // ── format_environment ──
@@ -408,8 +409,11 @@ fn test_format_crash_context_full() {
 
     let context = context.expect("ctx present → Some");
     // App/domain state is now a generic annotation map.
-    assert_eq!(context["annotations"]["active_tool"], "bevel");
-    assert_eq!(context["annotations"]["phase"], "bevel");
+    assert_eq!(context.annotations["active_tool"], "bevel");
+    assert_eq!(context.annotations["phase"], "bevel");
+    assert_eq!(context.session_id.as_deref(), Some("sess-1"));
+    assert_eq!(context.session_start_ns, Some(123));
+    assert_eq!(context.heartbeat_counter, 55);
 
     let build = build.expect("ctx present → build Some");
     assert_eq!(build["app_version"], "1.2.3");
