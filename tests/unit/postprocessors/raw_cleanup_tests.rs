@@ -46,6 +46,10 @@ fn test_raw_cleanup_deletes_file() {
         result.raw_path.is_none(),
         "ReportResult must not retain a path deleted by RawCleanup"
     );
+    assert!(
+        result.artifact_paths.is_empty(),
+        "ReportResult must not advertise a deleted raw artifact"
+    );
 }
 
 #[test]

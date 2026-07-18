@@ -904,9 +904,9 @@
 
 ### P2-29. postprocessor 테스트가 실제 부수효과를 검증하게 한다
 
-- [ ] SessionRecorder가 JSONL 내용, lock 생성/삭제, rotation behavior를 tempdir에서 단언한다.
-- [ ] RawCleanup이 파일 삭제와 in-memory path 갱신을 모두 단언한다.
-- [ ] PNG/ZIP/retention test가 atomicity, manifest, logical-report grouping, symlink 거부를 검증한다.
+- [x] SessionRecorder가 JSONL 내용, lock 생성/삭제, rotation behavior를 tempdir에서 단언한다.
+- [x] RawCleanup이 파일 삭제와 in-memory path 갱신을 모두 단언한다.
+- [x] PNG/ZIP/retention test가 atomicity, manifest, logical-report grouping, symlink 거부를 검증한다.
 
 범위: postprocessor unit/integration tests.
 
