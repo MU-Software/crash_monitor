@@ -24,8 +24,9 @@ Mach request received (record monotonic timestamp)
                     bounded finalization worker
                               │
                               ▼
- Filter → PreProcessor / symbolication → Stage 1 → Stage 2 JSON
-        → feedback / PNG / ZIP / select destination
+ Stage 1 raw/authorized SHM → Filter → PreProcessor / symbolication
+        → duplicate decision → attachment copy → Stage 2 JSON
+        → raw cleanup / PNG / feedback / ZIP / select destination
         → manifest-last atomic directory commit
         → session / log rotation → Notifier → AfterNotify consumers
         → terminal retention cleanup
@@ -65,6 +66,15 @@ post-processors, post-commit bookkeeping, and notifiers. Artifact mutation is
 serialized by the event transaction. After `manifest.json` is synced last, the
 entire hidden report directory is atomically renamed; only then do bookkeeping
 plugins and notifiers receive the committed descriptor.
+
+Stage 1 is deliberately written before filters and pre-processors so a later
+failure still has authorized minimum evidence; dropping the uncommitted
+transaction removes that hidden evidence. Duplicate detection is a
+`PreProcessor`, not a `Filter`: `Fingerprinter` first derives the grouping key,
+then `DuplicateDetector` sets the duplicate flag. The pipeline finishes the
+pre-processor pass and checks that flag before attachment file copies and Stage
+2 JSON. A duplicate therefore short-circuits publication, post-processors, and
+notifiers while preserving the rate-limit/filter semantics that ran earlier.
 
 | Phase | Child state/capability | Typical work |
 |-------|------------------------|--------------|

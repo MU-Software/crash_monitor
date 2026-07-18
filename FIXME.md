@@ -1007,10 +1007,10 @@
 
 ### P2-41. pipeline과 timeout 문서를 구현과 일치시킨다
 
-- [ ] duplicate detection을 Filter가 아니라 PreProcessor로 분류하고 short-circuit 시점을 설명한다.
-- [ ] Stage 1, collector, preprocessor, finalizer, notifier 순서와 동기/비동기 경계를 정확히 적는다.
-- [ ] timeout 문서에는 subprocess/deadline 구현의 실제 보장만 기술한다.
-- [ ] SHM 문서의 acquire/volatile 자기모순을 제거하고 실제 atomic contract와 일치시킨다.
+- [x] duplicate detection을 Filter가 아니라 PreProcessor로 분류하고 short-circuit 시점을 설명한다.
+- [x] Stage 1, collector, preprocessor, finalizer, notifier 순서와 동기/비동기 경계를 정확히 적는다.
+- [x] timeout 문서에는 subprocess/deadline 구현의 실제 보장만 기술한다.
+- [x] SHM 문서의 acquire/volatile 자기모순을 제거하고 실제 atomic contract와 일치시킨다.
 
 범위: `docs/pipeline.md`, `docs/shared-memory.md`.
 
