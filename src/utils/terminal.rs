@@ -1,32 +1,8 @@
 //! Escaping for untrusted strings at terminal-rendering boundaries.
 
-use std::fmt::Write as _;
-
-/// Return a printable representation that cannot emit terminal control
-/// sequences. This is deliberately separate from JSON escaping: stored report
-/// values remain unchanged and only human-facing terminal output is escaped.
-#[must_use]
-pub fn escape_terminal(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    for character in value.chars() {
-        if !character.is_control() {
-            output.push(character);
-            continue;
-        }
-        match character {
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            control if u32::from(control) <= 0xff => {
-                let _ = write!(output, "\\x{:02x}", u32::from(control));
-            }
-            control => {
-                let _ = write!(output, "\\u{{{:x}}}", u32::from(control));
-            }
-        }
-    }
-    output
-}
+// Keep the platform-specific monitor and portable report CLI on the same
+// terminal-safety contract.
+pub use crash_report_core::escape_terminal;
 
 #[cfg(test)]
 mod tests {

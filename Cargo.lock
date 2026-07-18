@@ -302,6 +302,7 @@ dependencies = [
  "chrono",
  "clap",
  "crash-capture-macos",
+ "crash-report-core",
  "filetime",
  "mach2",
  "nix",

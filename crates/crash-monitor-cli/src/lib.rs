@@ -57,7 +57,7 @@ pub fn analyze(path: &Path, output: &mut dyn Write) -> Result<(), String> {
     writeln!(
         output,
         "{} report: {} (PID {})",
-        report.report_type().unwrap_or("unknown"),
+        escape_terminal(report.report_type().unwrap_or("unknown")),
         escape_terminal(report.process().unwrap_or("unknown")),
         report.pid().unwrap_or(0)
     )
@@ -121,5 +121,31 @@ mod tests {
         let mut dump = Vec::new();
         stack(&path, 0, &mut dump).unwrap();
         assert_eq!(String::from_utf8(dump).unwrap(), "00000000: 01 02 03\n");
+    }
+
+    #[test]
+    fn analyze_escapes_untrusted_header_fields_without_forging_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "header":{
+                    "type":"crash\nforged\tentry",
+                    "pid":42,
+                    "process":"app\u001b[2J\rspoof"
+                },
+                "threads":[]
+            }"#,
+        )
+        .unwrap();
+
+        let mut summary = Vec::new();
+        analyze(&path, &mut summary).unwrap();
+
+        assert_eq!(
+            String::from_utf8(summary).unwrap(),
+            "crash\\nforged\\tentry report: app\\x1b[2J\\rspoof (PID 42)\n"
+        );
     }
 }

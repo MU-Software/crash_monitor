@@ -1,6 +1,7 @@
 //! Platform-neutral loading for crash-monitor JSON and ZIP reports.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -133,20 +134,33 @@ fn load_zip_report(path: &Path) -> Result<Vec<u8>, ReportLoadError> {
     read_bounded(entry)
 }
 
+/// Return a printable representation that cannot emit terminal control
+/// sequences.
+///
+/// This is deliberately separate from JSON escaping: stored report values
+/// remain unchanged and only human-facing terminal output is escaped. Callers
+/// should add their own structural newlines after escaping individual values.
 #[must_use]
 pub fn escape_terminal(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| match character {
-            '\u{1b}' => "\\x1b".chars().collect::<Vec<_>>(),
-            character if character.is_control() && character != '\n' && character != '\t' => {
-                format!("\\u{{{:04x}}}", u32::from(character))
-                    .chars()
-                    .collect()
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if !character.is_control() {
+            output.push(character);
+            continue;
+        }
+        match character {
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            control if u32::from(control) <= 0xff => {
+                let _ = write!(output, "\\x{:02x}", u32::from(control));
             }
-            character => vec![character],
-        })
-        .collect()
+            control => {
+                let _ = write!(output, "\\u{{{:x}}}", u32::from(control));
+            }
+        }
+    }
+    output
 }
 
 #[cfg(test)]
@@ -166,5 +180,23 @@ mod tests {
         assert_eq!(report.report_type(), Some("crash"));
         assert_eq!(report.pid(), Some(42));
         assert_eq!(report.process(), Some("app"));
+    }
+
+    #[test]
+    fn terminal_escape_replaces_every_control_character() {
+        let attack = "name\u{1b}[31m\u{1b}]0;owned\u{7}\nnext\tcolumn\rline\u{7f}\u{85}";
+        let escaped = escape_terminal(attack);
+
+        assert_eq!(
+            escaped,
+            "name\\x1b[31m\\x1b]0;owned\\x07\\nnext\\tcolumn\\rline\\x7f\\x85"
+        );
+        assert!(!escaped.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn terminal_escape_preserves_printable_unicode() {
+        let value = "사용자 \"alice\"";
+        assert_eq!(escape_terminal(value), value);
     }
 }
