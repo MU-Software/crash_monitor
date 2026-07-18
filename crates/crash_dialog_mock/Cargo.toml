@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Mock feedback dialog for E2E tests — outputs fixed text, no UI"
+authors = ["MU Software"]
+license-file = "../../LICENSE"
+repository = "https://github.com/MU-Software/crash_monitor"
+homepage = "https://github.com/MU-Software/crash_monitor"
+documentation = "https://github.com/MU-Software/crash_monitor/tree/main/docs"
+publish = false
 
 [workspace]
 

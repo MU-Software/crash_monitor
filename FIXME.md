@@ -947,10 +947,10 @@
 
 ### P2-34. package metadata와 프로젝트 운영 문서를 완성한다
 
-- [ ] license, repository, homepage, documentation, include/exclude를 의도에 맞게 채운다.
-- [ ] 비공개 package면 `publish=false`, 공개 package면 실제 publish contract를 명시한다.
-- [ ] `SECURITY.md`, `CONTRIBUTING.md`, release checklist를 추가한다.
-- [ ] member crate가 workspace metadata를 일관되게 상속하는지 검사한다.
+- [x] license, repository, homepage, documentation, include/exclude를 의도에 맞게 채운다.
+- [x] 비공개 package면 `publish=false`, 공개 package면 실제 publish contract를 명시한다.
+- [x] `SECURITY.md`, `CONTRIBUTING.md`, release checklist를 추가한다.
+- [x] member crate가 workspace metadata를 일관되게 상속하는지 검사한다.
 
 범위: Cargo manifests, repository root docs.
 
