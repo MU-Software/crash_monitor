@@ -48,6 +48,7 @@ struct TaskCollectorSpec {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TaskCaptureRequest {
     version: u32,
     event: CrashEvent,
@@ -56,9 +57,11 @@ pub(crate) struct TaskCaptureRequest {
     expect_crashed_thread: bool,
     /// Integration-only assertion that an arbitrary parent descriptor was
     /// closed by the capture-helper spawn allowlist.
+    #[cfg(any(test, feature = "test-support"))]
     #[serde(default)]
     inherited_fd_must_be_closed: Option<i32>,
     /// Integration-only delay used to exercise supervisor timeout kill/reap.
+    #[cfg(any(test, feature = "test-support"))]
     #[serde(default)]
     hold_after_handoff_ms: Option<u64>,
 }
@@ -182,7 +185,9 @@ impl TaskCaptureRequest {
             capture_stack_memory: pipeline.collection_policy.capture_stack_memory,
             collectors,
             expect_crashed_thread: event.crashed_thread.is_some(),
+            #[cfg(any(test, feature = "test-support"))]
             inherited_fd_must_be_closed: None,
+            #[cfg(any(test, feature = "test-support"))]
             hold_after_handoff_ms: None,
         }))
     }
@@ -209,6 +214,7 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
             request.version
         ));
     }
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(fd) = request.inherited_fd_must_be_closed {
         verify_descriptor_is_closed(fd)?;
     }
@@ -216,6 +222,7 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
         crate::platform::macos::ffi::capture_spawn::inherited_capture_ports(
             request.expect_crashed_thread,
         )?;
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(delay_ms) = request.hold_after_handoff_ms {
         std::thread::sleep(Duration::from_millis(delay_ms.min(30_000)));
     }
@@ -273,6 +280,7 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot sync capture-helper result: {error}"))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn verify_descriptor_is_closed(fd: i32) -> Result<(), String> {
     if fd < 0 || fd == crate::platform::macos::ffi::capture_spawn::CAPTURE_HELPER_RESULT_FD {
         return Err(format!(
