@@ -351,8 +351,8 @@ fn test_settings_round_trip() {
         let settings = base.add(SETTINGS_OFFSET);
 
         write_val::<u32>(settings, 4, 1);
-        std::ptr::copy_nonoverlapping(b"mode\0".as_ptr(), settings.add(8), 5);
-        std::ptr::copy_nonoverlapping(b"round-trip\0".as_ptr(), settings.add(24), 11);
+        write_c_str(settings.add(8), "mode", 16);
+        write_c_str(settings.add(24), "round-trip", 32);
     }
 
     let s = shm

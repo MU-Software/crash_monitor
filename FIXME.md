@@ -642,11 +642,11 @@
 
 ### P2-01. crate와 module 경계를 실행 책임에 맞게 나눈다
 
-- [ ] `main.rs`와 `lib.rs`가 같은 module tree를 각각 선언하지 않고 binary가 library API를 사용하게 한다.
-- [ ] 최소한 `crash-report-core`, `crash-capture-macos`, `crash-monitor-cli`로 분리해 offline report tooling이 macOS compile error에 묶이지 않게 한다.
-- [ ] producer SDK가 필요하면 별도 crate/package로 둔다.
-- [ ] low-level FFI/SHM wildcard re-export를 제거하고 public API를 최소화한다.
-- [ ] test-support API는 feature 또는 doc-hidden internal surface로 격리한다.
+- [x] `main.rs`와 `lib.rs`가 같은 module tree를 각각 선언하지 않고 binary가 library API를 사용하게 한다.
+- [x] 최소한 `crash-report-core`, `crash-capture-macos`, `crash-monitor-cli`로 분리해 offline report tooling이 macOS compile error에 묶이지 않게 한다.
+- [x] producer SDK가 필요하면 별도 crate/package로 둔다.
+- [x] low-level FFI/SHM wildcard re-export를 제거하고 public API를 최소화한다.
+- [x] test-support API는 feature 또는 doc-hidden internal surface로 격리한다.
 
 범위: `src/main.rs`, `src/lib.rs`, workspace manifests.
 

@@ -184,7 +184,7 @@ fn test_feedback_post_processor_with_real_binary() {
     )
     .unwrap();
 
-    let pp = crash_monitor::postprocessors::FeedbackPostProcessor::for_test(wrapper_path);
+    let pp = crash_monitor::test_support::FeedbackPostProcessor::for_test(wrapper_path);
     let event = CrashEvent {
         report_id: crash_monitor::pipeline::ReportId::default(),
         report_type: ReportType::Crash,

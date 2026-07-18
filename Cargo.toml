@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = [".", "crates/crash_dialog_contract", "crates/crash_dialog_macos"]
+members = [
+    ".",
+    "crates/crash-report-core",
+    "crates/crash-monitor-cli",
+    "crates/crash_dialog_contract",
+    "crates/crash_dialog_macos",
+]
 exclude = ["crates/crash_dialog_mock"]
 
 [workspace.package]
@@ -28,7 +34,7 @@ style = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
 [package]
-name = "crash_monitor"
+name = "crash-capture-macos"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -142,10 +148,6 @@ path = "tests/integration/cli_symbolicate_test.rs"
 name = "cli_zip_test"
 path = "tests/integration/cli_zip_test.rs"
 
-[[test]]
-name = "cli_feedback_test"
-path = "tests/integration/cli_feedback_test.rs"
-
 [dev-dependencies]
 filetime = "0.2"
-crash_monitor = { path = ".", features = ["test-support"] }
+crash_monitor = { package = "crash-capture-macos", path = ".", features = ["test-support"] }

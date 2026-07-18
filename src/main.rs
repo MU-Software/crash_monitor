@@ -17,22 +17,10 @@ compile_error!(
     "crash_monitor requires panic=unwind because cooperative plugin isolation uses catch_unwind"
 );
 
-mod cli;
-mod collectors;
-mod config;
-mod event_loop;
-mod event_source;
-mod filters;
-mod notifiers;
-pub mod pipeline;
-mod platform;
-mod postprocessors;
-mod preprocessors;
-pub mod shm;
-mod utils;
-mod watchdog;
-
 use clap::{Parser, Subcommand};
+use crash_monitor::{
+    ChildEnvironmentSnapshot, cli, config, event_loop, event_source, pipeline, platform, shm,
+};
 use mach2::port::mach_port_t;
 use nix::sys::wait::{WaitPidFlag, waitpid};
 use std::ffi::{CString, OsStr, OsString};
@@ -664,15 +652,20 @@ impl SupervisorLifecycle {
     fn transition(&mut self, next: SupervisorState) -> Result<(), String> {
         let allowed = matches!(
             (self.state, next),
-            (SupervisorState::Starting, SupervisorState::Monitoring)
-                | (SupervisorState::Starting, SupervisorState::Terminating)
-                | (SupervisorState::Monitoring, SupervisorState::Capturing)
-                | (SupervisorState::Monitoring, SupervisorState::Finalizing)
-                | (SupervisorState::Monitoring, SupervisorState::Terminating)
-                | (SupervisorState::Capturing, SupervisorState::Monitoring)
-                | (SupervisorState::Capturing, SupervisorState::Finalizing)
-                | (SupervisorState::Capturing, SupervisorState::Terminating)
-                | (SupervisorState::Finalizing, SupervisorState::Terminating)
+            (
+                SupervisorState::Starting,
+                SupervisorState::Monitoring | SupervisorState::Terminating
+            ) | (
+                SupervisorState::Monitoring,
+                SupervisorState::Capturing
+                    | SupervisorState::Finalizing
+                    | SupervisorState::Terminating
+            ) | (
+                SupervisorState::Capturing,
+                SupervisorState::Monitoring
+                    | SupervisorState::Finalizing
+                    | SupervisorState::Terminating
+            ) | (SupervisorState::Finalizing, SupervisorState::Terminating)
                 | (SupervisorState::Terminating, SupervisorState::Reaped)
         );
         if !allowed {
@@ -791,9 +784,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Build the runtime registry from the same immutable environment bytes
     // that posix_spawn receives. This prevents EnvironmentCollector from
     // accidentally reporting the monitor's environment.
-    let child_environment = Arc::new(collectors::ChildEnvironmentSnapshot::from_c_strings(
-        &env_strings,
-    ));
+    let child_environment = Arc::new(ChildEnvironmentSnapshot::from_c_strings(&env_strings));
     let child_output = Arc::new(platform::ChildOutputCapture::new(
         platform::DEFAULT_CHILD_OUTPUT_TAIL_BYTES,
     ));
@@ -1012,7 +1003,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         };
     }
 
-    let task_control_health = pl.platform().supervisor_health();
+    let task_control_health = pl.supervisor_health();
     let task_control_containment = task_control_health
         .task_control_failures
         .iter()

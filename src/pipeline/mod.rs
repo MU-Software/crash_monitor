@@ -352,6 +352,13 @@ impl Pipeline {
         &self.platform
     }
 
+    /// Return the supervisor-visible task-control health snapshot without
+    /// exposing the platform adapter owned by the capture pipeline.
+    #[must_use]
+    pub fn supervisor_health(&self) -> crate::platform::SupervisorHealth {
+        self.platform.supervisor_health()
+    }
+
     /// Finalize plugin registration by applying deterministic execution order
     /// and rejecting an ambiguous runtime registry.
     ///

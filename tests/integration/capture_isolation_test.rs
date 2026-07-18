@@ -4,7 +4,9 @@ use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Duration;
 
-use crash_monitor::platform::macos::ffi::capture_spawn::{CaptureHelperReap, spawn_capture_helper};
+use crash_monitor::test_support::capture::{
+    CaptureHelperReap, OwnedThreadPort, spawn_capture_helper,
+};
 
 #[test]
 fn helper_exec_inherits_task_and_optional_thread_rights() {
@@ -68,7 +70,7 @@ fn run_helper_handoff(
         // SAFETY: `mach_thread_self` creates a send-right reference owned by
         // the returned RAII wrapper.
         let thread = unsafe { mach2::mach_init::mach_thread_self() };
-        crash_monitor::platform::macos::ffi::types::OwnedThreadPort::new(thread)
+        OwnedThreadPort::new(thread)
     });
     let request = serde_json::json!({
         "version": 1,
@@ -81,7 +83,7 @@ fn run_helper_handoff(
             "exception_subcode": null,
             "exception_codes": [],
             "crashed_thread": crashed_thread.as_ref().map(
-                crash_monitor::platform::macos::ffi::types::OwnedThreadPort::raw
+                OwnedThreadPort::raw
             ),
             "bail_on_suspend_failure": false,
             "pid": std::process::id(),
@@ -103,9 +105,7 @@ fn run_helper_handoff(
         &request,
         &result_file,
         task,
-        crashed_thread
-            .as_ref()
-            .map(crash_monitor::platform::macos::ffi::types::OwnedThreadPort::raw),
+        crashed_thread.as_ref().map(OwnedThreadPort::raw),
         Duration::from_secs(1),
     )
     .expect("spawn capture helper");

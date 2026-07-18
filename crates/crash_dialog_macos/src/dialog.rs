@@ -1,4 +1,4 @@
-//! Native macOS NSAlert feedback dialog.
+//! Native macOS `NSAlert` feedback dialog.
 
 use objc2::MainThreadOnly;
 use objc2_app_kit::{
@@ -7,13 +7,13 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
-/// Show an NSAlert with a text input field for the user to describe the issue.
+/// Show an `NSAlert` with a text input field for the user to describe the issue.
 ///
 /// Returns `Some(text)` if the user clicked Submit with non-empty text,
 /// or `None` if the user clicked Skip or submitted empty text.
 ///
 /// # Errors
-/// Returns an error string if AppKit initialization fails.
+/// Returns an error string if `AppKit` initialization fails.
 pub fn show_feedback_dialog(
     report_type: &str,
     process_name: &str,
