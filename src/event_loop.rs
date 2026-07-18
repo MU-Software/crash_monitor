@@ -396,6 +396,7 @@ pub fn event_loop(
                             )),
                             crash_finalization: None,
                             crash_cleanup_required: true,
+                            listener_loss_containment_required: false,
                         };
                     }
                     continue;
