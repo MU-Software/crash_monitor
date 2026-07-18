@@ -12,6 +12,7 @@ use mach2::message::{
 use mach2::port::{MACH_PORT_NULL, MACH_PORT_RIGHT_RECEIVE, mach_port_t};
 use mach2::task::{task_get_exception_ports, task_set_exception_ports};
 use nix::libc;
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use std::ffi::{CString, OsStr};
 use std::fs::File;
@@ -73,6 +74,96 @@ impl std::error::Error for CaptureHelperSpawnError {}
 impl From<String> for CaptureHelperSpawnError {
     fn from(message: String) -> Self {
         Self::new(message, false)
+    }
+}
+
+/// Typed result of the capture helper's single authoritative `waitpid` owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureHelperReap {
+    StillRunning,
+    Exited(i32),
+    Signaled {
+        signal: i32,
+        core_dumped: bool,
+    },
+    /// `ECHILD` or a second poll after terminal consumption means this owner
+    /// can no longer prove that the helper was reaped.
+    OwnershipLost,
+}
+
+/// Unique wait/reap capability for one spawned capture helper.
+///
+/// The value is created only after `posix_spawn` returns a valid PID. On a
+/// successful handoff it moves to the capture supervisor; on handoff failure
+/// it remains in the spawn layer for kill/reap cleanup. No PID-only late/global
+/// reaper is allowed to compete for this child.
+pub struct CaptureHelperProcess {
+    pid: Pid,
+    terminal_consumed: bool,
+}
+
+impl CaptureHelperProcess {
+    const fn new(pid: Pid) -> Self {
+        Self {
+            pid,
+            terminal_consumed: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    /// Poll and, when terminal, reap this helper exactly once.
+    ///
+    /// `ECHILD` is returned as [`CaptureHelperReap::OwnershipLost`], never as
+    /// successful cleanup or evidence of timeout.
+    ///
+    /// # Errors
+    /// Returns an error for wait failures other than `EINTR`/`ECHILD`.
+    pub fn poll_reap(&mut self) -> Result<CaptureHelperReap, String> {
+        self.poll_reap_with(|pid| waitpid(pid, Some(WaitPidFlag::WNOHANG)))
+    }
+
+    fn poll_reap_with(
+        &mut self,
+        mut wait: impl FnMut(Pid) -> Result<WaitStatus, nix::errno::Errno>,
+    ) -> Result<CaptureHelperReap, String> {
+        if self.terminal_consumed {
+            return Ok(CaptureHelperReap::OwnershipLost);
+        }
+        loop {
+            match wait(self.pid) {
+                Ok(WaitStatus::Exited(_, status)) => {
+                    self.terminal_consumed = true;
+                    return Ok(CaptureHelperReap::Exited(status));
+                }
+                Ok(WaitStatus::Signaled(_, signal, core_dumped)) => {
+                    self.terminal_consumed = true;
+                    return Ok(CaptureHelperReap::Signaled {
+                        signal: signal as i32,
+                        core_dumped,
+                    });
+                }
+                Ok(
+                    WaitStatus::StillAlive | WaitStatus::Stopped(_, _) | WaitStatus::Continued(_),
+                ) => {
+                    return Ok(CaptureHelperReap::StillRunning);
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(nix::errno::Errno::ECHILD) => {
+                    self.terminal_consumed = true;
+                    return Ok(CaptureHelperReap::OwnershipLost);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot wait for capture helper {}: {error}",
+                        self.pid
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -514,7 +605,7 @@ pub fn spawn_capture_helper(
     task: mach_port_t,
     crashed_thread: Option<mach_port_t>,
     handoff_timeout: Duration,
-) -> Result<Pid, CaptureHelperSpawnError> {
+) -> Result<CaptureHelperProcess, CaptureHelperSpawnError> {
     let result_fd = result_file.as_raw_fd();
     validate_capture_helper_spawn(executable, request_json, result_fd, task, crashed_thread)?;
 
@@ -570,7 +661,7 @@ pub fn spawn_capture_helper(
             true,
         ));
     }
-    let child = Pid::from_raw(child_pid);
+    let mut child = CaptureHelperProcess::new(Pid::from_raw(child_pid));
     let handoff_deadline = Instant::now() + handoff_timeout.min(Duration::from_millis(1_000));
     let transfer = receive_one_port(handoff.raw(), timeout_millis_until(handoff_deadline))
         .and_then(|control| {
@@ -582,7 +673,7 @@ pub fn spawn_capture_helper(
             )
         });
     if let Err(error) = transfer {
-        let cleanup = kill_and_reap_failed_handoff(child);
+        let cleanup = kill_and_reap_failed_handoff(&mut child);
         return Err(match cleanup {
             Ok(()) => CaptureHelperSpawnError::new(
                 format!("capture-helper capability handoff failed: {error}"),
@@ -607,22 +698,29 @@ fn timeout_millis_until(deadline: Instant) -> u32 {
     u32::try_from(millis).expect("clamped handoff timeout fits u32")
 }
 
-fn kill_and_reap_failed_handoff(child: Pid) -> Result<(), String> {
-    if let Err(error) = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL)
+fn kill_and_reap_failed_handoff(child: &mut CaptureHelperProcess) -> Result<(), String> {
+    if let Err(error) = nix::sys::signal::kill(child.pid(), nix::sys::signal::Signal::SIGKILL)
         && error != nix::errno::Errno::ESRCH
     {
-        return Err(format!("cannot kill helper {child}: {error}"));
+        return Err(format!("cannot kill helper {}: {error}", child.pid()));
     }
     let deadline = Instant::now() + FAILED_HANDOFF_REAP_GRACE;
     loop {
-        match nix::sys::wait::waitpid(child, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
-            Ok(nix::sys::wait::WaitStatus::StillAlive) => {}
-            Ok(_) | Err(nix::errno::Errno::ECHILD) => return Ok(()),
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(error) => return Err(format!("cannot reap helper {child}: {error}")),
+        match child.poll_reap()? {
+            CaptureHelperReap::StillRunning => {}
+            CaptureHelperReap::Exited(_) | CaptureHelperReap::Signaled { .. } => return Ok(()),
+            CaptureHelperReap::OwnershipLost => {
+                return Err(format!(
+                    "capture helper {} wait ownership was lost (ECHILD)",
+                    child.pid()
+                ));
+            }
         }
         if Instant::now() >= deadline {
-            return Err(format!("helper {child} was not reaped after SIGKILL"));
+            return Err(format!(
+                "helper {} was not reaped after SIGKILL",
+                child.pid()
+            ));
         }
         std::thread::sleep(FAILED_HANDOFF_POLL_INTERVAL);
     }
@@ -806,6 +904,45 @@ mod tests {
             validate_capture_helper_spawn(path, "{}", -1, 42, None)
                 .unwrap_err()
                 .contains("descriptor is invalid")
+        );
+    }
+
+    #[test]
+    fn echild_is_ownership_loss_for_every_reap_owner_path() {
+        for path in ["normal completion", "timeout cleanup", "handoff cleanup"] {
+            let mut helper = CaptureHelperProcess::new(Pid::from_raw(41));
+            let result = helper
+                .poll_reap_with(|_| Err(nix::errno::Errno::ECHILD))
+                .unwrap();
+            assert_eq!(
+                result,
+                CaptureHelperReap::OwnershipLost,
+                "{path} must fail closed when wait ownership is lost"
+            );
+            assert_eq!(
+                helper
+                    .poll_reap_with(|_| panic!("terminal ownership must not be polled twice"))
+                    .unwrap(),
+                CaptureHelperReap::OwnershipLost
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_status_is_consumed_exactly_once() {
+        let pid = Pid::from_raw(42);
+        let mut helper = CaptureHelperProcess::new(pid);
+        assert_eq!(
+            helper
+                .poll_reap_with(|_| Ok(WaitStatus::Exited(pid, 0)))
+                .unwrap(),
+            CaptureHelperReap::Exited(0)
+        );
+        assert_eq!(
+            helper
+                .poll_reap_with(|_| panic!("waitpid must not run after terminal consumption"))
+                .unwrap(),
+            CaptureHelperReap::OwnershipLost
         );
     }
 }

@@ -15,6 +15,7 @@ use super::{
 use crate::collectors::dylib::RawImageData;
 use crate::collectors::memory::RawHeapData;
 use crate::collectors::thread::RawThreadData;
+use crate::platform::macos::ffi::capture_spawn::{CaptureHelperProcess, CaptureHelperReap};
 use crate::platform::macos::ffi::types::OwnedThreadPort;
 use crate::platform::{MacOsPlatform, PlatformOps, VmRegionInfo};
 
@@ -242,7 +243,7 @@ pub(crate) fn run_isolated_capture(
         Ok(request) => request,
         Err(error) => return IsolatedCaptureOutcome::Failed(error),
     };
-    let helper = match crate::platform::macos::ffi::capture_spawn::spawn_capture_helper(
+    let mut helper = match crate::platform::macos::ffi::capture_spawn::spawn_capture_helper(
         &executable,
         &request_json,
         result_file,
@@ -258,8 +259,8 @@ pub(crate) fn run_isolated_capture(
     };
 
     loop {
-        match reap_helper_nonblocking(helper) {
-            Ok(Some(status)) => {
+        match helper.poll_reap() {
+            Ok(CaptureHelperReap::Exited(status)) => {
                 return if status == 0 {
                     decode_result(result_file)
                 } else {
@@ -268,13 +269,27 @@ pub(crate) fn run_isolated_capture(
                     ))
                 };
             }
-            Ok(None) => {}
+            Ok(CaptureHelperReap::Signaled {
+                signal,
+                core_dumped,
+            }) => {
+                return IsolatedCaptureOutcome::Failed(format!(
+                    "capture helper terminated by signal {signal} (core_dumped={core_dumped})"
+                ));
+            }
+            Ok(CaptureHelperReap::StillRunning) => {}
+            Ok(CaptureHelperReap::OwnershipLost) => {
+                return IsolatedCaptureOutcome::CleanupUnproven(format!(
+                    "capture helper {} wait ownership was lost (ECHILD)",
+                    helper.pid()
+                ));
+            }
             Err(error) => {
-                return IsolatedCaptureOutcome::CleanupUnproven(error.to_string());
+                return IsolatedCaptureOutcome::CleanupUnproven(error);
             }
         }
         if Instant::now() >= deadline {
-            return kill_and_reap_timed_out_helper(helper);
+            return kill_and_reap_timed_out_helper(&mut helper);
         }
         std::thread::sleep(
             HELPER_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
@@ -318,46 +333,42 @@ fn decode_result(result_file: &mut File) -> IsolatedCaptureOutcome {
     IsolatedCaptureOutcome::Completed(result.data, result.diagnostics)
 }
 
-fn kill_and_reap_timed_out_helper(helper: nix::unistd::Pid) -> IsolatedCaptureOutcome {
-    if let Err(error) = nix::sys::signal::kill(helper, nix::sys::signal::Signal::SIGKILL)
+fn kill_and_reap_timed_out_helper(helper: &mut CaptureHelperProcess) -> IsolatedCaptureOutcome {
+    if let Err(error) = nix::sys::signal::kill(helper.pid(), nix::sys::signal::Signal::SIGKILL)
         && error != nix::errno::Errno::ESRCH
     {
         return IsolatedCaptureOutcome::CleanupUnproven(format!(
-            "cannot kill timed-out capture helper {helper}: {error}"
+            "cannot kill timed-out capture helper {}: {error}",
+            helper.pid()
         ));
     }
     let cleanup_deadline = Instant::now() + HELPER_REAP_GRACE;
     loop {
-        match reap_helper_nonblocking(helper) {
-            Ok(Some(_)) | Err(nix::errno::Errno::ECHILD) => {
+        match helper.poll_reap() {
+            Ok(CaptureHelperReap::Exited(_) | CaptureHelperReap::Signaled { .. }) => {
                 return IsolatedCaptureOutcome::TimedOut;
             }
-            Ok(None) => {}
+            Ok(CaptureHelperReap::StillRunning) => {}
+            Ok(CaptureHelperReap::OwnershipLost) => {
+                return IsolatedCaptureOutcome::CleanupUnproven(format!(
+                    "timed-out capture helper {} wait ownership was lost (ECHILD)",
+                    helper.pid()
+                ));
+            }
             Err(error) => {
                 return IsolatedCaptureOutcome::CleanupUnproven(format!(
-                    "cannot reap timed-out capture helper {helper}: {error}"
+                    "cannot reap timed-out capture helper {}: {error}",
+                    helper.pid()
                 ));
             }
         }
         if Instant::now() >= cleanup_deadline {
             return IsolatedCaptureOutcome::CleanupUnproven(format!(
-                "capture helper {helper} was not reaped after SIGKILL"
+                "capture helper {} was not reaped after SIGKILL",
+                helper.pid()
             ));
         }
         std::thread::sleep(HELPER_POLL_INTERVAL);
-    }
-}
-
-fn reap_helper_nonblocking(pid: nix::unistd::Pid) -> Result<Option<i32>, nix::errno::Errno> {
-    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-    loop {
-        return match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::Exited(_, status)) => Ok(Some(status)),
-            Ok(WaitStatus::Signaled(_, signal, _)) => Ok(Some(128 + signal as i32)),
-            Ok(_) => Ok(None),
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(error) => Err(error),
-        };
     }
 }
 

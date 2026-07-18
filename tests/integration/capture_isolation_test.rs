@@ -3,8 +3,7 @@
 use std::fs::File;
 use std::time::Duration;
 
-use crash_monitor::platform::macos::ffi::capture_spawn::spawn_capture_helper;
-use nix::sys::wait::{WaitStatus, waitpid};
+use crash_monitor::platform::macos::ffi::capture_spawn::{CaptureHelperReap, spawn_capture_helper};
 
 #[test]
 fn helper_exec_inherits_task_and_optional_thread_rights() {
@@ -46,7 +45,7 @@ fn run_helper_handoff(include_crashed_thread: bool) {
     // SAFETY: `mach_task_self` returns the current process's stable task send
     // right; this test borrows it only for the synchronous posix_spawn call.
     let task = unsafe { mach2::traps::mach_task_self() };
-    let helper = spawn_capture_helper(
+    let mut helper = spawn_capture_helper(
         std::path::Path::new(env!("CARGO_BIN_EXE_crash_monitor")),
         &request,
         &result_file,
@@ -58,8 +57,20 @@ fn run_helper_handoff(include_crashed_thread: bool) {
     )
     .expect("spawn capture helper");
 
-    let status = waitpid(helper, None).expect("reap capture helper");
-    assert_eq!(status, WaitStatus::Exited(helper, 0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match helper.poll_reap().expect("poll capture helper") {
+            CaptureHelperReap::StillRunning => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "capture helper did not exit"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            CaptureHelperReap::Exited(0) => break,
+            status => panic!("unexpected capture-helper terminal state: {status:?}"),
+        }
+    }
     assert!(
         file_len(&result_file) > 0,
         "capture helper must publish its bounded wire result"

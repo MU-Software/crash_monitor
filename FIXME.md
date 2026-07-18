@@ -1051,11 +1051,11 @@
 
 ### P2-46. capture helper의 `waitpid` 소유권과 `ECHILD` 정책을 통일한다
 
-- [ ] 정상 완료 poll, timeout 후 kill/reap, capability handoff 실패 정리에서 공통 typed reap 결과와 하나의 `ECHILD` 정책을 사용한다.
-- [ ] capture helper를 reap하는 주체가 정확히 하나라는 invariant를 명시하고, 별도 global/late reaper가 같은 PID를 소비하지 못하게 한다.
-- [ ] strict capture 경계에서 `ECHILD`를 단순 성공이나 `TimedOut` 증거로 사용하지 않고 wait 소유권 상실로 진단해 `CleanupUnproven` containment를 적용한다.
-- [ ] 정상 완료의 exit status 확인과 helper/Mach-right cleanup 증명을 구분해, status를 얻지 못한 결과가 성공으로 decode되지 않게 한다.
-- [ ] 세 경로에 `ECHILD`를 fault-inject해 target이 resume되지 않고 최소 evidence와 supervisor diagnostics가 보존되는지 테스트한다.
+- [x] 정상 완료 poll, timeout 후 kill/reap, capability handoff 실패 정리에서 공통 typed reap 결과와 하나의 `ECHILD` 정책을 사용한다.
+- [x] capture helper를 reap하는 주체가 정확히 하나라는 invariant를 명시하고, 별도 global/late reaper가 같은 PID를 소비하지 못하게 한다.
+- [x] strict capture 경계에서 `ECHILD`를 단순 성공이나 `TimedOut` 증거로 사용하지 않고 wait 소유권 상실로 진단해 `CleanupUnproven` containment를 적용한다.
+- [x] 정상 완료의 exit status 확인과 helper/Mach-right cleanup 증명을 구분해, status를 얻지 못한 결과가 성공으로 decode되지 않게 한다.
+- [x] 세 경로에 `ECHILD`를 fault-inject해 target이 resume되지 않고 최소 evidence와 supervisor diagnostics가 보존되는지 테스트한다.
 
 범위: `src/pipeline/capture_isolation.rs`, `src/platform/macos/ffi/capture_spawn.rs`, capture worker tests.
 
