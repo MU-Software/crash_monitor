@@ -95,7 +95,7 @@ enum Commands {
         /// Path to the dSYM bundle directory (or DWARF binary)
         #[arg(long)]
         dsym: String,
-        /// Write symbolicated report to a new file (default: print to stdout)
+        /// Write JSON to a file (default: print a human-readable summary to stdout)
         #[arg(long, short)]
         output: Option<String>,
     },

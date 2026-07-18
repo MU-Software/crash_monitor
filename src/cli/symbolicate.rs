@@ -124,7 +124,13 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
 
     if let Some(out_path) = output {
         match write_report(&report, Path::new(out_path)) {
-            Ok(()) => 0,
+            Ok(()) => {
+                println!(
+                    "Wrote symbolicated report to {} ({resolved_count} resolved frames)",
+                    escape_terminal(out_path)
+                );
+                0
+            }
             Err(e) => {
                 eprintln!("error: {e}");
                 1
@@ -156,8 +162,14 @@ fn find_dwarf_binary_for_images(
     images: &[LoadedImageReport],
 ) -> Result<PathBuf, String> {
     let candidates = dwarf_candidates(dsym_path)?;
+    let direct_file = dsym_path.is_file();
+    let mut matches = Vec::new();
     for candidate in candidates {
-        let identities = read_macho_identities(&candidate)?;
+        let identities = match read_macho_identities(&candidate) {
+            Ok(identities) => identities,
+            Err(error) if direct_file => return Err(error),
+            Err(_) => continue,
+        };
         if identities.iter().any(|identity| {
             images.iter().any(|image| {
                 image.uuid.as_ref().is_some_and(|uuid| {
@@ -169,10 +181,22 @@ fn find_dwarf_binary_for_images(
                 })
             })
         }) {
-            return Ok(candidate);
+            matches.push(candidate);
         }
     }
-    Err("no DWARF image matches a report image UUID and architecture".to_string())
+    match matches.as_slice() {
+        [] => Err("no DWARF image matches a report image UUID and architecture".to_string()),
+        [matched] => Ok(matched.clone()),
+        _ => Err(format!(
+            "ambiguous dSYM: {} DWARF images match the report ({})",
+            matches.len(),
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 fn dwarf_candidates(dsym_path: &Path) -> Result<Vec<PathBuf>, String> {
@@ -184,6 +208,7 @@ fn dwarf_candidates(dsym_path: &Path) -> Result<Vec<PathBuf>, String> {
         .map_err(|error| format!("cannot read '{}': {error}", dwarf_dir.display()))?;
     Ok(entries
         .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().as_bytes().starts_with(b"."))
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .collect())
@@ -272,48 +297,6 @@ fn parse_thin_identity(bytes: &[u8]) -> Option<MachOIdentity> {
         offset = end;
     }
     None
-}
-
-/// Locate the DWARF binary inside a dSYM bundle.
-///
-/// Accepts either:
-/// - A `.dSYM` directory: searches `Contents/Resources/DWARF/` for the first file
-/// - A direct path to the DWARF binary itself
-#[cfg(test)]
-fn find_dwarf_binary(dsym_path: &Path) -> Result<PathBuf, String> {
-    if !dsym_path.exists() {
-        return Err(format!("dSYM path not found: '{}'", dsym_path.display()));
-    }
-
-    // If it's a file, assume it's the DWARF binary directly
-    if dsym_path.is_file() {
-        return Ok(dsym_path.to_path_buf());
-    }
-
-    // If it's a directory, look inside Contents/Resources/DWARF/
-    let dwarf_dir = dsym_path.join("Contents/Resources/DWARF");
-    if !dwarf_dir.is_dir() {
-        return Err(format!(
-            "not a valid dSYM bundle (missing Contents/Resources/DWARF): '{}'",
-            dsym_path.display()
-        ));
-    }
-
-    let entries = std::fs::read_dir(&dwarf_dir)
-        .map_err(|e| format!("cannot read '{}': {e}", dwarf_dir.display()))?;
-
-    for entry in entries {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-
-    Err(format!(
-        "no DWARF binary found in '{}'",
-        dwarf_dir.display()
-    ))
 }
 
 /// Parsed image with base address and slide.

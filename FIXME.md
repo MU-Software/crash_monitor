@@ -765,10 +765,10 @@
 
 ### P2-14. symbolicate CLI의 선택과 성공 피드백을 명확히 한다
 
-- [ ] DWARF directory의 임의 첫 file을 선택하지 않고 bundle/process/image와 매칭하며 ambiguity는 오류로 낸다.
-- [ ] hidden/irrelevant file을 건너뛴다.
-- [ ] `--output` 성공 시 destination path와 resolved frame 수를 출력한다.
-- [ ] help에 기본 output이 JSON이 아니라 human-readable summary임을 명확히 적는다.
+- [x] DWARF directory의 임의 첫 file을 선택하지 않고 bundle/process/image와 매칭하며 ambiguity는 오류로 낸다.
+- [x] hidden/irrelevant file을 건너뛴다.
+- [x] `--output` 성공 시 destination path와 resolved frame 수를 출력한다.
+- [x] help에 기본 output이 JSON이 아니라 human-readable summary임을 명확히 적는다.
 
 범위: `src/cli/symbolicate.rs`, `src/main.rs` CLI definitions.
 
