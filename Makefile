@@ -5,8 +5,8 @@
 # depends only on the shm schema, not on any host application.
 #
 # Common overrides:
-#   make build SIGN_IDENTITY="Developer ID Application: ..."   # different signer
-#   CRASH_MONITOR_DATA_DIR_NAME=.myapp make build             # bake a host default
+#   make sign SIGN_IDENTITY="Developer ID Application: ..."  # different signer
+#   CRASH_MONITOR_DATA_DIR_NAME=.myapp make sign              # bake a host default
 
 .DEFAULT_GOAL := build-unsigned
 
@@ -128,12 +128,12 @@ e2e-test: e2e-build $(E2E_CHILD)
 # capable of granting com.apple.security.cs.debugger.
 e2e-required: e2e-build $(E2E_CHILD)
 	cargo build
-	E2E_REQUIRED=1 cargo test --test e2e_tests -- --ignored
+	E2E_REQUIRED=1 cargo test --test e2e_tests -- --include-ignored
 
 test: schema-check
 	cargo test --workspace --all-targets
 
-e2e: e2e-test
+e2e: e2e-required
 
 # ── Coverage (HTML reports under coverage-report*/) ───────────
 unit-coverage:
@@ -151,7 +151,7 @@ e2e-coverage: $(E2E_CHILD)
 	. $(COV_ENV_FILE); cargo build --release --workspace --features test-support
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
 	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
-	. $(COV_ENV_FILE); CRASH_MONITOR_E2E_BIN=$(abspath $(MONITOR_BIN)) E2E_REQUIRED=1 cargo test --test e2e_tests -- --ignored
+	. $(COV_ENV_FILE); CRASH_MONITOR_E2E_BIN=$(abspath $(MONITOR_BIN)) E2E_REQUIRED=1 cargo test --test e2e_tests -- --include-ignored
 	cargo llvm-cov report $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"
 

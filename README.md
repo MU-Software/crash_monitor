@@ -26,12 +26,13 @@ opt-ins controlled by the privacy policy.
 ## Build
 
 ```bash
-make build      # release build + codesign with the debugger entitlement
+make build      # unsigned release build
+make sign       # release build + codesign with the debugger entitlement
 ```
 
 Codesigning with `crash_monitor.entitlements` grants
 `com.apple.security.cs.debugger`, required for `task_for_pid()` on the child
-without sudo. Override the identity with `make build SIGN_IDENTITY="…"`.
+without sudo. Override the identity with `make sign SIGN_IDENTITY="…"`.
 
 ## Run
 
@@ -75,7 +76,8 @@ directory or manifest itself. The canonical entry has kind `archive` and path
 ## Test
 
 ```bash
-make test        # unit + integration + e2e   (e2e requires codesigning)
+make test        # unprivileged unit and integration tests
+make e2e         # all E2E tests; requires a signing identity
 make coverage    # HTML coverage report
 ```
 
