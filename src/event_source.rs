@@ -148,6 +148,7 @@ pub struct MacEventSource {
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
     kqueue: Kqueue,
+    pending_child_termination: Option<TerminationReason>,
     pending_signals: VecDeque<i32>,
 }
 
@@ -167,7 +168,7 @@ impl MacEventSource {
     ) -> Result<Self, String> {
         let (exc_rx, exception_wake_fd) = bridge_exception_listener(exc_rx)?;
         let kqueue = Kqueue::new().map_err(|error| format!("kqueue failed: {error}"))?;
-        let changes = [
+        let descriptor_changes = [
             KEvent::new(
                 signal_read_fd.as_raw_fd() as usize,
                 EventFilter::EVFILT_READ,
@@ -184,19 +185,40 @@ impl MacEventSource {
                 0,
                 0,
             ),
-            KEvent::new(
-                child_pid.as_raw() as usize,
-                EventFilter::EVFILT_PROC,
-                EvFlags::EV_ADD | EvFlags::EV_ENABLE | EvFlags::EV_ONESHOT,
-                FilterFlag::NOTE_EXIT,
-                0,
-                0,
-            ),
         ];
         let mut no_events = [];
         kqueue
-            .kevent(&changes, &mut no_events, Some(libc::timespec::default()))
-            .map_err(|error| format!("registering kqueue event sources failed: {error}"))?;
+            .kevent(
+                &descriptor_changes,
+                &mut no_events,
+                Some(libc::timespec::default()),
+            )
+            .map_err(|error| format!("registering kqueue descriptor sources failed: {error}"))?;
+
+        let child_change = KEvent::new(
+            child_pid.as_raw() as usize,
+            EventFilter::EVFILT_PROC,
+            EvFlags::EV_ADD | EvFlags::EV_ENABLE | EvFlags::EV_ONESHOT,
+            FilterFlag::NOTE_EXIT,
+            0,
+            0,
+        );
+        let pending_child_termination = match kqueue.kevent(
+            &[child_change],
+            &mut no_events,
+            Some(libc::timespec::default()),
+        ) {
+            Ok(_) => None,
+            Err(nix::errno::Errno::ESRCH) => Some(reap_child_after_registration_race(
+                child_pid,
+                child_started_at,
+            )?),
+            Err(error) => {
+                return Err(format!(
+                    "registering child kqueue event source failed: {error}"
+                ));
+            }
+        };
 
         Ok(Self {
             exc_rx,
@@ -205,8 +227,42 @@ impl MacEventSource {
             child_pid,
             child_started_at,
             kqueue,
+            pending_child_termination,
             pending_signals: VecDeque::new(),
         })
+    }
+}
+
+/// An `EVFILT_PROC` registration can race with a child that has already
+/// become a zombie. `waitpid` remains the authoritative owner of the terminal
+/// status, so preserve that status as the event source's first child event.
+fn reap_child_after_registration_race(
+    child_pid: nix::unistd::Pid,
+    child_started_at: Instant,
+) -> Result<TerminationReason, String> {
+    loop {
+        match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(status) => {
+                return termination_from_wait_status(status, child_started_at.elapsed()).ok_or_else(
+                    || {
+                        format!(
+                            "child {child_pid} disappeared before kqueue registration but has no terminal wait status"
+                        )
+                    },
+                );
+            }
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(nix::errno::Errno::ECHILD) => {
+                return Err(format!(
+                    "child {child_pid} disappeared before kqueue registration and waitpid ownership was lost (ECHILD)"
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "waitpid failed after child {child_pid} raced kqueue registration: {error}"
+                ));
+            }
+        }
     }
 }
 
@@ -344,27 +400,32 @@ impl EventSource for MacEventSource {
 
         // A terminal wait status wins over lower-priority snapshot/listener
         // events so a dead task can never enter the live-task capture path.
-        let child_event = loop {
-            match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
-                Ok(status) => {
-                    if let Some(reason) =
-                        termination_from_wait_status(status, self.child_started_at.elapsed())
-                    {
-                        eprintln!("[monitor] Child terminated: {reason:?}.");
-                        break Some(MonitorEvent::ChildTerminated(reason));
+        let child_event = if let Some(reason) = self.pending_child_termination.take() {
+            eprintln!("[monitor] Child terminated before kqueue registration: {reason:?}.");
+            Some(MonitorEvent::ChildTerminated(reason))
+        } else {
+            loop {
+                match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(status) => {
+                        if let Some(reason) =
+                            termination_from_wait_status(status, self.child_started_at.elapsed())
+                        {
+                            eprintln!("[monitor] Child terminated: {reason:?}.");
+                            break Some(MonitorEvent::ChildTerminated(reason));
+                        }
+                        break None;
                     }
-                    break None;
-                }
-                Err(nix::errno::Errno::EINTR) => {}
-                Err(nix::errno::Errno::ECHILD) => {
-                    break Some(MonitorEvent::MonitorFailure {
-                        message: "waitpid lost ownership of the child (ECHILD)".to_string(),
-                    });
-                }
-                Err(e) => {
-                    break Some(MonitorEvent::MonitorFailure {
-                        message: format!("waitpid failed: {e}"),
-                    });
+                    Err(nix::errno::Errno::EINTR) => {}
+                    Err(nix::errno::Errno::ECHILD) => {
+                        break Some(MonitorEvent::MonitorFailure {
+                            message: "waitpid lost ownership of the child (ECHILD)".to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        break Some(MonitorEvent::MonitorFailure {
+                            message: format!("waitpid failed: {e}"),
+                        });
+                    }
                 }
             }
         };
