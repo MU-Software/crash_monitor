@@ -171,6 +171,7 @@ fn subprocess_helper() {
 
     match mode.as_str() {
         "normal" => println!("normal-helper-output"),
+        "crash" => std::process::abort(),
         "exit-error" => std::process::exit(23),
         "verbose" => {
             use std::io::Write as _;
@@ -303,6 +304,26 @@ fn subprocess_normal_completion_preserves_output() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("normal-helper-output"));
     assert!(!output.stdout_truncated);
     assert!(!output.stderr_truncated);
+}
+
+#[test]
+fn subprocess_worker_crash_is_distinct_from_timeout_and_success() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let crashed = run_helper(
+        "crash",
+        "crash",
+        Duration::from_secs(5),
+        &dir.path().join("crash.pid"),
+        |_| {},
+    );
+
+    let PluginRunResult::Completed(output) = crashed else {
+        panic!("a worker crash must preserve its terminal status");
+    };
+    assert!(!output.status.success());
+    assert_eq!(output.status.signal(), Some(nix::libc::SIGABRT));
 }
 
 #[test]

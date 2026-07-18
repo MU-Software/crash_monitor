@@ -832,9 +832,9 @@
 
 ### P2-21. timeout 테스트를 실제 차단 동작으로 교체한다
 
-- [ ] 단순 flag/alarm 호출 여부 테스트를 실제 blocking syscall, CPU loop, retrying I/O worker 테스트로 바꾼다.
-- [ ] kill 가능한 subprocess harness로 test suite 자체가 hang하지 않게 한다.
-- [ ] timeout, cancellation, worker crash, 정상 완료 결과를 구분한다.
+- [x] 단순 flag/alarm 호출 여부 테스트를 실제 blocking syscall, CPU loop, retrying I/O worker 테스트로 바꾼다.
+- [x] kill 가능한 subprocess harness로 test suite 자체가 hang하지 않게 한다.
+- [x] timeout, cancellation, worker crash, 정상 완료 결과를 구분한다.
 
 범위: pipeline safety unit/integration tests.
 
