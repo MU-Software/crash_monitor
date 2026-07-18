@@ -493,10 +493,10 @@
 
 ### P1-37. SIGKILL과 OOM을 확정적으로 동일시하지 않는다
 
-- [ ] SIGKILL만으로 OOM을 확정하지 않고 `PossibleOom`, `UnknownSigkill`처럼 증거 수준을 표현한다.
-- [ ] CLI의 “OOM으로 종료됨” 확정 문구를 증거에 맞게 바꾼다.
-- [ ] jetsam/OS pressure 등 추가 근거가 있을 때만 confidence를 높인다.
-- [ ] OOM trigger의 실제 기본값과 “opt-in” 문서/설정을 일치시킨다.
+- [x] SIGKILL만으로 OOM을 확정하지 않고 `PossibleOom`, `UnknownSigkill`처럼 증거 수준을 표현한다.
+- [x] CLI의 “OOM으로 종료됨” 확정 문구를 증거에 맞게 바꾼다.
+- [x] jetsam/OS pressure 등 추가 근거가 있을 때만 confidence를 높인다.
+- [x] OOM trigger의 실제 기본값과 “opt-in” 문서/설정을 일치시킨다.
 
 범위: `src/config.rs`, `src/event_loop.rs`, `src/cli/analyze.rs`, docs.
 

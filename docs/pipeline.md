@@ -262,8 +262,12 @@ is no implicit emergency-evidence exception to this switch.
 `triggers.enabled` disables the whole trigger category. Each primary event can
 also be controlled independently with `triggers.crash`, `exit_failure`,
 `signal_failure`, `oom_detection`, `anr`, and `snapshot` (each is an object with
-an `enabled` boolean). A probable OOM is a primary SIGKILL termination when
-`oom_detection` is enabled; otherwise the same event may use `signal_failure`.
+an `enabled` boolean). OOM classification is disabled by default and must be
+explicitly enabled. A primary SIGKILL then produces only `possible_oom`
+evidence because the signal alone does not prove memory pressure; without that
+opt-in the same event may use `signal_failure` with `unknown_sigkill` evidence.
+Higher confidence requires an additional platform pressure/jetsam source, which
+is not currently collected.
 A received Mach exception is always the primary crash incident: its later wait
 status enriches that incident and does not fire a second exit/signal/OOM report,
 including when the crash trigger itself is disabled.

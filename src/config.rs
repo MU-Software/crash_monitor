@@ -463,7 +463,9 @@ impl Default for TriggersConfig {
             crash: PluginToggle::default(),
             exit_failure: PluginToggle::default(),
             signal_failure: PluginToggle::default(),
-            oom_detection: PluginToggle::default(),
+            // SIGKILL alone is weak OOM evidence, so this classification is an
+            // explicit opt-in rather than a default-on trigger.
+            oom_detection: PluginToggle::disabled(),
             anr: PluginToggle::default(),
             snapshot: PluginToggle::default(),
         }

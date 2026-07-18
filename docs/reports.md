@@ -7,7 +7,7 @@
 | `crash` | fatal Mach exception (SIGSEGV / SIGBUS / SIGABRT / SIGFPE) |
 | `snapshot` | manual, on `SIGUSR1` — the app keeps running |
 | `anr` | the ANR watchdog saw an opted-in producer's heartbeat stall past its threshold |
-| `oom` | a primary SIGKILL child termination classified as probable OOM |
+| `oom` | an opt-in `possible_oom` classification based only on primary SIGKILL |
 | `exit_failure` | the child exited with a non-zero status |
 | `signal_failure` | the child terminated from a signal not already reported as a Mach crash |
 

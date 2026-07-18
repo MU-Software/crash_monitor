@@ -37,7 +37,7 @@ All sources feed a single event loop as a `MonitorEvent`:
 | `SIGUSR1` (self-pipe) | `Snapshot` | `snapshot` |
 | ANR watchdog (inline) | fired when an opted-in producer's heartbeat stalls | `anr` |
 | `waitpid` | non-zero child exit | `exit_failure` |
-| `waitpid` | primary SIGKILL termination with OOM detection enabled | `oom` (probable OOM) |
+| `waitpid` | primary SIGKILL termination with opt-in OOM classification | `oom` (`possible_oom`, not confirmed) |
 | `waitpid` | other primary signal termination | `signal_failure` |
 
 A clean child exit ends the loop without a report. A Mach exception remains

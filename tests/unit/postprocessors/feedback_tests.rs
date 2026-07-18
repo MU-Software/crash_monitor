@@ -35,6 +35,7 @@ fn write_test_report(dir: &std::path::Path) -> PathBuf {
             process: "test_app".to_string(),
             collector: "test".to_string(),
             report_type: ReportType::Crash,
+            termination_evidence: None,
             trigger: None,
             hang_duration_ms: None,
         },

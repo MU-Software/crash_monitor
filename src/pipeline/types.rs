@@ -72,6 +72,15 @@ pub enum ReportType {
     SignalFailure,
 }
 
+/// Evidence level for a SIGKILL termination. SIGKILL alone cannot establish
+/// memory pressure because supervisors and users can send the same signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationEvidence {
+    PossibleOom,
+    UnknownSigkill,
+}
+
 impl ReportType {
     /// Stable string representation used in filenames, CLI args, and JSON.
     #[must_use]

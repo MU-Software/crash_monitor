@@ -12,7 +12,7 @@ fn test_default_config_enables_only_non_sensitive_plugins() {
     assert!(config.triggers.crash.enabled);
     assert!(config.triggers.exit_failure.enabled);
     assert!(config.triggers.signal_failure.enabled);
-    assert!(config.triggers.oom_detection.enabled);
+    assert!(!config.triggers.oom_detection.enabled);
     assert!(config.triggers.anr.enabled);
     assert!(config.triggers.snapshot.enabled);
     assert!(config.filters.enabled);
@@ -430,7 +430,7 @@ fn test_validation_keeps_global_kill_switch_explicit() {
     assert!(validated.triggers.crash);
     assert!(validated.triggers.exit_failure);
     assert!(validated.triggers.signal_failure);
-    assert!(validated.triggers.probable_oom);
+    assert!(!validated.triggers.probable_oom);
     assert!(validated.triggers.anr);
     assert!(validated.triggers.snapshot);
 }

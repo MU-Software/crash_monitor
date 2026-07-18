@@ -19,7 +19,9 @@ use super::artifact::{
     ArtifactKind, ArtifactTransaction, MANIFEST_FILE_NAME, MANIFEST_SCHEMA_VERSION, ReportId,
     load_manifest,
 };
-use super::types::{CollectedData, CrashEvent, Diagnostics, ReportType, TerminationReason};
+use super::types::{
+    CollectedData, CrashEvent, Diagnostics, ReportType, TerminationEvidence, TerminationReason,
+};
 
 // ═══════════════════════════════════════════════════
 //  Serde report structures (design doc lines 1026-1153)
@@ -79,6 +81,10 @@ pub struct ReportHeader {
     pub collector: String,
     #[serde(rename = "type")]
     pub report_type: ReportType,
+    /// Confidence classification for a SIGKILL-derived termination report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub termination_evidence: Option<TerminationEvidence>,
     /// ANR-specific: trigger description (e.g., `watchdog_5s`).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -105,6 +111,15 @@ impl ReportHeader {
             | ReportType::ExitFailure
             | ReportType::SignalFailure => (None, None),
         };
+        let termination_evidence = match (event.report_type, event.termination) {
+            (ReportType::Oom, Some(TerminationReason::Signaled { signal: 9, .. })) => {
+                Some(TerminationEvidence::PossibleOom)
+            }
+            (ReportType::SignalFailure, Some(TerminationReason::Signaled { signal: 9, .. })) => {
+                Some(TerminationEvidence::UnknownSigkill)
+            }
+            _ => None,
+        };
 
         Self {
             version: 1,
@@ -114,6 +129,7 @@ impl ReportHeader {
             process: event.process_name.clone(),
             collector: "crash_monitor".into(),
             report_type: event.report_type,
+            termination_evidence,
             trigger,
             hang_duration_ms,
         }

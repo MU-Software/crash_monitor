@@ -41,6 +41,7 @@ fn empty_report() -> CrashReport {
             process: "test".into(),
             collector: "test".into(),
             report_type: ReportType::Crash,
+            termination_evidence: None,
             trigger: None,
             hang_duration_ms: None,
         },

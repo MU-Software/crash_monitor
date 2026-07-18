@@ -94,7 +94,7 @@ fn header_summary(report: &CrashReport) -> String {
             )
         }
         ReportType::Oom => format!(
-            "OOM Report: process terminated by OOM  (PID {}, {})",
+            "Possible OOM Report: SIGKILL observed without confirming memory-pressure evidence  (PID {}, {})",
             h.pid, h.process
         ),
         ReportType::Snapshot => format!("Snapshot Report  (PID {}, {})", h.pid, h.process),
@@ -115,8 +115,13 @@ fn header_summary(report: &CrashReport) -> String {
                 runtime_ms,
             }) => {
                 let core = if core_dumped { ", core dumped" } else { "" };
+                let cause = if signal == 9 {
+                    ", cause unknown (SIGKILL is not proof of OOM)"
+                } else {
+                    ""
+                };
                 format!(
-                    "Signal Failure Report: signal {signal}{core} after {runtime_ms}ms  (PID {}, {})",
+                    "Signal Failure Report: signal {signal}{core}{cause} after {runtime_ms}ms  (PID {}, {})",
                     h.pid, h.process
                 )
             }
