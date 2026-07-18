@@ -796,11 +796,11 @@
 
 ### P2-17. E2E prerequisite와 helper 준비를 결정적으로 만든다
 
-- [ ] fixture, monitor binary, entitlement, signing identity, mock dialog가 없을 때 단순 return으로 pass 처리하지 않는다.
-- [ ] `E2E_REQUIRED=1`이면 prerequisite 부재를 실패시키고, 아니면 명시적인 skip 이유를 출력한다.
-- [ ] mock dialog가 없을 때 real UI를 띄워 최대 수분 block하지 않게 한다.
-- [ ] feedback integration test가 helper binary의 우연한 사전 build에 의존하지 않게 setup에서 build/locate한다.
-- [ ] 안내 메시지의 존재하지 않는 make target 이름을 실제 target으로 교체한다.
+- [x] fixture, monitor binary, entitlement, signing identity, mock dialog가 없을 때 단순 return으로 pass 처리하지 않는다.
+- [x] `E2E_REQUIRED=1`이면 prerequisite 부재를 실패시키고, 아니면 명시적인 skip 이유를 출력한다.
+- [x] mock dialog가 없을 때 real UI를 띄워 최대 수분 block하지 않게 한다.
+- [x] feedback integration test가 helper binary의 우연한 사전 build에 의존하지 않게 setup에서 build/locate한다.
+- [x] 안내 메시지의 존재하지 않는 make target 이름을 실제 target으로 교체한다.
 
 범위: `tests/e2e/e2e_tests.rs`, `tests/integration/cli_feedback_test.rs`, Makefile.
 

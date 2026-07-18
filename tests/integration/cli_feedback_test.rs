@@ -6,18 +6,40 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// Path to the built binary (debug profile, same workspace target dir).
 fn dialog_bin() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("crash_dialog_macos");
-    path
+    static DIALOG_BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIALOG_BIN
+        .get_or_init(|| {
+            let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let target = std::env::var_os("CARGO_TARGET_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| manifest.join("target"));
+            let path = target.join("debug/crash_dialog_macos");
+            if !path.exists() {
+                let status = Command::new(env!("CARGO"))
+                    .args([
+                        "build",
+                        "--package",
+                        "crash_dialog_macos",
+                        "--bin",
+                        "crash_dialog_macos",
+                    ])
+                    .current_dir(&manifest)
+                    .status()
+                    .expect("start crash_dialog_macos build");
+                assert!(status.success(), "build crash_dialog_macos helper");
+            }
+            assert!(
+                path.is_file(),
+                "dialog helper missing at {}",
+                path.display()
+            );
+            path
+        })
+        .clone()
 }
 
 fn base_cmd() -> Command {
