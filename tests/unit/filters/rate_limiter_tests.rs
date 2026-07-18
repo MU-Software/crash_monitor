@@ -1,5 +1,7 @@
 use crate::filters::RateLimiter;
 use crate::pipeline::{CrashEvent, Filter, Plugin, PluginContext, ReportType};
+use std::os::unix::fs::PermissionsExt;
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 fn dummy_event(report_type: ReportType) -> CrashEvent {
@@ -170,6 +172,83 @@ fn test_persistent_state_survives_monitor_restart_and_stays_bounded() {
     let restarted = RateLimiter::with_state_path(2, Duration::from_secs(60), state_path.clone());
     assert!(!restarted.should_process(&event, &context).unwrap());
     assert!(std::fs::metadata(state_path).unwrap().len() <= 128 * 1024);
+}
+
+#[test]
+fn test_separate_limiters_reload_shared_state_before_each_decision() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("rate-limit.json");
+    let event = dummy_event(ReportType::Crash);
+    let context = PluginContext::without_deadline();
+    let first = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path.clone());
+    let second = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path);
+
+    assert!(first.should_process(&event, &context).unwrap());
+    assert!(!second.should_process(&event, &context).unwrap());
+}
+
+#[test]
+fn test_concurrent_limiters_atomically_share_one_quota() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("rate-limit.json");
+    let barrier = Arc::new(Barrier::new(2));
+
+    let handles = (0..2)
+        .map(|_| {
+            let limiter =
+                RateLimiter::with_state_path(1, Duration::from_secs(60), state_path.clone());
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                limiter
+                    .should_process(
+                        &dummy_event(ReportType::Crash),
+                        &PluginContext::without_deadline(),
+                    )
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let accepted = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .filter(|accepted| *accepted)
+        .count();
+
+    assert_eq!(accepted, 1);
+}
+
+#[test]
+fn test_corrupt_persistent_state_is_quarantined_and_replaced() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("rate-limit.json");
+    std::fs::write(&state_path, b"not-json").unwrap();
+    std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let event = dummy_event(ReportType::Crash);
+    let limiter = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path.clone());
+    let error = limiter
+        .should_process(&event, &PluginContext::without_deadline())
+        .unwrap_err();
+    assert!(error.contains("quarantined and reset"));
+
+    let replacement: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(replacement["version"], 1);
+    assert!(std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".rate-limit-state.corrupt.")
+    }));
+
+    let restarted = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path);
+    assert!(
+        !restarted
+            .should_process(&event, &PluginContext::without_deadline())
+            .unwrap()
+    );
 }
 
 #[test]

@@ -444,6 +444,8 @@
 ### P1-32. rate limit과 duplicate 정책을 event 수명주기에 맞춘다
 
 - [x] monitor 재시작 뒤에도 crash-loop 보호가 필요하면 bounded persistent state를 사용한다.
+- [x] 여러 monitor instance가 같은 persistent quota를 원자적으로 갱신하도록 process-safe lock과 read-modify-write를 사용한다.
+- [x] 손상되거나 지원하지 않는 persistent state는 격리·재생성하고, 복구 사실을 진단으로 남긴다.
 - [x] duplicate key에 report type, severity, process/build identity를 포함해 snapshot/ANR이 fatal crash를 억제하지 않게 한다.
 - [x] usable frame이 없을 때 상수 empty fingerprint를 만들지 않거나 안전한 fallback을 사용한다.
 - [x] 같은 monitor에서 반복 가능한 snapshot/ANR의 duplicate가 timestamp를 계속 갱신해 suppression window를 무한 연장하지 않게 한다.
