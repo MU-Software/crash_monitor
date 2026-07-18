@@ -34,14 +34,19 @@ use crate::platform;
 static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn sigusr1_handler(_sig: libc::c_int) {
+    // Signal handlers must not leak errno changes into the interrupted code.
+    let saved_errno = nix::errno::Errno::last_raw();
     // SAFETY: libc::write is async-signal-safe (POSIX requirement).
     // No safe alternative exists for writes inside signal handlers.
     let fd = SIGNAL_PIPE_WRITE.load(Ordering::Acquire);
     if fd >= 0 {
         unsafe {
-            libc::write(fd, std::ptr::from_ref::<u8>(&1u8).cast::<libc::c_void>(), 1);
+            // The write end is non-blocking. EAGAIN means a wakeup is already
+            // pending in the full pipe, so the signal is safely coalesced.
+            let _ = libc::write(fd, std::ptr::from_ref::<u8>(&1u8).cast::<libc::c_void>(), 1);
         }
     }
+    nix::errno::Errno::set_raw(saved_errno);
 }
 
 /// Keep write end alive so it doesn't get closed by RAII.
@@ -54,24 +59,16 @@ static SIGNAL_PIPE_WRITE_FD: OnceLock<OwnedFd> = OnceLock::new();
 /// # Errors
 /// Returns an error if the pipe, `fcntl`, or `sigaction` calls fail.
 pub fn setup_signal_pipe() -> Result<OwnedFd, String> {
-    // nix::unistd::pipe: safe pipe creation returning OwnedFd (RAII)
-    let (read_fd, write_fd) = unistd::pipe().map_err(|e| format!("pipe failed: {e}"))?;
-
-    // Set read end to non-blocking via nix::fcntl (safe)
-    let flags =
-        fcntl(&read_fd, FcntlArg::F_GETFL).map_err(|e| format!("fcntl F_GETFL failed: {e}"))?;
-    let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-    fcntl(&read_fd, FcntlArg::F_SETFL(new_flags))
-        .map_err(|e| format!("fcntl F_SETFL failed: {e}"))?;
+    let (read_fd, write_fd) = nonblocking_cloexec_pipe("signal pipe")?;
 
     // Preserve write end first (RAII), then expose fd to signal handler.
     // Order matters: ownership must be taken before the atomic store,
     // otherwise the signal handler could see the fd before it's kept alive.
-    let write_raw_fd = write_fd.as_raw_fd();
-    let _ = SIGNAL_PIPE_WRITE_FD.set(write_fd);
-    SIGNAL_PIPE_WRITE.store(write_raw_fd, Ordering::Release);
+    let write_raw_fd = install_signal_write_owner(&SIGNAL_PIPE_WRITE_FD, write_fd)?;
 
-    // Install SIGUSR1 handler (AFTER fd is set up)
+    // Install SIGUSR1 handler only while the atomic remains unpublished. If
+    // sigaction fails, OnceLock still owns the descriptor and the handler can
+    // never observe a closed/reused fd number.
     let sa = SigAction::new(
         SigHandler::Handler(sigusr1_handler),
         SaFlags::SA_RESTART,
@@ -81,17 +78,31 @@ pub fn setup_signal_pipe() -> Result<OwnedFd, String> {
         signal::sigaction(signal::Signal::SIGUSR1, &sa)
             .map_err(|e| format!("sigaction failed: {e}"))?;
     }
+    SIGNAL_PIPE_WRITE.store(write_raw_fd, Ordering::Release);
 
     Ok(read_fd)
 }
 
+fn install_signal_write_owner(owner: &OnceLock<OwnedFd>, write_fd: OwnedFd) -> Result<i32, String> {
+    let raw_fd = write_fd.as_raw_fd();
+    owner
+        .set(write_fd)
+        .map_err(|_| "signal pipe is already initialized".to_string())?;
+    Ok(raw_fd)
+}
+
 /// Non-blocking drain of the signal pipe. Returns `true` if a snapshot request
 /// (at least one byte written by `sigusr1_handler`) was pending.
-fn drain_signal_pipe(read_fd: &OwnedFd) -> bool {
-    let mut buf = [0u8; 16];
-    match unistd::read(read_fd, &mut buf) {
-        Ok(n) => n > 0,
-        Err(_) => false, // EAGAIN (non-blocking, no data)
+fn drain_signal_pipe(read_fd: &OwnedFd) -> Result<bool, String> {
+    let mut pending = false;
+    let mut buf = [0u8; 64];
+    loop {
+        match unistd::read(read_fd, &mut buf) {
+            Ok(0) | Err(nix::errno::Errno::EAGAIN) => return Ok(pending),
+            Ok(_) => pending = true,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(format!("signal pipe drain failed: {error}")),
+        }
     }
 }
 
@@ -111,6 +122,11 @@ pub struct MacEventSource {
 impl MacEventSource {
     /// Assemble the event source from its three OS channels: the Mach exception
     /// receiver, the SIGUSR1 pipe read end, and the child PID for `waitpid`.
+    ///
+    /// # Errors
+    /// Returns an error when the exception wake pipe/thread or kqueue cannot be
+    /// created and registered.
+    #[allow(clippy::cast_sign_loss)] // owned FDs and a spawned child PID are non-negative
     pub fn new(
         exc_rx: mpsc::Receiver<platform::ExceptionListenerEvent>,
         signal_read_fd: OwnedFd,
@@ -189,7 +205,10 @@ fn nonblocking_cloexec_pipe(context: &str) -> Result<(OwnedFd, OwnedFd), String>
     let (read_fd, write_fd) =
         unistd::pipe().map_err(|error| format!("{context} failed: {error}"))?;
     for fd in [&read_fd, &write_fd] {
-        fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+        let descriptor_flags = fcntl(fd, FcntlArg::F_GETFD)
+            .map(FdFlag::from_bits_truncate)
+            .map_err(|error| format!("{context} F_GETFD failed: {error}"))?;
+        fcntl(fd, FcntlArg::F_SETFD(descriptor_flags | FdFlag::FD_CLOEXEC))
             .map_err(|error| format!("{context} CLOEXEC failed: {error}"))?;
         let flags = fcntl(fd, FcntlArg::F_GETFL)
             .map_err(|error| format!("{context} F_GETFL failed: {error}"))?;
@@ -322,14 +341,19 @@ impl EventSource for MacEventSource {
         }
 
         // Check for SIGUSR1 (manual snapshot) only while the child is alive.
-        if drain_signal_pipe(&self.signal_read_fd) {
-            eprintln!("[monitor] Manual snapshot requested (SIGUSR1)");
-            return Some(MonitorEvent::Snapshot);
+        match drain_signal_pipe(&self.signal_read_fd) {
+            Ok(true) => {
+                eprintln!("[monitor] Manual snapshot requested (SIGUSR1)");
+                return Some(MonitorEvent::Snapshot);
+            }
+            Ok(false) => {}
+            Err(message) => return Some(MonitorEvent::MonitorFailure { message }),
         }
 
         None
     }
 
+    #[allow(clippy::cast_sign_loss)] // OwnedFd always contains a non-negative descriptor
     fn wait_until(&mut self, deadline: Option<Instant>) -> Option<MonitorEvent> {
         if let Some(event) = self.poll() {
             return Some(event);

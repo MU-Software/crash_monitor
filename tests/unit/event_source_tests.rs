@@ -19,7 +19,7 @@ fn nonblocking_pipe() -> (OwnedFd, OwnedFd) {
 #[test]
 fn drain_reports_false_on_empty_pipe() {
     let (read_fd, _write_fd) = nonblocking_pipe();
-    assert!(!drain_signal_pipe(&read_fd));
+    assert!(!drain_signal_pipe(&read_fd).unwrap());
 }
 
 #[test]
@@ -28,10 +28,80 @@ fn drain_reports_true_after_write_then_false_again() {
 
     // A byte written (as sigusr1_handler would) is drained as a snapshot request.
     unistd::write(&write_fd, &[1u8]).unwrap();
-    assert!(drain_signal_pipe(&read_fd));
+    assert!(drain_signal_pipe(&read_fd).unwrap());
 
     // Once drained, the pipe is empty again.
-    assert!(!drain_signal_pipe(&read_fd));
+    assert!(!drain_signal_pipe(&read_fd).unwrap());
+}
+
+#[test]
+fn signal_pipe_is_nonblocking_and_close_on_exec_at_both_ends() {
+    let (read_fd, write_fd) = nonblocking_cloexec_pipe("test signal pipe").unwrap();
+
+    for fd in [&read_fd, &write_fd] {
+        let status = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL).unwrap());
+        let descriptor = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).unwrap());
+        assert!(status.contains(OFlag::O_NONBLOCK));
+        assert!(descriptor.contains(FdFlag::FD_CLOEXEC));
+    }
+}
+
+#[test]
+fn signal_burst_is_fully_drained_and_coalesced_to_one_request() {
+    let (read_fd, write_fd) = nonblocking_cloexec_pipe("test signal pipe").unwrap();
+    let burst = [1_u8; 512];
+    unistd::write(&write_fd, &burst).unwrap();
+
+    assert!(drain_signal_pipe(&read_fd).unwrap());
+    assert!(!drain_signal_pipe(&read_fd).unwrap());
+}
+
+#[test]
+fn full_signal_pipe_never_blocks_the_writer() {
+    let (_read_fd, write_fd) = nonblocking_cloexec_pipe("test signal pipe").unwrap();
+    let bytes = [1_u8; 1024];
+    loop {
+        match unistd::write(&write_fd, &bytes) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EAGAIN) => break,
+            Err(error) => panic!("unexpected pipe fill error: {error}"),
+        }
+    }
+}
+
+#[test]
+fn duplicate_signal_pipe_owner_is_reported_without_replacing_the_live_fd() {
+    let owner = OnceLock::new();
+    let (_first_read, first_write) = nonblocking_pipe();
+    let expected_fd = first_write.as_raw_fd();
+    assert_eq!(
+        install_signal_write_owner(&owner, first_write).unwrap(),
+        expected_fd
+    );
+
+    let (_second_read, second_write) = nonblocking_pipe();
+    assert!(install_signal_write_owner(&owner, second_write).is_err());
+    assert_eq!(owner.get().unwrap().as_raw_fd(), expected_fd);
+}
+
+#[test]
+fn signal_handler_restores_interrupted_errno() {
+    let previous = SIGNAL_PIPE_WRITE.swap(-1, Ordering::AcqRel);
+    nix::errno::Errno::EBUSY.set();
+    sigusr1_handler(libc::SIGUSR1);
+    assert_eq!(nix::errno::Errno::last(), nix::errno::Errno::EBUSY);
+    SIGNAL_PIPE_WRITE.store(previous, Ordering::Release);
+}
+
+#[test]
+fn signal_pipe_drain_propagates_non_retryable_errors() {
+    let write_only: OwnedFd = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/null")
+        .unwrap()
+        .into();
+    let error = drain_signal_pipe(&write_only).unwrap_err();
+    assert!(error.contains("EBADF"), "{error}");
 }
 
 #[test]

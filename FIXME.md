@@ -197,11 +197,11 @@
 
 ### P1-05. signal self-pipe를 async-signal-safe하게 관리한다
 
-- [ ] pipe 양 끝에 `CLOEXEC`를 설정하고 write end를 nonblocking으로 만든다.
-- [ ] handler 진입 시 `errno`를 저장하고 반환 전에 복원한다.
-- [ ] pipe full은 안전하게 coalesce하고 handler가 block하지 않게 한다.
-- [ ] drain은 `EAGAIN`까지 반복하고 `EINTR`는 재시도하며 다른 오류는 전파한다.
-- [ ] `OnceLock` 초기화 실패를 무시하지 않고 닫힌/reused FD가 publish되지 않게 한다.
+- [x] pipe 양 끝에 `CLOEXEC`를 설정하고 write end를 nonblocking으로 만든다.
+- [x] handler 진입 시 `errno`를 저장하고 반환 전에 복원한다.
+- [x] pipe full은 안전하게 coalesce하고 handler가 block하지 않게 한다.
+- [x] drain은 `EAGAIN`까지 반복하고 `EINTR`는 재시도하며 다른 오류는 전파한다.
+- [x] `OnceLock` 초기화 실패를 무시하지 않고 닫힌/reused FD가 publish되지 않게 한다.
 
 범위: `src/event_source.rs`, spawn file-descriptor policy.
 
