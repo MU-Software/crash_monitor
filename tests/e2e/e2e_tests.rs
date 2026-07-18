@@ -22,7 +22,7 @@ use std::mem::{offset_of, size_of};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const MONITOR_INTERNAL_FAILURE_EXIT_CODE: i32 = 70;
@@ -860,15 +860,29 @@ fn test_e2e_anr() {
         .spawn()
         .expect("failed to spawn crash_monitor");
 
-    // Wait for ANR detection (warmup=500ms + threshold=500ms + buffer)
-    std::thread::sleep(Duration::from_secs(3));
+    // Poll for the committed report instead of sleeping for a fixed interval:
+    // slower CI hosts may cross a three-second boundary after ANR detection
+    // but before the manifest-backed directory becomes visible.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let reports = loop {
+        let reports = find_reports(&archive, "anr");
+        if !reports.is_empty() {
+            break reports;
+        }
+        if let Some(status) = child.try_wait().expect("poll crash_monitor") {
+            panic!("crash_monitor exited before publishing an ANR report: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out waiting for an ANR report in {archive:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
 
     // Kill the monitor (which also kills the child)
     let _ = child.kill();
     let _ = child.wait();
-
-    let reports = find_reports(&archive, "anr");
-    assert!(!reports.is_empty(), "expected ANR report in {archive:?}");
 
     let json = read_report_json(&reports[0]);
     assert_eq!(json["header"]["type"], "anr");
