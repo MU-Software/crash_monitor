@@ -969,25 +969,18 @@ fn sanitize_publications(
 //  SharedMemory handle
 // ═══════════════════════════════════════════════════
 
-/// Owns a POSIX shared memory region. Platform creates via `platform::macos::ffi::shm`,
-/// unmaps+unlinks on drop (also in platform layer).
+/// High-level reader over a low-level mapping owner.
+///
+/// The platform FFI layer owns mmap/unmap/unlink. This type owns that handle
+/// and contains only schema validation, atomic observation, and snapshot logic.
 pub struct SharedMemory {
-    pub(crate) name: String,
-    pub(crate) base: *mut u8,
-    pub(crate) size: usize,
+    mapping: crate::platform::macos::ffi::shm::ShmMapping,
 }
-
-// SAFETY: payload access never creates ordinary borrowed references into the
-// mapping. Complete payloads are copied through bounded raw pointers while the
-// caller owns task suspension. References are formed only for aligned atomic
-// publication words and the readiness-gated heartbeat observation.
-unsafe impl Send for SharedMemory {}
-unsafe impl Sync for SharedMemory {}
 
 impl SharedMemory {
     fn load_atomic_u32_at(&self, offset: usize) -> Option<u32> {
         let end = offset.checked_add(size_of::<AtomicU32>())?;
-        if end > self.size || !offset.is_multiple_of(align_of::<AtomicU32>()) {
+        if end > self.mapping.len() || !offset.is_multiple_of(align_of::<AtomicU32>()) {
             return None;
         }
 
@@ -997,20 +990,20 @@ impl SharedMemory {
         // atomic ABI; this atomic reference is the intentional exception to
         // the no-borrowed-references rule for live shared memory.
         #[allow(clippy::cast_ptr_alignment)] // checked immediately above
-        let value = unsafe { &*self.base.add(offset).cast::<AtomicU32>() };
+        let value = unsafe { &*self.mapping.base_ptr().add(offset).cast::<AtomicU32>() };
         Some(value.load(Ordering::Acquire))
     }
 
     fn load_atomic_u64_at(&self, offset: usize) -> Option<u64> {
         let end = offset.checked_add(size_of::<AtomicU64>())?;
-        if end > self.size || !offset.is_multiple_of(align_of::<AtomicU64>()) {
+        if end > self.mapping.len() || !offset.is_multiple_of(align_of::<AtomicU64>()) {
             return None;
         }
 
         // SAFETY: see `load_atomic_u32_at`; this is the aligned 64-bit atomic
         // form used by the independently published heartbeat counter.
         #[allow(clippy::cast_ptr_alignment)] // checked immediately above
-        let value = unsafe { &*self.base.add(offset).cast::<AtomicU64>() };
+        let value = unsafe { &*self.mapping.base_ptr().add(offset).cast::<AtomicU64>() };
         Some(value.load(Ordering::Acquire))
     }
 
@@ -1033,7 +1026,7 @@ impl SharedMemory {
             // policy-disabled sections never call it.
             unsafe {
                 ptr::copy_nonoverlapping(
-                    self.base.cast_const().add(copied),
+                    self.mapping.base_ptr().cast_const().add(copied),
                     bytes.as_mut_ptr().add(copied),
                     chunk_len,
                 );
@@ -1148,12 +1141,13 @@ impl SharedMemory {
     /// Returns an error if the platform shm creation fails.
     pub fn create(monitor_pid: u32) -> Result<Self, String> {
         crate::platform::macos::ffi::shm::create_shared_memory(monitor_pid)
+            .map(|mapping| Self { mapping })
     }
 
     /// The shm name (e.g., `/crash_monitor_12345`) for passing via environment variable.
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        self.mapping.name()
     }
 
     /// Copy every payload section into immutable owned bytes before `deadline`.
@@ -1187,9 +1181,9 @@ impl SharedMemory {
         deadline: Option<Instant>,
         policy: ShmSnapshotPolicy,
     ) -> Result<OwnedShmSnapshot, ShmSnapshotError> {
-        if self.size < SHM_TOTAL_SIZE {
+        if self.mapping.len() < SHM_TOTAL_SIZE {
             return Err(ShmSnapshotError::MappingTooSmall {
-                mapped: self.size,
+                mapped: self.mapping.len(),
                 required: SHM_TOTAL_SIZE,
             });
         }
@@ -1292,7 +1286,12 @@ impl SharedMemory {
     /// Caller must not write out of bounds or create data races.
     #[must_use]
     pub fn base_ptr(&self) -> *mut u8 {
-        self.base
+        self.mapping.base_ptr()
+    }
+
+    #[cfg(test)]
+    fn set_mapped_size_for_test(&mut self, size: usize) {
+        self.mapping.set_len_for_test(size);
     }
 }
 

@@ -287,9 +287,9 @@
 
 ### P1-15. SHM mapping ownership의 의존 방향을 단방향으로 만든다
 
-- [ ] low-level mapping handle/syscall과 high-level `SharedMemory` reader를 분리한다.
-- [ ] `shm`이 platform FFI를 사용하면서 platform FFI가 다시 `SharedMemory`의 `Drop`을 구현하는 순환을 제거한다.
-- [ ] mapping close/unlink 소유자와 실패 시 정리 순서를 타입으로 표현한다.
+- [x] low-level mapping handle/syscall과 high-level `SharedMemory` reader를 분리한다.
+- [x] `shm`이 platform FFI를 사용하면서 platform FFI가 다시 `SharedMemory`의 `Drop`을 구현하는 순환을 제거한다.
+- [x] mapping close/unlink 소유자와 실패 시 정리 순서를 타입으로 표현한다.
 
 범위: `src/shm/reader.rs`, `src/platform/macos/ffi/shm.rs`.
 

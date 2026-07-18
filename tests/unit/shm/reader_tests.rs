@@ -266,8 +266,8 @@ fn test_snapshot_rejects_elapsed_deadline() {
 #[test]
 fn test_snapshot_rejects_short_mapping_without_pointer_arithmetic() {
     let mut shm = SharedMemory::create(unique_pid()).expect("shm create");
-    let actual_size = shm.size;
-    shm.size = FOOTER_OFFSET;
+    let actual_size = shm.mapping.len();
+    shm.set_mapped_size_for_test(FOOTER_OFFSET);
     assert_eq!(
         shm.snapshot_owned_until(None).unwrap_err(),
         ShmSnapshotError::MappingTooSmall {
@@ -276,7 +276,7 @@ fn test_snapshot_rejects_short_mapping_without_pointer_arithmetic() {
         }
     );
     // Restore the true mmap length before Drop calls munmap.
-    shm.size = actual_size;
+    shm.set_mapped_size_for_test(actual_size);
 }
 
 #[test]

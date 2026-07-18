@@ -5,7 +5,6 @@
 //!
 //! **Dependency rule**: Code in this module may only import from:
 //! - `crate::platform::macos::*` (parent: testable types and pure functions)
-//! - `crate::shm::*` (shared memory types — needed by ffi/shm.rs)
 //! - `super::*` (sibling FFI modules within ffi/)
 //! - External crates (`std`, `mach2`, `nix`, `libc`)
 //!

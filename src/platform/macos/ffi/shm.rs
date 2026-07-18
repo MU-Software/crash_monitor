@@ -8,18 +8,56 @@ use std::ptr;
 
 use nix::libc;
 
-use crate::shm::SharedMemory;
 use crate::shm::types::{
     CRUMB_MAX_THREADS, CRUMB_RING_CAPACITY, FOOTER_OFFSET, SCREENSHOT_HEIGHT, SCREENSHOT_SLOTS,
     SCREENSHOT_WIDTH, SHM_CANARY, SHM_MAGIC, SHM_PRODUCER_NOT_READY, SHM_TOTAL_SIZE, SHM_VERSION,
     ShmHeader,
 };
 
+/// Low-level owner of one mapped POSIX shared-memory object.
+///
+/// The mapping is unmapped before its name is unlinked. High-level readers
+/// borrow only its pointer/length accessors and never participate in syscall
+/// cleanup.
+pub struct ShmMapping {
+    name: String,
+    base: *mut u8,
+    size: usize,
+}
+
+// SAFETY: ownership may move between threads. High-level access is restricted
+// to the atomic publication API or an owned snapshot while the producer task
+// is suspended.
+unsafe impl Send for ShmMapping {}
+unsafe impl Sync for ShmMapping {}
+
+impl ShmMapping {
+    #[must_use]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub(crate) fn base_ptr(&self) -> *mut u8 {
+        self.base
+    }
+
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.size
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_len_for_test(&mut self, size: usize) {
+        self.size = size;
+    }
+}
+
 /// Create a new POSIX shared memory region for the given monitor PID.
 ///
 /// # Errors
 /// Returns an error if `shm_open`, `ftruncate`, or `mmap` fails.
-pub fn create_shared_memory(monitor_pid: u32) -> Result<SharedMemory, String> {
+pub fn create_shared_memory(monitor_pid: u32) -> Result<ShmMapping, String> {
     let name = format!("/crash_monitor_{monitor_pid}");
     let c_name = CString::new(name.as_str()).map_err(|e| format!("CString::new failed: {e}"))?;
 
@@ -117,14 +155,14 @@ pub fn create_shared_memory(monitor_pid: u32) -> Result<SharedMemory, String> {
     let size_mb = SHM_TOTAL_SIZE as f64 / (1024.0 * 1024.0);
     eprintln!("[monitor] Shared memory created: {name} ({SHM_TOTAL_SIZE} bytes, {size_mb:.1} MB)");
 
-    Ok(SharedMemory {
+    Ok(ShmMapping {
         name,
         base,
         size: SHM_TOTAL_SIZE,
     })
 }
 
-impl Drop for SharedMemory {
+impl Drop for ShmMapping {
     fn drop(&mut self) {
         // SAFETY: munmap + shm_unlink are safe cleanup operations.
         unsafe {
