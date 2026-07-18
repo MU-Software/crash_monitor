@@ -824,9 +824,9 @@
 
 ### P2-20. event-loop ANR wiring을 결정론적으로 통합 테스트한다
 
-- [ ] injectable clock/짧은 ANR config/SHM fixture로 elapsed→heartbeat read→ANR event 경로를 검증한다.
-- [ ] monitor가 소비한 시간을 제외하는 accounting을 단언한다.
-- [ ] `ChildGone`/unknown status와 clean exit 0을 구분하는 경로도 포함한다.
+- [x] injectable clock/짧은 ANR config/SHM fixture로 elapsed→heartbeat read→ANR event 경로를 검증한다.
+- [x] monitor가 소비한 시간을 제외하는 accounting을 단언한다.
+- [x] `ChildGone`/unknown status와 clean exit 0을 구분하는 경로도 포함한다.
 
 범위: `tests/integration/event_loop_test.rs`, watchdog tests.
 
