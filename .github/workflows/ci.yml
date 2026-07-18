@@ -70,13 +70,23 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy,rustfmt
-      - name: Enable Developer Tools access
+      - name: Allow noninteractive task port access
         run: |
-          sudo /usr/sbin/DevToolsSecurity -enable
-          sudo /usr/sbin/dseditgroup -o edit -a "$USER" -t user _developer
-          /usr/bin/dsmemberutil checkmembership -U "$USER" -G _developer
+          taskport_policy="$RUNNER_TEMP/system.privilege.taskport.plist"
+          /usr/bin/security authorizationdb read \
+            system.privilege.taskport > "$taskport_policy"
+          sudo /usr/bin/security authorizationdb write \
+            system.privilege.taskport allow
       - name: Run required signed E2E gate
         env:
           E2E_REQUIRED: "1"
           SIGN_IDENTITY: ${{ secrets.CRASH_MONITOR_SIGN_IDENTITY }}
         run: make e2e-required
+      - name: Restore task port authorization policy
+        if: always()
+        run: |
+          taskport_policy="$RUNNER_TEMP/system.privilege.taskport.plist"
+          if [[ -s "$taskport_policy" ]]; then
+            /bin/cat "$taskport_policy" | sudo /usr/bin/security \
+              authorizationdb write system.privilege.taskport
+          fi
