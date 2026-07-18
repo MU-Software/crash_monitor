@@ -52,6 +52,18 @@ struct MockFilter {
     allow: bool,
 }
 
+#[test]
+fn pipeline_builder_always_validates_the_completed_registry() {
+    let mut builder = PipelineBuilder::new(Arc::new(MockPlatform::default()));
+    builder
+        .add_filter(Box::new(MockFilter { allow: true }))
+        .add_filter(Box::new(MockFilter { allow: true }));
+    assert!(matches!(
+        builder.build(),
+        Err(crate::config::ConfigValidationError::DuplicatePluginId { .. })
+    ));
+}
+
 impl Plugin for MockFilter {
     fn name(&self) -> &'static str {
         "MockFilter"

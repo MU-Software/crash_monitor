@@ -1,6 +1,7 @@
 //! Unit tests for `report::load_report` — plain JSON and ZIP archive loading.
 
 use super::*;
+use crate::pipeline::{CollectedData, Diagnostics};
 use std::io::{Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
@@ -168,7 +169,12 @@ fn build_report_preserves_exit_termination() {
         hang_duration_ms: None,
     };
 
-    let report = build_report(&event, &CollectedData::default(), &Diagnostics::new());
+    let data = CollectedData::default();
+    let report = build_report(
+        &event,
+        crate::preprocessors::report_formatter::format(&data, &Diagnostics::new()),
+        data.fingerprint.clone(),
+    );
     assert_eq!(report.header.report_id.as_ref(), Some(&event.report_id));
     assert_eq!(report.header.report_type, ReportType::ExitFailure);
     assert_eq!(report.termination, event.termination);
@@ -201,7 +207,12 @@ fn build_report_preserves_the_exact_mach_code_array() {
         hang_duration_ms: None,
     };
 
-    let report = build_report(&event, &CollectedData::default(), &Diagnostics::new());
+    let data = CollectedData::default();
+    let report = build_report(
+        &event,
+        crate::preprocessors::report_formatter::format(&data, &Diagnostics::new()),
+        data.fingerprint.clone(),
+    );
     let exception = report.exception.expect("Mach crash exception");
     assert_eq!(
         exception.raw_codes,
@@ -234,7 +245,12 @@ fn raw_mach_codes_override_inconsistent_legacy_scalar_projections() {
         hang_duration_ms: None,
     };
 
-    let report = build_report(&event, &CollectedData::default(), &Diagnostics::new());
+    let data = CollectedData::default();
+    let report = build_report(
+        &event,
+        crate::preprocessors::report_formatter::format(&data, &Diagnostics::new()),
+        data.fingerprint.clone(),
+    );
     let exception = report.exception.expect("Mach crash exception");
 
     assert_eq!(exception.raw_codes, vec!["0x1", "0xbeef"]);

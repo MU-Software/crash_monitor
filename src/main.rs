@@ -1014,7 +1014,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         };
     }
 
-    let task_control_health = pl.platform.supervisor_health();
+    let task_control_health = pl.platform().supervisor_health();
     let task_control_containment = task_control_health
         .task_control_failures
         .iter()

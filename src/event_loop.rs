@@ -4,7 +4,6 @@
 //! and handle exit conditions. ANR detection is integrated directly via the
 //! pure `WatchdogState` state machine (no dedicated thread).
 
-use mach2::port::mach_port_t;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -90,17 +89,17 @@ pub struct AnrConfig {
 /// two values at an event-loop call site (both are integer aliases at the FFI
 /// boundary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MonitoredTask(mach_port_t);
+pub struct MonitoredTask(crate::platform::TaskHandle);
 
 impl MonitoredTask {
     #[must_use]
-    pub const fn new(raw: mach_port_t) -> Self {
-        Self(raw)
+    pub const fn new(raw: u32) -> Self {
+        Self(crate::platform::TaskHandle::from_raw(raw))
     }
 
     #[must_use]
-    pub const fn raw(self) -> mach_port_t {
-        self.0
+    pub(crate) const fn raw(self) -> u32 {
+        self.0.into_mach_port()
     }
 }
 
@@ -374,7 +373,7 @@ pub fn handle_child_termination(
 
 fn task_control_monitor_failure(pipeline: &Pipeline) -> Option<String> {
     pipeline
-        .platform
+        .platform()
         .supervisor_health()
         .task_control_failures
         .into_iter()

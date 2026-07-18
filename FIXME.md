@@ -652,11 +652,11 @@
 
 ### P2-02. pipeline layering과 composition root를 분리한다
 
-- [ ] report model이 formatter 구현을 import하고 formatter가 report model을 다시 import하는 cycle을 제거한다.
-- [ ] report model, formatting, orchestration, default plugin assembly를 별도 module로 나눈다.
-- [ ] platform-neutral trait/event loop에서 `mach_port_t`를 제거하고 opaque `TaskHandle`/capture context를 사용한다.
-- [ ] `Pipeline` public mutable field를 private immutable state와 validated builder로 바꾼다.
-- [ ] builder가 항상 dependency/order validation을 실행하게 한다.
+- [x] report model이 formatter 구현을 import하고 formatter가 report model을 다시 import하는 cycle을 제거한다.
+- [x] report model, formatting, orchestration, default plugin assembly를 별도 module로 나눈다.
+- [x] platform-neutral trait/event loop에서 `mach_port_t`를 제거하고 opaque `TaskHandle`/capture context를 사용한다.
+- [x] `Pipeline` public mutable field를 private immutable state와 validated builder로 바꾼다.
+- [x] builder가 항상 dependency/order validation을 실행하게 한다.
 
 범위: `src/pipeline`, `src/preprocessors/report_formatter.rs`, `src/event_loop.rs`.
 
