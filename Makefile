@@ -57,8 +57,8 @@ e2e-build:
 
 # ── Lint ──────────────────────────────────────────────────────
 lint:
-	cargo fmt -- --check
-	cargo clippy -- -D warnings -A dead_code
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # ── E2E child (compiled from the shm schema alone) ────────────
 $(E2E_CHILD): $(E2E_SRC) schema/crash_shm.h schema/crash_shm_atomic.h

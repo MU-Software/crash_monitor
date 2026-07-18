@@ -57,14 +57,16 @@ pub fn data_dir_path() -> Result<PathBuf, String> {
                 .tempdir()
                 .expect("create isolated crash-monitor test data directory")
         });
-        return Ok(dir.path().to_path_buf());
+        Ok(dir.path().to_path_buf())
     }
 
     #[cfg(not(test))]
-    data_dir_path_from_environment(
-        std::env::var_os(DATA_DIR_OVERRIDE_ENV),
-        std::env::var_os("HOME"),
-    )
+    {
+        data_dir_path_from_environment(
+            std::env::var_os(DATA_DIR_OVERRIDE_ENV),
+            std::env::var_os("HOME"),
+        )
+    }
 }
 
 fn data_dir_path_from_environment(

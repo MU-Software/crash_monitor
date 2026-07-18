@@ -1,6 +1,14 @@
 [workspace]
 members = [".", "crates/crash_dialog_macos", "crates/crash_dialog_mock"]
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+
 [package]
 name = "crash_monitor"
 version = "0.1.0"
@@ -15,8 +23,8 @@ path = "src/lib.rs"
 name = "crash_monitor"
 path = "src/main.rs"
 
-[lints.rust]
-unsafe_op_in_unsafe_fn = "warn"
+[lints]
+workspace = true
 
 # CRITICAL: Do NOT set panic = "abort" in any profile.
 # Cooperative plugin panic isolation depends on catch_unwind (panic = "unwind").
@@ -25,12 +33,6 @@ panic = "unwind"
 
 [profile.release]
 panic = "unwind"
-
-[lints.clippy]
-correctness = { level = "deny", priority = -1 }
-suspicious = { level = "warn", priority = -1 }
-style = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
 
 [features]
 test-support = []

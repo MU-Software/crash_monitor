@@ -1026,11 +1026,7 @@ fn breadcrumb_wrap_order_skips_zero_timestamp_and_bounds_huge_index() {
                 message,
             );
         }
-        write_val::<u32>(
-            base,
-            ring + std::mem::offset_of!(SutCrumbRing, count),
-            3,
-        );
+        write_val::<u32>(base, ring + std::mem::offset_of!(SutCrumbRing, count), 3);
         write_val::<u32>(
             base,
             ring + std::mem::offset_of!(SutCrumbRing, write_idx),

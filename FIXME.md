@@ -912,11 +912,11 @@
 
 ### P2-30. lint gate를 workspace 전체에 적용한다
 
-- [ ] Clippy를 `--workspace --all-targets --all-features`와 warning deny 정책으로 실행한다.
-- [ ] workspace 공통 lint에서 `unsafe_op_in_unsafe_fn`을 실제 `deny`로 올리고 member가 상속하는지 검증한다.
-- [ ] global dead-code allow를 제거하고 필요한 예외만 좁게 둔다.
-- [ ] format은 workspace member까지 검사한다는 실제 동작을 반영해 명령을 명확히 유지한다.
-- [ ] local Make target과 CI gate가 같은 범위를 검사하게 한다.
+- [x] Clippy를 `--workspace --all-targets --all-features`와 warning deny 정책으로 실행한다.
+- [x] workspace 공통 lint에서 `unsafe_op_in_unsafe_fn`을 실제 `deny`로 올리고 member가 상속하는지 검증한다.
+- [x] global dead-code allow를 제거하고 필요한 예외만 좁게 둔다.
+- [x] format은 workspace member까지 검사한다는 실제 동작을 반영해 명령을 명확히 유지한다.
+- [x] local Make target과 CI gate가 같은 범위를 검사하게 한다.
 
 범위: `Makefile`, CI, workspace lints.
 
