@@ -319,3 +319,16 @@ fn test_format_duration() {
     assert_eq!(format_duration(3661), "1h 01m");
     assert_eq!(format_duration(9240), "2h 34m");
 }
+
+#[test]
+fn process_name_is_terminal_safe_in_header_without_mutating_report() {
+    let mut value: serde_json::Value = serde_json::from_str(&minimal_report_json()).unwrap();
+    value["header"]["process"] = serde_json::json!("app\u{1b}[2J\nforged");
+    let report: CrashReport = serde_json::from_value(value).unwrap();
+
+    let rendered = header_summary(&report);
+
+    assert!(rendered.contains("app\\x1b[2J\\nforged"));
+    assert!(!rendered.chars().any(char::is_control));
+    assert_eq!(report.header.process, "app\u{1b}[2J\nforged");
+}

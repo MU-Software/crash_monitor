@@ -1,6 +1,7 @@
 //! `crash_monitor stack <report.json> --thread <N>` — hex dump of stack memory.
 
 use crate::pipeline::report;
+use crate::utils::terminal::escape_terminal;
 use std::path::Path;
 
 /// Maximum decoded stack size before truncation (16 MB).
@@ -29,7 +30,7 @@ pub fn run(report_path: &str, thread_index: u32) -> i32 {
     let Some(ref stack) = thread.stack_memory else {
         println!(
             "No stack memory captured for thread {thread_index} ({})",
-            thread.name.as_deref().unwrap_or("unnamed")
+            escape_terminal(thread.name.as_deref().unwrap_or("unnamed"))
         );
         return 0;
     };
@@ -51,7 +52,8 @@ pub fn run(report_path: &str, thread_index: u32) -> i32 {
 
     println!(
         "Stack memory for thread {thread_index} (SP: {}, {} bytes)",
-        stack.sp, stack.size
+        escape_terminal(&stack.sp),
+        stack.size
     );
     println!();
     print_hexdump(display_bytes);

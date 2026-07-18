@@ -6,6 +6,7 @@ use crate::pipeline::{
     Notifier, Plugin, PluginContext, PluginExecution, PluginRunResult, Priority,
     run_plugin_subprocess,
 };
+use crate::utils::terminal::escape_terminal;
 use std::path::Path;
 use std::process::Command;
 
@@ -57,7 +58,7 @@ impl Notifier for SystemNotification {
             PluginRunResult::Completed(output) => Err(format!(
                 "osascript exited with {}: {}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                escape_terminal(String::from_utf8_lossy(&output.stderr).trim())
             )),
             PluginRunResult::TimedOut => Err("osascript timed out".to_string()),
             PluginRunResult::Failed(error) => Err(error),

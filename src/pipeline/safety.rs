@@ -350,7 +350,10 @@ pub fn run_plugin_cooperative<T>(
     match result {
         Ok(Ok(value)) => PluginRunResult::Completed(value),
         Ok(Err(error)) => {
-            eprintln!("[monitor] plugin {name}: {error}");
+            eprintln!(
+                "[monitor] plugin {name}: {}",
+                crate::utils::terminal::escape_terminal(&error)
+            );
             PluginRunResult::Failed(error)
         }
         Err(payload) => {

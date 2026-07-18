@@ -440,9 +440,9 @@ impl PreProcessor for AttachmentCopier {
                 Err(error) => {
                     eprintln!(
                         "[monitor] AttachmentCopier: copy rejected: {} → {} (label={}): {error}",
-                        att.path,
+                        crate::utils::terminal::escape_terminal(&att.path),
                         dest.display(),
-                        att.label
+                        crate::utils::terminal::escape_terminal(&att.label)
                     );
                     continue;
                 }

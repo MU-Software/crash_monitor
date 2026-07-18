@@ -613,10 +613,10 @@
 
 ### P1-49. report-controlled 문자열을 terminal-safe하게 출력한다
 
-- [ ] analyze, stack, symbolicate, log/notification 경로에서 ESC/OSC와 비출력 control character를 escape한다.
-- [ ] JSON serialization 자체의 escaping과 terminal rendering을 구분한다.
-- [ ] serde가 안전하게 escape한 JSON 값을 terminal 안전성만을 이유로 삭제하거나 의미 변경하지 않는다.
-- [ ] annotation, thread name, attachment label, process name에 ANSI injection 회귀 테스트를 추가한다.
+- [x] analyze, stack, symbolicate, log/notification 경로에서 ESC/OSC와 비출력 control character를 escape한다.
+- [x] JSON serialization 자체의 escaping과 terminal rendering을 구분한다.
+- [x] serde가 안전하게 escape한 JSON 값을 terminal 안전성만을 이유로 삭제하거나 의미 변경하지 않는다.
+- [x] annotation, thread name, attachment label, process name에 ANSI injection 회귀 테스트를 추가한다.
 
 범위: `src/cli`, logging/notifier renderers.
 

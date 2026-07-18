@@ -2,6 +2,7 @@
 
 use crate::pipeline::report::{self, CrashReport};
 use crate::pipeline::{ReportType, TerminationReason};
+use crate::utils::terminal::escape_terminal;
 use std::path::Path;
 
 /// Maximum number of backtrace frames to display.
@@ -34,19 +35,19 @@ fn print_summary(report: &CrashReport) {
     // 3. Session
     if let Some(ref session) = report.session {
         let duration = format_duration(session.duration_s);
-        println!("Session: {duration} (id: {})", session.id);
+        println!("Session: {duration} (id: {})", escape_terminal(&session.id));
     }
 
     // 4. Fingerprint
     if let Some(ref fp) = report.fingerprint {
-        println!("Fingerprint: {fp}");
+        println!("Fingerprint: {}", escape_terminal(fp));
     }
 
     // 5. User feedback
     if let Some(ref fb) = report.user_feedback
         && let Some(comment) = fb.get("comment").and_then(serde_json::Value::as_str)
     {
-        println!("User feedback: {comment}");
+        println!("User feedback: {}", escape_terminal(comment));
     }
 
     println!();
@@ -66,11 +67,12 @@ fn print_summary(report: &CrashReport) {
 
 fn print_header(report: &CrashReport) {
     println!("{}", header_summary(report));
-    println!("Time: {}", report.header.timestamp);
+    println!("Time: {}", escape_terminal(&report.header.timestamp));
 }
 
 fn header_summary(report: &CrashReport) -> String {
     let h = &report.header;
+    let process = escape_terminal(&h.process);
     match h.report_type {
         ReportType::Crash => {
             let signal = report
@@ -84,30 +86,30 @@ fn header_summary(report: &CrashReport) -> String {
                 .unwrap_or_else(|| "not applicable".into());
             format!(
                 "Crash Report: {signal} at {fault}  (PID {}, {})",
-                h.pid, h.process
+                h.pid, process
             )
         }
         ReportType::Anr => {
             let dur = h.hang_duration_ms.unwrap_or(0);
             format!(
                 "ANR Report: unresponsive for {dur}ms  (PID {}, {})",
-                h.pid, h.process
+                h.pid, process
             )
         }
         ReportType::Oom => format!(
             "Possible OOM Report: SIGKILL observed without confirming memory-pressure evidence  (PID {}, {})",
-            h.pid, h.process
+            h.pid, process
         ),
-        ReportType::Snapshot => format!("Snapshot Report  (PID {}, {})", h.pid, h.process),
+        ReportType::Snapshot => format!("Snapshot Report  (PID {}, {process})", h.pid),
         ReportType::ExitFailure => match report.termination {
             Some(TerminationReason::Exited {
                 exit_code,
                 runtime_ms,
             }) => format!(
                 "Exit Failure Report: exit code {exit_code} after {runtime_ms}ms  (PID {}, {})",
-                h.pid, h.process
+                h.pid, process
             ),
-            _ => format!("Exit Failure Report  (PID {}, {})", h.pid, h.process),
+            _ => format!("Exit Failure Report  (PID {}, {process})", h.pid),
         },
         ReportType::SignalFailure => match report.termination {
             Some(TerminationReason::Signaled {
@@ -123,10 +125,10 @@ fn header_summary(report: &CrashReport) -> String {
                 };
                 format!(
                     "Signal Failure Report: signal {signal}{core}{cause} after {runtime_ms}ms  (PID {}, {})",
-                    h.pid, h.process
+                    h.pid, process
                 )
             }
-            _ => format!("Signal Failure Report  (PID {}, {})", h.pid, h.process),
+            _ => format!("Signal Failure Report  (PID {}, {process})", h.pid),
         },
     }
 }
@@ -142,7 +144,8 @@ fn print_crash_context(report: &CrashReport) {
             .session_start_ns
             .map_or_else(|| "unknown".to_string(), |value| value.to_string());
         println!(
-            "Producer session: {session_id} (start_ns: {start}, heartbeat: {})",
+            "Producer session: {} (start_ns: {start}, heartbeat: {})",
+            escape_terminal(session_id),
             ctx.heartbeat_counter
         );
     } else {
@@ -155,7 +158,7 @@ fn print_crash_context(report: &CrashReport) {
     let joined = ctx
         .annotations
         .iter()
-        .map(|(k, v)| format!("{k}={v}"))
+        .map(|(k, v)| format!("{}={}", escape_terminal(k), escape_terminal(v)))
         .collect::<Vec<_>>()
         .join(" | ");
     println!("Context: {joined}");
@@ -166,12 +169,12 @@ fn print_exception(report: &CrashReport) {
         return;
     };
     println!("Exception:");
-    println!("  Type:          {}", exc.exc_type);
-    println!("  Code:          {}", exc.code);
-    println!("  Subcode:       {}", exc.subcode);
-    println!("  Signal:        {}", exc.signal);
+    println!("  Type:          {}", escape_terminal(&exc.exc_type));
+    println!("  Code:          {}", escape_terminal(&exc.code));
+    println!("  Subcode:       {}", escape_terminal(&exc.subcode));
+    println!("  Signal:        {}", escape_terminal(&exc.signal));
     if let Some(fault_address) = &exc.fault_address {
-        println!("  Fault address: {fault_address}");
+        println!("  Fault address: {}", escape_terminal(fault_address));
     }
     if exc.signal_is_approximate {
         println!("  Signal mapping: approximate");
@@ -193,7 +196,7 @@ fn print_backtrace(report: &CrashReport) {
     };
 
     let label = if thread.crashed { " [CRASHED]" } else { "" };
-    let name = thread.name.as_deref().unwrap_or("unnamed");
+    let name = escape_terminal(thread.name.as_deref().unwrap_or("unnamed"));
     println!("Thread {} ({name}){label}:", thread.index);
 
     if thread.backtrace.is_empty() {
@@ -201,20 +204,20 @@ fn print_backtrace(report: &CrashReport) {
     }
 
     for (i, frame) in thread.backtrace.iter().take(MAX_FRAMES).enumerate() {
-        let sym = frame.symbol.as_deref().unwrap_or(&frame.address);
+        let sym = escape_terminal(frame.symbol.as_deref().unwrap_or(&frame.address));
         let offset_str = frame
             .offset
             .as_deref()
-            .map_or(String::new(), |o| format!(" + {o}"));
+            .map_or(String::new(), |o| format!(" + {}", escape_terminal(o)));
         let image_str = frame.image.as_deref().map_or(String::new(), |img| {
             // Show only the filename, not the full path
             let short = img.rsplit('/').next().unwrap_or(img);
-            format!("  [{short}]")
+            format!("  [{}]", escape_terminal(short))
         });
         let source_str = match (&frame.file, frame.line) {
             (Some(f), Some(l)) => {
                 let short = f.rsplit('/').next().unwrap_or(f);
-                format!("  {short}:{l}")
+                format!("  {}:{l}", escape_terminal(short))
             }
             _ => String::new(),
         };
@@ -246,22 +249,28 @@ fn print_breadcrumbs(report: &CrashReport) {
     // Show last N breadcrumbs
     let start = crumbs.len().saturating_sub(MAX_BREADCRUMBS);
     for crumb in crumbs.iter().skip(start) {
-        let cat = crumb
-            .get("cat")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("?");
-        let file = crumb
-            .get("file")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        let cat = escape_terminal(
+            crumb
+                .get("cat")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?"),
+        );
+        let file = escape_terminal(
+            crumb
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        );
         let line = crumb
             .get("line")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        let msg = crumb
-            .get("msg")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        let msg = escape_terminal(
+            crumb
+                .get("msg")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        );
         if file.is_empty() {
             println!("  [{cat:<8}] {msg}");
         } else {

@@ -5,6 +5,7 @@
 
 use crate::pipeline::report::{self, CrashReport, LoadedImageReport};
 use crate::utils::paths::{PRIVATE_FILE_MODE, open_trusted_directory, validate_private_file};
+use crate::utils::terminal::escape_terminal;
 use nix::fcntl::{OFlag, openat, renameat};
 use nix::sys::stat::Mode;
 use std::fmt::Write as _;
@@ -557,26 +558,29 @@ impl Drop for PendingOutput {
 fn print_symbolicated_backtrace(report: &CrashReport) {
     for thread in &report.threads {
         let label = if thread.crashed { " [CRASHED]" } else { "" };
-        let name = thread.name.as_deref().unwrap_or("unnamed");
+        let name = escape_terminal(thread.name.as_deref().unwrap_or("unnamed"));
         println!("Thread {} ({name}){label}:", thread.index);
 
         for (i, frame) in thread.backtrace.iter().enumerate() {
-            let sym = frame.symbol.as_deref().unwrap_or("???");
+            let sym = escape_terminal(frame.symbol.as_deref().unwrap_or("???"));
             let offset_str = frame
                 .offset
                 .as_deref()
-                .map_or(String::new(), |o| format!(" + {o}"));
+                .map_or(String::new(), |o| format!(" + {}", escape_terminal(o)));
             let source = match (&frame.file, frame.line) {
                 (Some(f), Some(l)) => {
                     let short = f.rsplit('/').next().unwrap_or(f);
                     match frame.column {
-                        Some(c) if c > 0 => format!("  {short}:{l}:{c}"),
-                        _ => format!("  {short}:{l}"),
+                        Some(c) if c > 0 => format!("  {}:{l}:{c}", escape_terminal(short)),
+                        _ => format!("  {}:{l}", escape_terminal(short)),
                     }
                 }
                 _ => String::new(),
             };
-            println!("  #{i:<3} {}{sym}{offset_str}{source}", frame.address);
+            println!(
+                "  #{i:<3} {}{sym}{offset_str}{source}",
+                escape_terminal(&frame.address)
+            );
         }
         println!();
     }

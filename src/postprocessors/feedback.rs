@@ -139,7 +139,7 @@ impl PostProcessor for FeedbackPostProcessor {
             return Err(format!(
                 "FeedbackDialog exited with {}: {}",
                 output.status,
-                stderr.trim()
+                crate::utils::terminal::escape_terminal(stderr.trim())
             ));
         }
 
