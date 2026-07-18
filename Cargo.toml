@@ -63,6 +63,8 @@ panic = "unwind"
 
 [profile.release]
 panic = "unwind"
+# Preserve line tables so archived dSYMs can resolve release crash addresses.
+debug = 1
 
 [features]
 test-support = []
