@@ -125,6 +125,63 @@ fn test_build_slide_map_no_slide() {
     assert_eq!(slides[0].slide, 0); // defaults to 0
 }
 
+fn thin_macho_identity(cpu: u32, uuid: [u8; 16]) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 56];
+    bytes[0..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&cpu.to_le_bytes());
+    bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+    bytes[20..24].copy_from_slice(&24_u32.to_le_bytes());
+    bytes[32..36].copy_from_slice(&0x1b_u32.to_le_bytes());
+    bytes[36..40].copy_from_slice(&24_u32.to_le_bytes());
+    bytes[40..56].copy_from_slice(&uuid);
+    bytes
+}
+
+#[test]
+fn thin_and_fat_macho_identity_selection_is_bounds_checked() {
+    let arm = thin_macho_identity(0x0100_000c, [1; 16]);
+    let x86 = thin_macho_identity(0x0100_0007, [2; 16]);
+    assert_eq!(
+        parse_macho_identities(&arm).unwrap()[0].architecture,
+        "arm64"
+    );
+
+    let first_offset = 8 + 2 * 20;
+    let second_offset = first_offset + arm.len();
+    let mut fat = vec![0_u8; second_offset + x86.len()];
+    fat[0..4].copy_from_slice(&0xcafe_babe_u32.to_be_bytes());
+    fat[4..8].copy_from_slice(&2_u32.to_be_bytes());
+    fat[16..20].copy_from_slice(&(first_offset as u32).to_be_bytes());
+    fat[20..24].copy_from_slice(&(arm.len() as u32).to_be_bytes());
+    fat[36..40].copy_from_slice(&(second_offset as u32).to_be_bytes());
+    fat[40..44].copy_from_slice(&(x86.len() as u32).to_be_bytes());
+    fat[first_offset..second_offset].copy_from_slice(&arm);
+    fat[second_offset..].copy_from_slice(&x86);
+    let identities = parse_macho_identities(&fat).unwrap();
+    assert_eq!(identities.len(), 2);
+    assert_eq!(identities[0].architecture, "arm64");
+    assert_eq!(identities[1].architecture, "x86_64");
+
+    fat[40..44].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(parse_macho_identities(&fat).is_none());
+}
+
+#[test]
+fn image_address_matching_uses_exact_text_range() {
+    let image = LoadedImageReport {
+        path: "/bin/app".into(),
+        base: "0x1000".into(),
+        slide: Some("0x100".into()),
+        uuid: Some("id".into()),
+        architecture: Some("arm64".into()),
+        text_start: Some("0x1000".into()),
+        text_end: Some("0x2000".into()),
+    };
+    assert!(image_contains(&image, 0x1000));
+    assert!(image_contains(&image, 0x1fff));
+    assert!(!image_contains(&image, 0x2000));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn private_output_is_0600_without_changing_parent_mode() {

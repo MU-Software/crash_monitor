@@ -544,11 +544,11 @@
 
 ### P1-42. symbolication을 UUID·architecture·image 단위로 수행한다
 
-- [ ] thin Mach-O와 FAT/FAT64에서 대상 architecture slice를 bounds-check해 선택한다.
-- [ ] dSYM bundle의 임의 첫 file을 선택하지 않고 process/image UUID와 architecture로 매칭한다.
-- [ ] 하나의 dSYM loader를 모든 frame에 적용하지 않고 frame의 image에 해당하는 loader/slide를 사용한다.
-- [ ] re-symbolication은 file/line/column location을 하나의 unit으로 교체해 stale field가 섞이지 않게 한다.
-- [ ] image별 parse/match/resolve 실패를 typed diagnostics로 남긴다.
+- [x] thin Mach-O와 FAT/FAT64에서 대상 architecture slice를 bounds-check해 선택한다.
+- [x] dSYM bundle의 임의 첫 file을 선택하지 않고 process/image UUID와 architecture로 매칭한다.
+- [x] 하나의 dSYM loader를 모든 frame에 적용하지 않고 frame의 image에 해당하는 loader/slide를 사용한다.
+- [x] re-symbolication은 file/line/column location을 하나의 unit으로 교체해 stale field가 섞이지 않게 한다.
+- [x] image별 parse/match/resolve 실패를 typed diagnostics로 남긴다.
 
 범위: `src/preprocessors/symbolicate.rs`, `src/cli/symbolicate.rs`.
 

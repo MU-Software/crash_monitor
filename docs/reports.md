@@ -155,6 +155,11 @@ Loaded-image identity includes Mach-O `LC_UUID`, CPU architecture, ASLR slide,
 and the actual runtime `__TEXT` half-open range. Address attribution and
 symbol-selection require that range and never use a fixed 256MB window or the
 nearest lower image base.
+
+Offline dSYM symbolication selects bounded thin/FAT/FAT64 slices by report UUID
+and architecture, applies a loader only to frames inside that image's recorded
+`__TEXT` range, and replaces file/line/column as one location unit so stale
+components cannot survive a later resolution.
 `exception.severity` is `fatal`. `EXC_BREAKPOINT` is subscribed as a fatal
 `crash` mapped to `SIGTRAP`, and `EXC_GUARD` as a fatal `crash` mapped to
 `SIGKILL`; both retain every raw code. `EXC_RESOURCE` is deliberately not

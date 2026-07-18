@@ -8,7 +8,7 @@ use crate::utils::paths::{PRIVATE_FILE_MODE, open_trusted_directory, validate_pr
 use nix::fcntl::{OFlag, openat, renameat};
 use nix::sys::stat::Mode;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "macos")]
@@ -30,7 +30,8 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
         }
     };
 
-    let dwarf_path = match find_dwarf_binary(Path::new(dsym_path)) {
+    let dwarf_path = match find_dwarf_binary_for_images(Path::new(dsym_path), &report.loaded_images)
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -66,6 +67,19 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
         }
     };
 
+    let dwarf_identity = read_macho_identities(&dwarf_path).unwrap_or_default();
+    let target_image = report.loaded_images.iter().find(|image| {
+        image.uuid.as_ref().is_some_and(|uuid| {
+            dwarf_identity.iter().any(|identity| {
+                identity.uuid.eq_ignore_ascii_case(uuid)
+                    && image
+                        .architecture
+                        .as_ref()
+                        .is_none_or(|arch| arch == &identity.architecture)
+            })
+        })
+    });
+
     // Build a slide lookup from loaded_images
     let slides = build_slide_map(&report.loaded_images);
 
@@ -77,21 +91,21 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
                 continue;
             };
 
+            if target_image.is_none_or(|image| !image_contains(image, addr)) {
+                continue;
+            }
+
             // Find the image this address belongs to and get its slide
             let slide = find_slide_for_address(&slides, addr);
             let file_addr = addr.wrapping_sub(slide);
 
             // Try to get source location
             if let Ok(Some(loc)) = loader.find_location(file_addr) {
-                if let Some(file) = loc.file {
-                    frame.file = Some(file.to_string());
-                }
-                if let Some(line) = loc.line {
-                    frame.line = Some(line);
-                }
-                if loc.column.is_some() {
-                    frame.column = loc.column;
-                }
+                // Source location is one unit: clear stale fields when the new
+                // resolver has no value for a component.
+                frame.file = loc.file.map(str::to_string);
+                frame.line = loc.line;
+                frame.column = loc.column;
                 resolved_count += 1;
             }
 
@@ -120,11 +134,155 @@ pub fn run(report_path: &str, dsym_path: &str, output: Option<&str>) -> i32 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MachOIdentity {
+    uuid: String,
+    architecture: String,
+}
+
+fn image_contains(image: &LoadedImageReport, address: u64) -> bool {
+    image
+        .text_start
+        .as_deref()
+        .and_then(parse_hex_address)
+        .zip(image.text_end.as_deref().and_then(parse_hex_address))
+        .is_some_and(|(start, end)| address >= start && address < end)
+}
+
+fn find_dwarf_binary_for_images(
+    dsym_path: &Path,
+    images: &[LoadedImageReport],
+) -> Result<PathBuf, String> {
+    let candidates = dwarf_candidates(dsym_path)?;
+    for candidate in candidates {
+        let identities = read_macho_identities(&candidate)?;
+        if identities.iter().any(|identity| {
+            images.iter().any(|image| {
+                image.uuid.as_ref().is_some_and(|uuid| {
+                    identity.uuid.eq_ignore_ascii_case(uuid)
+                        && image
+                            .architecture
+                            .as_ref()
+                            .is_none_or(|arch| arch == &identity.architecture)
+                })
+            })
+        }) {
+            return Ok(candidate);
+        }
+    }
+    Err("no DWARF image matches a report image UUID and architecture".to_string())
+}
+
+fn dwarf_candidates(dsym_path: &Path) -> Result<Vec<PathBuf>, String> {
+    if dsym_path.is_file() {
+        return Ok(vec![dsym_path.to_path_buf()]);
+    }
+    let dwarf_dir = dsym_path.join("Contents/Resources/DWARF");
+    let entries = std::fs::read_dir(&dwarf_dir)
+        .map_err(|error| format!("cannot read '{}': {error}", dwarf_dir.display()))?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect())
+}
+
+fn read_macho_identities(path: &Path) -> Result<Vec<MachOIdentity>, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    std::io::Read::take(&mut file, MAX_DSYM_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_DSYM_SIZE {
+        return Err("DWARF image exceeds size limit".to_string());
+    }
+    parse_macho_identities(&bytes).ok_or_else(|| "malformed Mach-O identity".to_string())
+}
+
+fn parse_macho_identities(bytes: &[u8]) -> Option<Vec<MachOIdentity>> {
+    const FAT_MAGIC: u32 = 0xcafe_babe;
+    const FAT_MAGIC_64: u32 = 0xcafe_babf;
+    let magic_be = u32::from_be_bytes(bytes.get(0..4)?.try_into().ok()?);
+    if matches!(magic_be, FAT_MAGIC | FAT_MAGIC_64) {
+        let count = u32::from_be_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+        let entry_size = if magic_be == FAT_MAGIC_64 { 32 } else { 20 };
+        let mut identities = Vec::new();
+        for index in 0..count {
+            let entry = 8_usize.checked_add(index.checked_mul(entry_size)?)?;
+            let (offset, size) = if magic_be == FAT_MAGIC_64 {
+                (
+                    u64::from_be_bytes(bytes.get(entry + 8..entry + 16)?.try_into().ok()?),
+                    u64::from_be_bytes(bytes.get(entry + 16..entry + 24)?.try_into().ok()?),
+                )
+            } else {
+                (
+                    u64::from(u32::from_be_bytes(
+                        bytes.get(entry + 8..entry + 12)?.try_into().ok()?,
+                    )),
+                    u64::from(u32::from_be_bytes(
+                        bytes.get(entry + 12..entry + 16)?.try_into().ok()?,
+                    )),
+                )
+            };
+            let start = usize::try_from(offset).ok()?;
+            let end = usize::try_from(offset.checked_add(size)?).ok()?;
+            identities.push(parse_thin_identity(bytes.get(start..end)?)?);
+        }
+        Some(identities)
+    } else {
+        Some(vec![parse_thin_identity(bytes)?])
+    }
+}
+
+fn parse_thin_identity(bytes: &[u8]) -> Option<MachOIdentity> {
+    if u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?) != 0xfeed_facf {
+        return None;
+    }
+    let cpu = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
+    let architecture = match cpu {
+        0x0100_000c => "arm64",
+        0x0100_0007 => "x86_64",
+        _ => return None,
+    };
+    let ncmds = u32::from_le_bytes(bytes.get(16..20)?.try_into().ok()?) as usize;
+    let mut offset = 32_usize;
+    for _ in 0..ncmds {
+        let cmd = u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?);
+        let size = u32::from_le_bytes(bytes.get(offset + 4..offset + 8)?.try_into().ok()?) as usize;
+        let end = offset.checked_add(size)?;
+        if size < 8 || end > bytes.len() {
+            return None;
+        }
+        if cmd == 0x1b && size >= 24 {
+            let uuid = bytes.get(offset + 8..offset + 24)?;
+            let uuid = uuid
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| {
+                    let separator = if matches!(index, 4 | 6 | 8 | 10) {
+                        "-"
+                    } else {
+                        ""
+                    };
+                    format!("{separator}{byte:02x}")
+                })
+                .collect();
+            return Some(MachOIdentity {
+                uuid,
+                architecture: architecture.to_string(),
+            });
+        }
+        offset = end;
+    }
+    None
+}
+
 /// Locate the DWARF binary inside a dSYM bundle.
 ///
 /// Accepts either:
 /// - A `.dSYM` directory: searches `Contents/Resources/DWARF/` for the first file
 /// - A direct path to the DWARF binary itself
+#[cfg(test)]
 fn find_dwarf_binary(dsym_path: &Path) -> Result<PathBuf, String> {
     if !dsym_path.exists() {
         return Err(format!("dSYM path not found: '{}'", dsym_path.display()));
