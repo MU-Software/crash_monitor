@@ -75,6 +75,16 @@ make test        # unit + integration + e2e   (e2e requires codesigning)
 make coverage    # HTML coverage report
 ```
 
+`make e2e-coverage` is the signed-runner coverage gate. It builds the release
+monitor with `-C instrument-coverage`, signs that exact binary, injects its
+absolute path through `CRASH_MONITOR_E2E_BIN`, and merges the profiles emitted
+by the spawned monitor processes. The report does not blanket-exclude
+`main.rs`, platform FFI, or path handling: code not reached by the privileged
+scenarios remains visibly uncovered. This target measures the checked-in E2E
+scenarios on one supported macOS/ARM64 environment; it is not evidence for
+other OS versions, architectures, entitlement failures, or untested kernel
+error paths.
+
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — process model, event sources, capture lifecycle

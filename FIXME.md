@@ -849,10 +849,10 @@
 
 ### P2-23. E2E coverage가 실제 monitor binary를 계측하게 한다
 
-- [ ] instrumented monitor binary를 build·sign하고 그 경로를 E2E에 주입한다.
-- [ ] 별도 release binary를 spawn해 coverage가 test harness에만 쌓이는 현상을 제거한다.
-- [ ] `main.rs`, FFI, path handling을 blanket exclude하지 않고 실행 가능한 coverage 또는 별도 gate를 둔다.
-- [ ] coverage target의 한계를 문서화하고 측정되지 않는 코드를 숫자에 포함한 것처럼 표시하지 않는다.
+- [x] instrumented monitor binary를 build·sign하고 그 경로를 E2E에 주입한다.
+- [x] 별도 release binary를 spawn해 coverage가 test harness에만 쌓이는 현상을 제거한다.
+- [x] `main.rs`, FFI, path handling을 blanket exclude하지 않고 실행 가능한 coverage 또는 별도 gate를 둔다.
+- [x] coverage target의 한계를 문서화하고 측정되지 않는 코드를 숫자에 포함한 것처럼 표시하지 않는다.
 
 범위: `Makefile`, E2E binary resolution.
 

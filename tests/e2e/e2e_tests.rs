@@ -86,6 +86,9 @@ fn copy_mapping(shm: &SharedMemory) -> Vec<u8> {
 
 /// Locate the `crash_monitor` binary (release build).
 fn monitor_path() -> PathBuf {
+    if let Some(injected) = std::env::var_os("CRASH_MONITOR_E2E_BIN") {
+        return PathBuf::from(injected);
+    }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest.join("target/release/crash_monitor")
 }
@@ -293,6 +296,12 @@ fn e2e_required() -> bool {
 fn check_prerequisites() -> Result<(), String> {
     let monitor = monitor_path();
     let child = crash_app_path();
+    if !monitor.is_absolute() {
+        return Err(format!(
+            "CRASH_MONITOR_E2E_BIN must be an absolute path, got {}",
+            monitor.display()
+        ));
+    }
     if !monitor.exists() {
         return Err(format!(
             "crash_monitor not found at {}; run `make e2e-build`",

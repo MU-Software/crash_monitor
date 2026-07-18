@@ -28,12 +28,11 @@ SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
 # Homebrew LLVM tools for cargo-llvm-cov (macOS).
 LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
                 LLVM_PROFDATA=/opt/homebrew/opt/llvm/bin/llvm-profdata
-# Exclude untestable code from coverage:
-#   platform/.*/ffi/ — platform FFI (macos/ffi/, future linux/ffi/)
-#   main.rs          — OS orchestration (signal, spawn, waitpid)
-#   paths.rs         — OS I/O (env::var, fs::create_dir_all)
-#   platform/mod.rs  — FFI delegation wrappers
-COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
+# Do not hide main/FFI/path code from the denominator. Signed E2E coverage
+# executes those boundaries in the real monitor process; remaining lines are
+# intentionally reported as uncovered rather than silently excluded.
+COV_EXCLUDE ?=
+COV_ENV_FILE := target/llvm-cov.env
 
 .PHONY: build e2e-build lint test unit-test integration-test e2e-test e2e-required \
         e2e-child shm-atomic-test schema-check ci-fast coverage unit-coverage \
@@ -109,8 +108,15 @@ integration-coverage:
 	$(LLVM_COV_ENV) cargo llvm-cov --workspace --tests $(COV_EXCLUDE) --html --output-dir coverage-report-integration
 	@echo "Integration coverage: coverage-report-integration/html/index.html"
 
-e2e-coverage: build $(E2E_CHILD)
-	$(LLVM_COV_ENV) cargo llvm-cov --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
+e2e-coverage: $(E2E_CHILD)
+	$(LLVM_COV_ENV) cargo llvm-cov clean --workspace
+	mkdir -p target
+	$(LLVM_COV_ENV) cargo llvm-cov show-env --sh > $(COV_ENV_FILE)
+	. $(COV_ENV_FILE); cargo build --release --workspace --features test-support
+	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
+	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
+	. $(COV_ENV_FILE); CRASH_MONITOR_E2E_BIN=$(abspath $(MONITOR_BIN)) E2E_REQUIRED=1 cargo test --test e2e_tests -- --ignored
+	$(LLVM_COV_ENV) cargo llvm-cov report $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"
 
 coverage: build $(E2E_CHILD)
