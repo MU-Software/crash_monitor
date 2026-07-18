@@ -29,9 +29,8 @@ E2E_SRC   := tests/e2e/fixtures/crash_app.c
 SHM_ATOMIC_TEST     := target/shm_atomic_contract_test
 SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
 
-# Homebrew LLVM tools for cargo-llvm-cov (macOS).
-LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
-                LLVM_PROFDATA=/opt/homebrew/opt/llvm/bin/llvm-profdata
+# cargo-llvm-cov discovers rustup's llvm-tools-preview. LLVM_COV and
+# LLVM_PROFDATA remain supported as explicit caller-provided overrides.
 # Exclude untestable code from coverage:
 #   platform/.*/ffi/ — platform FFI (macos/ffi/, future linux/ffi/)
 #   main.rs          — OS orchestration (signal, spawn, waitpid)
@@ -115,19 +114,19 @@ test: unit-test integration-test e2e-test
 
 # ── Coverage (HTML reports under coverage-report*/) ───────────
 unit-coverage:
-	$(LLVM_COV_ENV) cargo llvm-cov --lib $(COV_EXCLUDE) --html --output-dir coverage-report-unit
+	cargo llvm-cov --lib $(COV_EXCLUDE) --html --output-dir coverage-report-unit
 	@echo "Unit coverage: coverage-report-unit/html/index.html"
 
 integration-coverage:
-	$(LLVM_COV_ENV) cargo llvm-cov $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report-integration
+	cargo llvm-cov $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report-integration
 	@echo "Integration coverage: coverage-report-integration/html/index.html"
 
 e2e-coverage: build $(E2E_CHILD)
-	$(LLVM_COV_ENV) cargo llvm-cov --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
+	cargo llvm-cov --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"
 
 coverage: build $(E2E_CHILD)
-	$(LLVM_COV_ENV) cargo llvm-cov --lib $(INTEGRATION_TESTS) --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report
+	cargo llvm-cov --lib $(INTEGRATION_TESTS) --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report
 	@echo "Coverage: coverage-report/html/index.html"
 
 # ── Clean ─────────────────────────────────────────────────────

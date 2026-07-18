@@ -939,9 +939,9 @@
 
 ### P2-33. toolchain과 coverage tool discovery를 이식 가능하게 만든다
 
-- [ ] `/opt/homebrew`에 고정된 LLVM 경로 대신 rustup `llvm-tools` 또는 `brew --prefix llvm`/명시 override를 사용한다.
-- [ ] `rust-version`과 `rust-toolchain.toml`로 지원 toolchain을 고정한다.
-- [ ] libclang/bindgen 요구사항을 developer setup과 CI에 명시한다.
+- [x] `/opt/homebrew`에 고정된 LLVM 경로 대신 rustup `llvm-tools` 또는 `brew --prefix llvm`/명시 override를 사용한다.
+- [x] `rust-version`과 `rust-toolchain.toml`로 지원 toolchain을 고정한다.
+- [x] libclang/bindgen 요구사항을 developer setup과 CI에 명시한다.
 
 범위: `Makefile`, Cargo/toolchain files, contributor docs.
 
