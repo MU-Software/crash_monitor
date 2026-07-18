@@ -1,0 +1,20 @@
+{
+  "header": {
+    "version": 1,
+    "timestamp": "2026-07-18T00:00:00Z",
+    "pid": 1,
+    "process": "fixture",
+    "collector": "crash_monitor",
+    "type": "snapshot"
+  },
+  "crash_context": {
+    "annotations": {
+      "fixture": "v1"
+    }
+  },
+  "breadcrumbs": [],
+  "threads": [],
+  "loaded_images": [],
+  "memory_map": [],
+  "attachments": []
+}

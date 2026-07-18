@@ -67,13 +67,13 @@ fn test_format_breadcrumbs_single() {
     let result = format_breadcrumbs(&crumbs);
     assert_eq!(result.len(), 1);
     let v = &result[0];
-    assert_eq!(v["time_ns"], 123_456_789_u64);
-    assert_eq!(v["thread"], 42);
-    assert_eq!(v["cat"], "TOOL");
-    assert_eq!(v["sev"], "WARN");
-    assert_eq!(v["file"], "test.c");
-    assert_eq!(v["line"], 100);
-    assert_eq!(v["msg"], "hello");
+    assert_eq!(v.time_ns, 123_456_789_u64);
+    assert_eq!(v.thread, 42);
+    assert_eq!(v.cat, "TOOL");
+    assert_eq!(v.sev, "WARN");
+    assert_eq!(v.file, "test.c");
+    assert_eq!(v.line, 100);
+    assert_eq!(v.msg, "hello");
 }
 
 #[test]
@@ -360,10 +360,10 @@ fn test_format_environment_some() {
         env_vars: vec![("LANG".to_string(), "en_US".to_string())],
     };
     let json = format_environment(Some(&env)).expect("Some");
-    assert_eq!(json["kernel_release"], "24.3.0");
-    assert_eq!(json["variables_source"], "spawn_environment_snapshot");
-    assert_eq!(json["arch"], "arm64");
-    assert_eq!(json["env_vars"]["LANG"], "en_US");
+    assert_eq!(json.kernel_release, "24.3.0");
+    assert_eq!(json.variables_source, "spawn_environment_snapshot");
+    assert_eq!(json.arch, "arm64");
+    assert_eq!(json.env_vars["LANG"], "en_US");
 }
 
 // ── format_crash_context ──
@@ -418,8 +418,8 @@ fn test_format_crash_context_full() {
     assert_eq!(context.heartbeat_counter, 55);
 
     let build = build.expect("ctx present → build Some");
-    assert_eq!(build["app_version"], "1.2.3");
-    assert_eq!(build["git_hash"], "abc123");
-    assert_eq!(build["git_dirty"], true);
-    assert_eq!(build["os"], "macOS 15");
+    assert_eq!(build.app_version, "1.2.3");
+    assert_eq!(build.git_hash, "abc123");
+    assert!(build.git_dirty);
+    assert_eq!(build.os, "macOS 15");
 }

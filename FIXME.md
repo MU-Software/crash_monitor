@@ -462,11 +462,11 @@
 
 ### P1-34. report loader에 version gate와 호환 정책을 둔다
 
-- [ ] `header.version`을 모든 loader와 CLI가 검증한다.
-- [ ] 지원하지 않는 future/legacy version을 구조화된 오류로 거부하거나 명시적 migration을 수행한다.
-- [ ] 핵심 field의 `serde_json::Value` 중심 모델을 typed, versioned struct로 교체한다.
-- [ ] version별 compatibility/migration fixture를 유지한다.
-- [ ] 문서의 JSON shape가 실제 serializer와 동일한지 CI에서 확인한다.
+- [x] `header.version`을 모든 loader와 CLI가 검증한다.
+- [x] 지원하지 않는 future/legacy version을 구조화된 오류로 거부하거나 명시적 migration을 수행한다.
+- [x] 핵심 field의 `serde_json::Value` 중심 모델을 typed, versioned struct로 교체한다.
+- [x] version별 compatibility/migration fixture를 유지한다.
+- [x] 문서의 JSON shape가 실제 serializer와 동일한지 CI에서 확인한다.
 
 범위: `src/pipeline/report.rs`, CLI, feedback/PNG consumers, `docs/reports.md`.
 

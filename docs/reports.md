@@ -81,12 +81,16 @@ embedded in `report.json` or `report.zip`.
 ## JSON shape
 
 The `report.json` artifact (also stored inside `report.zip`) is a single JSON
-object. The exact fields depend on which collectors ran, but the top-level
-shape is:
+object. `header.version` is currently `1`. Every in-process consumer and CLI
+checks this field before decoding; version `0` and future versions are rejected
+with a structured compatibility error rather than guessed. Additive optional
+fields remain compatible within version 1, while a breaking field/layout change
+requires a new version and an explicit migration fixture. The exact fields
+depend on which collectors ran, but the top-level shape is:
 
 ```jsonc
 {
-  "header":        { "version", "timestamp", "pid", "process", "type", "collector" },
+  "header":        { "version": 1, "timestamp", "pid", "process", "type", "collector" },
   "termination":   { "kind": "exited", "exit_code", "runtime_ms" },
   "exception":     { "type", "code", "subcode", "raw_codes": ["0x…", …], "signal", "fault_address" },
   "crash_context": { "annotations": { "<key>": "<value>", … } },   // app state, generic KV

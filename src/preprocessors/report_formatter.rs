@@ -12,9 +12,9 @@ use crate::collectors::dylib::{self, RawImageData};
 use crate::collectors::memory::RawHeapData;
 use crate::collectors::thread::RawThreadData;
 use crate::pipeline::report::{
-    BacktraceFrame, CrashContextReport, HeapSummary, HeapZoneReport, LoadedImageReport,
-    ReportValueSource, SessionReport, SettingsSnapshotReport, StackMemoryReport,
-    TaskVmSummaryReport, ThreadReport, VmRegionReport,
+    BacktraceFrame, BreadcrumbReport, BuildReport, CrashContextReport, EnvironmentReport,
+    HeapSummary, HeapZoneReport, LoadedImageReport, ReportValueSource, SessionReport,
+    SettingsSnapshotReport, StackMemoryReport, TaskVmSummaryReport, ThreadReport, VmRegionReport,
 };
 use crate::pipeline::{CollectedData, Diagnostics, PluginStatus};
 use crate::platform::VmRegionInfo;
@@ -35,12 +35,12 @@ pub struct FormattedData {
     pub heap_summary: Option<HeapSummary>,
     pub session: Option<SessionReport>,
     pub diagnostics_json: Option<serde_json::Value>,
-    pub breadcrumbs: Vec<serde_json::Value>,
+    pub breadcrumbs: Vec<BreadcrumbReport>,
     pub crash_context: Option<CrashContextReport>,
-    pub build: Option<serde_json::Value>,
+    pub build: Option<BuildReport>,
     pub settings_snapshot: Option<SettingsSnapshotReport>,
     pub attachments: Vec<serde_json::Value>,
-    pub environment: Option<serde_json::Value>,
+    pub environment: Option<EnvironmentReport>,
     pub process_output: Option<crate::platform::ChildOutputSnapshot>,
 }
 
@@ -370,19 +370,17 @@ fn crumb_severity_name(sev: u16) -> &'static str {
 }
 
 /// Format breadcrumbs to JSON values (design doc L1111-1116).
-fn format_breadcrumbs(crumbs: &[crate::shm::RawBreadcrumb]) -> Vec<serde_json::Value> {
+fn format_breadcrumbs(crumbs: &[crate::shm::RawBreadcrumb]) -> Vec<BreadcrumbReport> {
     crumbs
         .iter()
-        .map(|c| {
-            serde_json::json!({
-                "time_ns": c.timestamp_ns,
-                "thread": c.thread_id,
-                "cat": crumb_category_name(c.category),
-                "sev": crumb_severity_name(c.severity),
-                "file": c.file,
-                "line": c.line,
-                "msg": c.message,
-            })
+        .map(|c| BreadcrumbReport {
+            time_ns: c.timestamp_ns,
+            thread: c.thread_id,
+            cat: crumb_category_name(c.category).to_string(),
+            sev: crumb_severity_name(c.severity).to_string(),
+            file: c.file.clone(),
+            line: u32::from(c.line),
+            msg: c.message.clone(),
         })
         .collect()
 }
@@ -397,7 +395,7 @@ fn format_crash_context(
     settings: Option<&crate::shm::RawSettingsSnapshot>,
 ) -> (
     Option<CrashContextReport>,
-    Option<serde_json::Value>,
+    Option<BuildReport>,
     Option<SettingsSnapshotReport>,
 ) {
     let Some(ctx) = ctx else {
@@ -405,27 +403,25 @@ fn format_crash_context(
     };
 
     // App/domain state is emitted as a generic annotation map (app-agnostic).
-    let annotations: BTreeMap<String, String> = ctx.annotations.iter().cloned().collect();
-
     let crash_context = CrashContextReport {
         source: ReportValueSource::ProducerSharedMemory,
-        annotations,
+        annotations: ctx.annotations.iter().cloned().collect(),
         session_id: (!ctx.session_id.is_empty()).then(|| ctx.session_id.clone()),
         session_start_ns: (ctx.session_start_ns != 0).then_some(ctx.session_start_ns),
         heartbeat_counter: ctx.heartbeat_counter,
     };
 
-    let build = serde_json::json!({
-        "app_version": ctx.app_version,
-        "build_number": ctx.build_number,
-        "git_hash": ctx.git_hash,
-        "git_dirty": ctx.git_dirty,
-        "build_type": ctx.build_type,
-        "build_preset": ctx.build_preset,
-        "build_timestamp": ctx.build_timestamp,
-        "compiler": ctx.compiler,
-        "os": ctx.os_version,
-    });
+    let build = BuildReport {
+        app_version: ctx.app_version.clone(),
+        build_number: ctx.build_number,
+        git_hash: ctx.git_hash.clone(),
+        git_dirty: ctx.git_dirty,
+        build_type: ctx.build_type.clone(),
+        build_preset: ctx.build_preset.clone(),
+        build_timestamp: ctx.build_timestamp.clone(),
+        compiler: ctx.compiler.clone(),
+        os: ctx.os_version.clone(),
+    };
 
     (Some(crash_context), Some(build), format_settings(settings))
 }
@@ -497,21 +493,16 @@ fn page_size() -> u64 {
 
 fn format_environment(
     env: Option<&crate::collectors::environment::RawEnvironment>,
-) -> Option<serde_json::Value> {
+) -> Option<EnvironmentReport> {
     let env = env?;
-    let vars: serde_json::Map<String, serde_json::Value> = env
-        .env_vars
-        .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-        .collect();
-    Some(serde_json::json!({
-        "kernel_release": env.kernel_release,
-        "kernel_version": env.kernel_version,
-        "arch": env.arch,
-        "hostname": env.hostname,
-        "variables_source": env.variables_source,
-        "env_vars": vars,
-    }))
+    Some(EnvironmentReport {
+        kernel_release: env.kernel_release.clone(),
+        kernel_version: env.kernel_version.clone(),
+        arch: env.arch.clone(),
+        hostname: env.hostname.clone(),
+        variables_source: env.variables_source.to_string(),
+        env_vars: env.env_vars.iter().cloned().collect(),
+    })
 }
 
 #[cfg(test)]

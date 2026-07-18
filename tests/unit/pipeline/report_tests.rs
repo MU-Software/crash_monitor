@@ -29,6 +29,46 @@ fn sample_report_json() -> String {
     .to_string()
 }
 
+#[test]
+fn report_v1_fixture_decodes_and_unsupported_versions_are_structured() {
+    let fixture = include_bytes!("../../fixtures/report_v1_minimal.json");
+    assert_eq!(
+        decode_report(fixture).unwrap().header.version,
+        REPORT_SCHEMA_VERSION
+    );
+
+    for found in [0, REPORT_SCHEMA_VERSION + 1] {
+        let mut value: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+        value["header"]["version"] = found.into();
+        assert!(matches!(
+            decode_report(&serde_json::to_vec(&value).unwrap()),
+            Err(ReportLoadError::UnsupportedVersion {
+                found: actual,
+                supported: REPORT_SCHEMA_VERSION,
+            }) if actual == found
+        ));
+    }
+}
+
+#[test]
+fn documented_v1_shape_tracks_typed_serializer_fields() {
+    let fixture = include_bytes!("../../fixtures/report_v1_minimal.json");
+    let serialized = serde_json::to_value(decode_report(fixture).unwrap()).unwrap();
+    let docs = include_str!("../../../docs/reports.md");
+    for field in [
+        "header",
+        "crash_context",
+        "breadcrumbs",
+        "threads",
+        "loaded_images",
+        "memory_map",
+        "attachments",
+    ] {
+        assert!(serialized.get(field).is_some());
+        assert!(docs.contains(&format!("\"{field}\"")));
+    }
+}
+
 /// Write a ZIP named `zip_name` with the given (entry-name, bytes) files into a
 /// fresh tempdir. Returns the tempdir (keep alive) and the archive path.
 fn make_zip(zip_name: &str, entries: &[(&str, &[u8])]) -> (TempDir, PathBuf) {

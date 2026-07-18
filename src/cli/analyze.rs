@@ -234,10 +234,7 @@ fn print_backtrace(report: &CrashReport) {
 fn print_breadcrumbs(report: &CrashReport) {
     // Breadcrumb format (from report_formatter::format_breadcrumbs):
     //   { "time_ns", "thread", "cat", "sev", "file", "line", "msg" }
-    let Some(ref crumbs_val) = report.breadcrumbs else {
-        return;
-    };
-    let Some(crumbs) = crumbs_val.as_array() else {
+    let Some(ref crumbs) = report.breadcrumbs else {
         return;
     };
     if crumbs.is_empty() {
@@ -249,32 +246,13 @@ fn print_breadcrumbs(report: &CrashReport) {
     // Show last N breadcrumbs
     let start = crumbs.len().saturating_sub(MAX_BREADCRUMBS);
     for crumb in crumbs.iter().skip(start) {
-        let cat = escape_terminal(
-            crumb
-                .get("cat")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?"),
-        );
-        let file = escape_terminal(
-            crumb
-                .get("file")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-        );
-        let line = crumb
-            .get("line")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let msg = escape_terminal(
-            crumb
-                .get("msg")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-        );
+        let cat = escape_terminal(&crumb.cat);
+        let file = escape_terminal(&crumb.file);
+        let msg = escape_terminal(&crumb.msg);
         if file.is_empty() {
             println!("  [{cat:<8}] {msg}");
         } else {
-            println!("  [{cat:<8}] {file}:{line}  {msg}");
+            println!("  [{:<8}] {}:{}  {}", cat, file, crumb.line, msg);
         }
     }
     println!();

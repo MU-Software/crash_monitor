@@ -24,6 +24,8 @@ use super::types::{
     CollectedData, CrashEvent, Diagnostics, ReportType, TerminationEvidence, TerminationReason,
 };
 
+pub const REPORT_SCHEMA_VERSION: u32 = 1;
+
 // ═══════════════════════════════════════════════════
 //  Serde report structures (design doc lines 1026-1153)
 // ═══════════════════════════════════════════════════
@@ -36,7 +38,7 @@ pub struct CrashReport {
     #[serde(default)]
     pub termination: Option<TerminationReason>,
     #[serde(default)]
-    pub build: Option<serde_json::Value>, // Phase 4
+    pub build: Option<BuildReport>,
     #[serde(default)]
     pub exception: Option<ExceptionReport>,
     #[serde(default)]
@@ -44,7 +46,7 @@ pub struct CrashReport {
     #[serde(default)]
     pub threads: Vec<ThreadReport>,
     #[serde(default)]
-    pub breadcrumbs: Option<serde_json::Value>, // Phase 4
+    pub breadcrumbs: Option<Vec<BreadcrumbReport>>,
     #[serde(default)]
     pub loaded_images: Vec<LoadedImageReport>,
     #[serde(default)]
@@ -58,7 +60,7 @@ pub struct CrashReport {
     #[serde(default)]
     pub fingerprint: Option<String>,
     #[serde(default)]
-    pub environment: Option<serde_json::Value>,
+    pub environment: Option<EnvironmentReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_output: Option<crate::platform::ChildOutputSnapshot>,
     #[serde(default)]
@@ -123,7 +125,7 @@ impl ReportHeader {
         };
 
         Self {
-            version: 1,
+            version: REPORT_SCHEMA_VERSION,
             report_id: Some(event.report_id.clone()),
             timestamp: Local::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false),
             pid: event.pid,
@@ -135,6 +137,66 @@ impl ReportHeader {
             hang_duration_ms,
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BuildReport {
+    pub app_version: String,
+    pub build_number: u32,
+    pub git_hash: String,
+    pub git_dirty: bool,
+    pub build_type: String,
+    pub build_preset: String,
+    pub build_timestamp: String,
+    pub compiler: String,
+    pub os: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CrashContextReport {
+    #[serde(default)]
+    pub source: ReportValueSource,
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_start_ns: Option<u64>,
+    #[serde(default)]
+    pub heartbeat_counter: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BreadcrumbReport {
+    pub time_ns: u64,
+    pub thread: u32,
+    pub cat: String,
+    pub sev: String,
+    pub file: String,
+    pub line: u32,
+    pub msg: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SettingsSnapshotReport {
+    #[serde(default)]
+    pub source: ReportValueSource,
+    pub world_bounds: [i32; 6],
+    pub palette_count: i32,
+    pub history_max: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct EnvironmentReport {
+    pub kernel_release: String,
+    pub kernel_version: String,
+    pub arch: String,
+    pub hostname: String,
+    pub variables_source: String,
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -279,35 +341,6 @@ pub enum ReportValueSource {
     ProducerSharedMemory,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct CrashContextReport {
-    #[serde(default)]
-    pub source: ReportValueSource,
-    #[serde(default)]
-    pub annotations: BTreeMap<String, String>,
-    /// Producer session identifier. Omitted when the fixed-width field is empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    /// Producer monotonic session-start timestamp. Zero means unavailable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_start_ns: Option<u64>,
-    /// Last producer heartbeat counter observed in the stable context snapshot.
-    #[serde(default)]
-    pub heartbeat_counter: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SettingsSnapshotReport {
-    #[serde(default)]
-    pub source: ReportValueSource,
-    pub world_bounds: [i32; 6],
-    pub palette_count: i32,
-    pub history_max: i32,
-    /// Producer-defined extension payload. Omitted when empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra: Option<String>,
-}
-
 // ═══════════════════════════════════════════════════
 //  Report loading (Phase 5 — CLI analysis commands)
 // ═══════════════════════════════════════════════════
@@ -317,6 +350,51 @@ const MAX_REPORT_SIZE: u64 = 256 * 1024 * 1024;
 const MAX_ZIP_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ZIP_ENTRIES: usize = 256;
 const MAX_ZIP_COMPRESSION_RATIO: u64 = 1_000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReportLoadError {
+    InvalidJson(String),
+    UnsupportedVersion { found: u32, supported: u32 },
+}
+
+impl std::fmt::Display for ReportLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidJson(error) => write!(formatter, "invalid report JSON: {error}"),
+            Self::UnsupportedVersion { found, supported } => write!(
+                formatter,
+                "unsupported report schema version {found}; this build supports version {supported}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReportLoadError {}
+
+/// Decode one report document and enforce its explicit schema version.
+///
+/// # Errors
+/// Returns a structured invalid-JSON or unsupported-version error.
+pub fn decode_report(bytes: &[u8]) -> Result<CrashReport, ReportLoadError> {
+    #[derive(Deserialize)]
+    struct VersionEnvelope {
+        header: VersionHeader,
+    }
+    #[derive(Deserialize)]
+    struct VersionHeader {
+        version: u32,
+    }
+
+    let envelope: VersionEnvelope = serde_json::from_slice(bytes)
+        .map_err(|error| ReportLoadError::InvalidJson(error.to_string()))?;
+    if envelope.header.version != REPORT_SCHEMA_VERSION {
+        return Err(ReportLoadError::UnsupportedVersion {
+            found: envelope.header.version,
+            supported: REPORT_SCHEMA_VERSION,
+        });
+    }
+    serde_json::from_slice(bytes).map_err(|error| ReportLoadError::InvalidJson(error.to_string()))
+}
 
 /// Load and parse a crash report from a `.json` file or a `.zip` archive.
 ///
@@ -336,8 +414,8 @@ pub fn load_report(path: &Path) -> Result<CrashReport, String> {
     } else {
         read_plain_report(path)?
     };
-    let mut report: CrashReport = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("invalid report JSON in '{}': {e}", path.display()))?;
+    let mut report = decode_report(&bytes)
+        .map_err(|error| format!("cannot load report '{}': {error}", path.display()))?;
     overlay_manifest_diagnostics(path, &mut report);
     Ok(report)
 }
@@ -397,6 +475,8 @@ pub fn update_termination(path: &Path, reason: TerminationReason) -> Result<(), 
     } else {
         read_private_plain_report(path)?
     };
+    decode_report(&original)
+        .map_err(|error| format!("cannot update report '{}': {error}", path.display()))?;
     let mut document: serde_json::Value = serde_json::from_slice(&original)
         .map_err(|e| format!("invalid report JSON in '{}': {e}", path.display()))?;
     let object = document
@@ -834,11 +914,7 @@ pub fn build_report(
         exception,
         crash_context: formatted.crash_context,
         threads: formatted.threads,
-        breadcrumbs: if formatted.breadcrumbs.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Array(formatted.breadcrumbs))
-        },
+        breadcrumbs: (!formatted.breadcrumbs.is_empty()).then_some(formatted.breadcrumbs),
         loaded_images: formatted.loaded_images,
         memory_map: formatted.memory_map,
         heap_summary: formatted.heap_summary,

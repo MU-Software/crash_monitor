@@ -38,9 +38,11 @@ fn full_crash_report_json() -> String {
             "fault_address": "0x8"
         },
         "crash_context": {
-            "active_tool": "face_pull_drag",
-            "frame_number": 2847,
-            "region_count": 42
+            "annotations": {
+                "active_tool": "face_pull_drag",
+                "frame_number": "2847",
+                "region_count": "42"
+            }
         },
         "threads": [{
             "index": 0,
@@ -299,16 +301,13 @@ fn test_breadcrumb_field_layout() {
     // Verify breadcrumb format matches report_formatter::format_breadcrumbs
     let json = full_crash_report_json();
     let report: CrashReport = serde_json::from_str(&json).unwrap();
-    let crumbs = report.breadcrumbs.as_ref().unwrap().as_array().unwrap();
+    let crumbs = report.breadcrumbs.as_ref().unwrap();
     assert_eq!(crumbs.len(), 2);
     let first = &crumbs[0];
     // Field names: time_ns, cat, sev, file, line, msg
-    assert!(first.get("time_ns").is_some());
-    assert_eq!(first.get("cat").and_then(|v| v.as_str()), Some("crumb"));
-    assert_eq!(
-        first.get("msg").and_then(|v| v.as_str()),
-        Some("face_drag step dx=3")
-    );
+    assert_eq!(first.time_ns, 1000);
+    assert_eq!(first.cat, "crumb");
+    assert_eq!(first.msg, "face_drag step dx=3");
 }
 
 #[test]

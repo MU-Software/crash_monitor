@@ -510,7 +510,7 @@ fn load_report_for_conversion(path: &Path, context: &PluginContext) -> Result<Cr
             }
         }
     }
-    serde_json::from_slice(&bytes)
+    crate::pipeline::report::decode_report(&bytes)
         .map_err(|error| format!("invalid report JSON in '{}': {error}", path.display()))
 }
 
