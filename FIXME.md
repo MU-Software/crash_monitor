@@ -877,11 +877,11 @@
 
 ### P2-26. test의 process-global state와 고정 경로를 제거한다
 
-- [ ] environment filter를 pure function으로 만들고 synthetic environment를 주입한다.
-- [ ] process-global `set_var`에 의존하는 병렬 테스트를 제거한다.
-- [ ] 고정 temp path와 공유 `target/test-crash-data` 대신 `tempfile`/unique directory를 사용한다.
-- [ ] SHM test name은 실제 PID+random nonce/counter로 global POSIX namespace 충돌을 막는다.
-- [ ] raw cleanup, symbolicate, session tests도 각각 격리된 tempdir를 사용한다.
+- [x] environment filter를 pure function으로 만들고 synthetic environment를 주입한다.
+- [x] process-global `set_var`에 의존하는 병렬 테스트를 제거한다.
+- [x] 고정 temp path와 공유 `target/test-crash-data` 대신 `tempfile`/unique directory를 사용한다.
+- [x] SHM test name은 실제 PID+random nonce/counter로 global POSIX namespace 충돌을 막는다.
+- [x] raw cleanup, symbolicate, session tests도 각각 격리된 tempdir를 사용한다.
 
 범위: tests repository-wide.
 

@@ -1,10 +1,4 @@
-//! Tests for the data dir override.
-//!
-//! These tests rely on `.cargo/config.toml` setting `CRASH_MONITOR_DATA_DIR` to
-//! `target/test-crash-data` for all `cargo test` invocations. They never mutate
-//! the env var (which would race with parallel tests) — they only assert that
-//! the override is in effect, so accidental fallback to the user's home
-//! directory is impossible during testing.
+//! Tests for pure data-directory resolution and isolated test paths.
 
 use super::*;
 use std::io::Write;
@@ -19,15 +13,17 @@ fn mode(path: &std::path::Path) -> u32 {
 }
 
 #[test]
-fn test_data_dir_override_env_is_set_during_cargo_test() {
-    // .cargo/config.toml MUST set CRASH_MONITOR_DATA_DIR for all cargo invocations.
-    // If this assertion fails, the cargo config is missing or broken — and any
-    // test that triggers `pending_dir()` could leak files to the user's home.
-    let val = std::env::var("CRASH_MONITOR_DATA_DIR").expect(
-        "CRASH_MONITOR_DATA_DIR must be set by .cargo/config.toml during cargo test \
-         to prevent test fixtures from polluting ~/.crash_monitor/",
+fn test_data_dir_resolution_uses_synthetic_environment() {
+    assert_eq!(
+        data_dir_path_from_environment(Some(OsString::from("/override")), None).unwrap(),
+        PathBuf::from("/override")
     );
-    assert!(!val.is_empty(), "CRASH_MONITOR_DATA_DIR must not be empty");
+    assert_eq!(
+        data_dir_path_from_environment(None, Some(OsString::from("/home/test"))).unwrap(),
+        PathBuf::from("/home/test").join(DEFAULT_DATA_DIR_NAME)
+    );
+    assert!(data_dir_path_from_environment(Some(OsString::new()), None).is_err());
+    assert!(data_dir_path_from_environment(None, None).is_err());
 }
 
 #[test]
@@ -39,8 +35,8 @@ fn test_data_dir_uses_override_not_home() {
         "data_dir() must NOT use ~/.crash_monitor during tests, got: {s}"
     );
     assert!(
-        s.contains("test-crash-data"),
-        "data_dir() should resolve under target/test-crash-data, got: {s}"
+        s.contains("crash-monitor-test-"),
+        "data_dir() should resolve under a unique temporary directory, got: {s}"
     );
 }
 
@@ -53,8 +49,8 @@ fn test_pending_dir_uses_override_not_home() {
         "pending_dir() must NOT use ~/.crash_monitor during tests, got: {s}"
     );
     assert!(
-        s.contains("test-crash-data"),
-        "pending_dir() should resolve under target/test-crash-data, got: {s}"
+        s.contains("crash-monitor-test-"),
+        "pending_dir() should resolve under a unique temporary directory, got: {s}"
     );
     assert!(
         s.ends_with("crashes/pending"),

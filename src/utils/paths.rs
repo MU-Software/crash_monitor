@@ -6,6 +6,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::sync::OnceLock;
 
 use nix::fcntl::{AtFlags, OFlag, openat};
 use nix::sys::stat::{FchmodatFlags, Mode, fchmodat, fstatat, mkdirat};
@@ -24,9 +26,8 @@ pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 /// monitor points it at its own namespace (e.g. `~/.myapp`) by exporting
 /// `CRASH_MONITOR_DATA_DIR` before launching the monitor — the same value is
 /// inherited by the monitored child, so the C reporter and the Rust monitor
-/// agree on one location. It is also set by `tools/crash_monitor/.cargo/config.toml`
-/// during `cargo test`/`cargo run` to a sandbox under `target/` so tests never
-/// touch the real data directory.
+/// agree on one location. Unit tests use a process-unique temporary directory
+/// without mutating this process-global variable.
 ///
 /// When unset, both sides fall back to the tool default `~/.crash_monitor/`.
 const DATA_DIR_OVERRIDE_ENV: &str = "CRASH_MONITOR_DATA_DIR";
@@ -47,16 +48,37 @@ const DEFAULT_DATA_DIR_NAME: &str = match option_env!("CRASH_MONITOR_DATA_DIR_NA
 /// Base directory for crash reporter data: `$CRASH_MONITOR_DATA_DIR` if set,
 /// else `~/.crash_monitor/`.
 pub fn data_dir_path() -> Result<PathBuf, String> {
-    let dir = if let Ok(override_path) = std::env::var(DATA_DIR_OVERRIDE_ENV) {
-        if override_path.is_empty() {
-            return Err(format!("{DATA_DIR_OVERRIDE_ENV} is set but empty"));
-        }
-        PathBuf::from(override_path)
-    } else {
-        let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-        PathBuf::from(home).join(DEFAULT_DATA_DIR_NAME)
-    };
-    Ok(dir)
+    #[cfg(test)]
+    {
+        static TEST_DATA_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let dir = TEST_DATA_DIR.get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("crash-monitor-test-")
+                .tempdir()
+                .expect("create isolated crash-monitor test data directory")
+        });
+        return Ok(dir.path().to_path_buf());
+    }
+
+    #[cfg(not(test))]
+    data_dir_path_from_environment(
+        std::env::var_os(DATA_DIR_OVERRIDE_ENV),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn data_dir_path_from_environment(
+    override_path: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, String> {
+    match override_path {
+        Some(path) if path.is_empty() => Err(format!("{DATA_DIR_OVERRIDE_ENV} is set but empty")),
+        Some(path) => Ok(PathBuf::from(path)),
+        None => home
+            .map(PathBuf::from)
+            .map(|path| path.join(DEFAULT_DATA_DIR_NAME))
+            .ok_or_else(|| "HOME not set".to_string()),
+    }
 }
 
 pub fn data_dir() -> Result<PathBuf, String> {
