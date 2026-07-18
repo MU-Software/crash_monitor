@@ -7,9 +7,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use mach2::port::mach_port_t;
+use nix::fcntl::{OFlag, openat};
+use nix::sys::stat::Mode;
 
 use crate::pipeline::{
     ArtifactKind, CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution,
@@ -88,36 +90,75 @@ impl Collector for AttachmentCollector {
 /// Finalization-only pre-processor that copies registered attachment files.
 pub struct AttachmentCopier {
     output_dir: Option<PathBuf>,
-    allowed_source_roots: Vec<PathBuf>,
+    allowed_source_roots: Vec<AllowedSourceRoot>,
+}
+
+struct AllowedSourceRoot {
+    path: PathBuf,
+    directory: File,
+}
+
+impl AllowedSourceRoot {
+    fn open(path: PathBuf) -> Result<Self, String> {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map_err(|error| format!("cannot resolve attachment root: {error}"))?
+                .join(path)
+        };
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&path)
+            .map_err(|error| {
+                format!("cannot open attachment root '{}': {error}", path.display())
+            })?;
+        if !directory
+            .metadata()
+            .map_err(|error| {
+                format!(
+                    "cannot inspect attachment root '{}': {error}",
+                    path.display()
+                )
+            })?
+            .file_type()
+            .is_dir()
+        {
+            return Err(format!(
+                "attachment root is not a directory: '{}'",
+                path.display()
+            ));
+        }
+        Ok(Self { path, directory })
+    }
 }
 
 impl AttachmentCopier {
     #[must_use]
     pub fn new() -> Self {
+        let allowed_source_roots = std::env::current_dir()
+            .ok()
+            .and_then(|root| AllowedSourceRoot::open(root).ok())
+            .into_iter()
+            .collect();
         Self {
             output_dir: None,
-            allowed_source_roots: canonical_allowed_roots(std::iter::once(
-                std::env::current_dir().unwrap_or_default(),
-            )),
+            allowed_source_roots,
         }
     }
 
     #[cfg(test)]
     #[must_use]
     fn with_dir(output_dir: PathBuf) -> Self {
-        let allowed_source_roots = canonical_allowed_roots(std::iter::once(output_dir.clone()));
+        let allowed_source_roots = AllowedSourceRoot::open(output_dir.clone())
+            .into_iter()
+            .collect();
         Self {
             output_dir: Some(output_dir),
             allowed_source_roots,
         }
     }
-}
-
-fn canonical_allowed_roots(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    roots
-        .into_iter()
-        .filter_map(|root| std::fs::canonicalize(root).ok())
-        .collect()
 }
 
 impl Default for AttachmentCopier {
@@ -288,32 +329,13 @@ fn copy_bounded<R: Read, W: Write>(
 
 fn copy_registered_attachment(
     source_path: &Path,
-    allowed_source_roots: &[PathBuf],
+    allowed_source_roots: &[AllowedSourceRoot],
     destination: &Path,
     temporary_path: PathBuf,
     context: &PluginContext,
 ) -> Result<(u64, Option<String>), String> {
     context.checkpoint()?;
-    let path_metadata = std::fs::symlink_metadata(source_path)
-        .map_err(|error| format!("inspect attachment path failed: {error}"))?;
-    if path_metadata.file_type().is_symlink() {
-        return Err("attachment source symlink is not allowed".to_string());
-    }
-    let canonical_source = std::fs::canonicalize(source_path)
-        .map_err(|error| format!("canonicalize attachment failed: {error}"))?;
-    if !allowed_source_roots
-        .iter()
-        .any(|root| canonical_source.starts_with(root))
-    {
-        return Err("attachment is outside every allowed source root".to_string());
-    }
-    let mut source = OpenOptions::new()
-        .read(true)
-        // O_NOFOLLOW rejects a symlink final component. O_NONBLOCK prevents
-        // opening an attacker-controlled FIFO from stalling before fstat.
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(&canonical_source)
-        .map_err(|error| format!("open attachment failed: {error}"))?;
+    let mut source = open_attachment_source(source_path, allowed_source_roots)?;
     context.checkpoint()?;
 
     let metadata = source
@@ -340,6 +362,74 @@ fn copy_registered_attachment(
     context.checkpoint()?;
     let durability_warning = temporary.commit(destination)?;
     Ok((copied, durability_warning))
+}
+
+fn open_attachment_source(
+    source_path: &Path,
+    allowed_source_roots: &[AllowedSourceRoot],
+) -> Result<File, String> {
+    open_attachment_source_with_hook(source_path, allowed_source_roots, |_| {})
+}
+
+fn open_attachment_source_with_hook(
+    source_path: &Path,
+    allowed_source_roots: &[AllowedSourceRoot],
+    mut after_parent_open: impl FnMut(usize),
+) -> Result<File, String> {
+    for root in allowed_source_roots {
+        let relative = if source_path.is_absolute() {
+            let Ok(relative) = source_path.strip_prefix(&root.path) else {
+                continue;
+            };
+            relative
+        } else {
+            source_path
+        };
+        let components = relative
+            .components()
+            .map(|component| match component {
+                Component::Normal(component) => Ok(component.to_os_string()),
+                _ => Err("attachment path contains a non-normal component".to_string()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (file_name, parents) = components
+            .split_last()
+            .ok_or_else(|| "attachment path has no filename".to_string())?;
+        let mut directory = root
+            .directory
+            .try_clone()
+            .map_err(|error| format!("clone attachment root descriptor failed: {error}"))?;
+        for (depth, component) in parents.iter().enumerate() {
+            let descriptor = openat(
+                &directory,
+                component.as_os_str(),
+                OFlag::O_RDONLY
+                    | OFlag::O_DIRECTORY
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_NONBLOCK
+                    | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| format!("open attachment directory component failed: {error}"))?;
+            directory = File::from(descriptor);
+            let metadata = directory
+                .metadata()
+                .map_err(|error| format!("fstat attachment directory failed: {error}"))?;
+            if !metadata.file_type().is_dir() {
+                return Err("attachment path component is not a directory".to_string());
+            }
+            after_parent_open(depth);
+        }
+        let descriptor = openat(
+            &directory,
+            file_name.as_os_str(),
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| format!("open attachment file failed: {error}"))?;
+        return Ok(File::from(descriptor));
+    }
+    Err("attachment is outside every allowed source root".to_string())
 }
 
 fn attachment_filename_component(
@@ -748,6 +838,53 @@ mod tests {
             .unwrap();
 
         assert!(data.raw.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachment_open_rejects_intermediate_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("source.log"), b"outside").unwrap();
+        symlink(outside.path(), root.path().join("linked")).unwrap();
+        let copier = AttachmentCopier::with_dir(root.path().to_path_buf());
+
+        let error = open_attachment_source(
+            &root.path().join("linked/source.log"),
+            &copier.allowed_source_roots,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("directory component"));
+    }
+
+    #[test]
+    fn opened_parent_dirfd_survives_ancestor_swap_without_root_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let trusted = root.path().join("trusted");
+        let moved = root.path().join("trusted-moved");
+        std::fs::create_dir_all(trusted.join("inner")).unwrap();
+        std::fs::create_dir_all(outside.path().join("inner")).unwrap();
+        std::fs::write(trusted.join("inner/source.log"), b"inside").unwrap();
+        std::fs::write(outside.path().join("inner/source.log"), b"outside").unwrap();
+        let source = trusted.join("inner/source.log");
+        let copier = AttachmentCopier::with_dir(root.path().to_path_buf());
+        let mut swapped = false;
+
+        let mut file =
+            open_attachment_source_with_hook(&source, &copier.allowed_source_roots, |depth| {
+                if depth == 0 && !swapped {
+                    std::fs::rename(&trusted, &moved).unwrap();
+                    symlink(outside.path(), &trusted).unwrap();
+                    swapped = true;
+                }
+            })
+            .unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+
+        assert!(swapped);
+        assert_eq!(contents, "inside");
     }
 
     #[test]

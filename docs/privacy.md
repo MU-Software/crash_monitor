@@ -88,11 +88,13 @@ staging transaction remains subject to startup recovery rather than the sent
 store's age scan.
 
 Registered attachments have an additional filesystem boundary. The production
-copier accepts sources only below the monitor's canonical startup working
-directory. Labels and extensions are reduced to bounded ASCII filename
-components. A source must canonicalize below that root, must not itself be a
-symlink, and must still be a regular file after an `O_NOFOLLOW | O_NONBLOCK`
-open and `fstat`. Bytes are streamed from that already-open descriptor through
+copier pins the monitor's startup working directory as a trusted directory
+descriptor and accepts only normal path components below it. Labels and
+extensions are reduced to bounded ASCII filename components. Every parent is
+opened relative to the preceding descriptor with
+`openat(O_DIRECTORY | O_NOFOLLOW)` and verified by `fstat`; the final source is
+opened with `O_NOFOLLOW | O_NONBLOCK` and must be regular. Bytes are streamed
+from that already-open descriptor through
 the 50 MiB cap and cooperative deadline; the path is never reopened for copy.
 Destinations use private exclusive temporary files, random UUID names, and
 no-clobber atomic publication.
