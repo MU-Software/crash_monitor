@@ -6,3 +6,5 @@
 
 # Compiled E2E test fixture binary
 /tests/e2e/fixtures/crash_app
+
+/tmp
