@@ -9,6 +9,9 @@ use mach2::port::mach_port_t;
 use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
 };
+
+const MAX_SCREENSHOT_FRAMES: usize = 8;
+const MAX_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Default)]
 pub struct ScreenshotCollector;
 
@@ -43,7 +46,10 @@ impl Collector for ScreenshotCollector {
         let snapshot = context
             .shm_snapshot()
             .ok_or_else(|| "owned shared-memory snapshot unavailable".to_string())?;
-        let screenshots = snapshot.read_screenshots();
+        let (screenshots, truncated) =
+            snapshot.read_screenshots_bounded(MAX_SCREENSHOT_FRAMES, MAX_SCREENSHOT_BYTES, || {
+                !context.is_timed_out()
+            });
         context.checkpoint()?;
         if screenshots.is_empty() {
             eprintln!("[monitor] ScreenshotCollector: no valid screenshots in shm");
@@ -54,6 +60,12 @@ impl Collector for ScreenshotCollector {
             );
         }
         data.raw.screenshots = screenshots;
-        Ok(())
+        if truncated {
+            Err(format!(
+                "screenshot budget exceeded; retained at most {MAX_SCREENSHOT_FRAMES} frames and {MAX_SCREENSHOT_BYTES} bytes"
+            ))
+        } else {
+            Ok(())
+        }
     }
 }

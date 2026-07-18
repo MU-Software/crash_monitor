@@ -40,6 +40,7 @@ fn test_inspect_all_threads_success() {
         false,
         &PluginContext::without_deadline(),
     );
+    let result = result.threads;
     assert_eq!(result.len(), 2);
 
     assert_eq!(result[0].thread_port, 100);
@@ -78,6 +79,7 @@ fn test_stack_bytes_are_read_only_when_collection_policy_allows_them() {
         false,
         &PluginContext::without_deadline(),
     );
+    let threads = threads.threads;
     assert!(threads[0].stack_capture.is_none());
 
     let consented = platform_with_stack(0x5a);
@@ -88,6 +90,7 @@ fn test_stack_bytes_are_read_only_when_collection_policy_allows_them() {
         true,
         &PluginContext::without_deadline(),
     );
+    let threads = threads.threads;
     let stack = threads[0]
         .stack_capture
         .as_ref()
@@ -117,13 +120,52 @@ fn test_thread_cap_preserves_crashed_thread_and_releases_surplus_ports() {
         &PluginContext::without_deadline(),
     );
 
-    assert_eq!(result.len(), MAX_CAPTURED_THREADS);
+    assert_eq!(result.threads.len(), MAX_CAPTURED_THREADS);
     assert!(
         result
+            .threads
             .iter()
             .any(|thread| thread.thread_port == crashed_port)
     );
     assert_eq!(plat.deallocated_ports().len(), 3);
+    assert_eq!(result.budget_diagnostics.len(), 1);
+}
+
+#[test]
+fn total_stack_budget_prioritizes_crashed_thread_and_truncates_deterministically() {
+    let stack_count = MAX_TOTAL_STACK_BYTES / MAX_STACK_BYTES;
+    let mut plat = MockPlatform::default();
+    plat.threads = (0..=stack_count)
+        .map(|index| MockThread {
+            port: u32::try_from(index + 1).unwrap(),
+            stable_id: u64::try_from(index + 1).unwrap(),
+            name: None,
+            state: make_state(&[(31, 0x1000, 0), (32, 0x2000, 0)]),
+        })
+        .collect();
+    plat.memory.insert(0x1000, vec![0x5a; MAX_STACK_BYTES]);
+    let crashed_port = u32::try_from(stack_count + 1).unwrap();
+
+    let result = inspect_all_threads(
+        &plat,
+        0,
+        Some(crashed_port),
+        true,
+        &PluginContext::without_deadline(),
+    );
+
+    assert_eq!(result.threads[0].thread_port, crashed_port);
+    assert!(result.threads[0].stack_capture.is_some());
+    assert_eq!(
+        result
+            .threads
+            .iter()
+            .filter_map(|thread| thread.stack_capture.as_ref())
+            .map(|stack| stack.bytes.len())
+            .sum::<usize>(),
+        MAX_TOTAL_STACK_BYTES
+    );
+    assert_eq!(result.budget_diagnostics.len(), 1);
 }
 
 #[test]

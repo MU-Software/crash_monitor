@@ -870,16 +870,18 @@ pub fn write_report(
             eprintln!("[monitor] Failed to write screenshot RGBA: {e}");
             continue;
         }
-        report
-            .attachments
-            .push(crate::postprocessors::png_converter::rgba_attachment(
-                &format!("screenshot_{i:03}"),
-                &rgba_name,
-                shot.width,
-                shot.height,
-                shot.rgba.len() as u64,
-                shot.tier,
-            ));
+        let mut attachment = crate::postprocessors::png_converter::rgba_attachment(
+            &format!("screenshot_{i:03}"),
+            &rgba_name,
+            shot.width,
+            shot.height,
+            shot.rgba.len() as u64,
+            shot.tier,
+        );
+        if let Some(metadata) = attachment.as_object_mut() {
+            metadata.insert("timestamp_ns".into(), shot.timestamp_ns.into());
+        }
+        report.attachments.push(attachment);
     }
 
     let json =

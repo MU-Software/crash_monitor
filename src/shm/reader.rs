@@ -633,15 +633,30 @@ impl OwnedShmSnapshot {
     /// ordered newest first, with slot order providing a deterministic tie.
     #[must_use]
     pub fn read_screenshots(&self) -> Vec<RawScreenshot> {
+        self.read_screenshots_bounded(usize::MAX, usize::MAX, || true)
+            .0
+    }
+
+    /// Select and copy screenshots under deterministic frame/byte/deadline budgets.
+    ///
+    /// Lower producer tiers win first, then newer timestamps and lower slot
+    /// indices. The boolean result reports whether a valid frame was omitted.
+    #[must_use]
+    pub fn read_screenshots_bounded(
+        &self,
+        max_frames: usize,
+        max_bytes: usize,
+        mut should_continue: impl FnMut() -> bool,
+    ) -> (Vec<RawScreenshot>, bool) {
         let (Some(valid_offset), Some(timestamp_offset), Some(tier_offset), Some(data_offset)) = (
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, valid)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, timestamp)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, tier)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, data)),
         ) else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
-        let mut screenshots = Vec::new();
+        let mut candidates = Vec::new();
 
         for index in 0..SCREENSHOT_SLOTS as usize {
             let Some(valid) = indexed_offset(valid_offset, index, size_of::<u32>())
@@ -664,6 +679,28 @@ impl OwnedShmSnapshot {
             else {
                 continue;
             };
+            candidates.push((index, timestamp_ns, tier));
+        }
+
+        candidates.sort_by(|left, right| {
+            left.2
+                .cmp(&right.2)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        let candidate_count = candidates.len();
+        let mut screenshots = Vec::new();
+        let mut copied_bytes = 0usize;
+        for (index, timestamp_ns, tier) in candidates {
+            if screenshots.len() >= max_frames
+                || copied_bytes
+                    .checked_add(SCREENSHOT_BYTES_PER_SLOT)
+                    .is_none_or(|next| next > max_bytes)
+                || !should_continue()
+            {
+                break;
+            }
             let Some(rgba) = indexed_offset(data_offset, index, SCREENSHOT_BYTES_PER_SLOT)
                 .and_then(|offset| self.range(offset, SCREENSHOT_BYTES_PER_SLOT))
                 .map(<[u8]>::to_vec)
@@ -677,14 +714,11 @@ impl OwnedShmSnapshot {
                 height: SCREENSHOT_HEIGHT,
                 rgba,
             });
+            copied_bytes += SCREENSHOT_BYTES_PER_SLOT;
         }
 
-        screenshots.sort_by(|a, b| {
-            a.tier
-                .cmp(&b.tier)
-                .then_with(|| b.timestamp_ns.cmp(&a.timestamp_ns))
-        });
-        screenshots
+        let truncated = screenshots.len() < candidate_count;
+        (screenshots, truncated)
     }
 
     /// Return an owned copy of the breadcrumb section for Stage 1 persistence.

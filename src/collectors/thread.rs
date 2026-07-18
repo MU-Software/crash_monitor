@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 /// Bound per-event register/stack work and retained Mach send rights.
 const MAX_CAPTURED_THREADS: usize = 512;
+/// Maximum retained stack bytes across one event.
+const MAX_TOTAL_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 // ═══════════════════════════════════════════════════
 //  Raw data types
@@ -88,15 +90,20 @@ impl Collector for ThreadCollector {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        data.raw.threads = inspect_all_threads(
+        let inspection = inspect_all_threads(
             self.platform.as_ref(),
             task,
             event.crashed_thread,
             self.capture_stack_memory,
             context,
         );
+        data.raw.threads = inspection.threads;
         context.checkpoint()?;
-        Ok(())
+        if inspection.budget_diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(inspection.budget_diagnostics.join("; "))
+        }
     }
 }
 
@@ -106,18 +113,28 @@ impl Collector for ThreadCollector {
 
 /// Inspect all threads in a task. Each thread is inspected independently;
 /// failure of one thread does not prevent collection of others.
+struct ThreadInspection {
+    threads: Vec<RawThreadData>,
+    budget_diagnostics: Vec<String>,
+}
+
+#[allow(clippy::too_many_lines)] // one loop owns port retention, inspection, and shared budgets
 fn inspect_all_threads(
     plat: &dyn PlatformOps,
     task: mach_port_t,
     crashed_thread: Option<mach_port_t>,
     capture_stack_memory: bool,
     context: &PluginContext,
-) -> Vec<RawThreadData> {
+) -> ThreadInspection {
+    let mut budget_diagnostics = Vec::new();
     let mut threads = match plat.get_task_threads(task) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("[monitor] Failed to enumerate threads: {e}");
-            return vec![];
+            return ThreadInspection {
+                threads: Vec::new(),
+                budget_diagnostics,
+            };
         }
     };
 
@@ -135,9 +152,23 @@ fn inspect_all_threads(
         eprintln!(
             "[monitor] ThreadCollector: truncated thread list to {MAX_CAPTURED_THREADS} entries"
         );
+        budget_diagnostics.push(format!(
+            "thread budget exceeded; retained {MAX_CAPTURED_THREADS} threads"
+        ));
+    }
+
+    // Inspect and spend stack budget on the crashed thread first, then retain
+    // the task enumeration order. This makes truncation deterministic while
+    // preserving the most relevant stack.
+    if let Some(crashed_thread) = crashed_thread
+        && let Some(index) = threads.iter().position(|thread| *thread == crashed_thread)
+    {
+        threads[..=index].rotate_right(1);
     }
 
     let mut inspected = Vec::with_capacity(threads.len());
+    let mut remaining_stack_bytes = MAX_TOTAL_STACK_BYTES;
+    let mut stack_budget_exhausted = false;
     for thread in threads {
         let crashed = crashed_thread == Some(thread);
         let thread_id = plat.get_thread_identifier(thread).unwrap_or(0);
@@ -174,10 +205,19 @@ fn inspect_all_threads(
         match result {
             Ok((registers, backtrace)) => {
                 let stack_capture = if capture_stack_memory {
-                    registers
-                        .get("sp")
-                        .copied()
-                        .and_then(|sp| read_stack_memory(plat, task, sp, context).ok())
+                    registers.get("sp").copied().and_then(|sp| {
+                        if remaining_stack_bytes == 0 {
+                            stack_budget_exhausted = true;
+                            return None;
+                        }
+                        let outcome =
+                            read_stack_memory(plat, task, sp, remaining_stack_bytes, context)
+                                .ok()?;
+                        remaining_stack_bytes =
+                            remaining_stack_bytes.saturating_sub(outcome.capture.bytes.len());
+                        stack_budget_exhausted |= outcome.budget_limited;
+                        Some(outcome.capture)
+                    })
                 } else {
                     None
                 };
@@ -203,7 +243,15 @@ fn inspect_all_threads(
             }),
         }
     }
-    inspected
+    if stack_budget_exhausted {
+        budget_diagnostics.push(format!(
+            "stack budget exceeded; retained at most {MAX_TOTAL_STACK_BYTES} bytes"
+        ));
+    }
+    ThreadInspection {
+        threads: inspected,
+        budget_diagnostics,
+    }
 }
 
 /// Collect full thread state: registers + backtrace.
@@ -323,26 +371,39 @@ fn read_stack_memory(
     plat: &dyn PlatformOps,
     task: mach_port_t,
     sp: u64,
+    max_bytes: usize,
     context: &PluginContext,
-) -> Result<RawStackCapture, String> {
+) -> Result<StackReadOutcome, String> {
     context.checkpoint()?;
     if sp == 0 {
         return Err("SP is null".into());
     }
 
-    let read_size = compute_read_size(plat, task, sp);
+    let desired_size = compute_read_size(plat, task, sp);
+    let read_size = desired_size.min(max_bytes);
+    if read_size == 0 {
+        return Err("stack byte budget exhausted".into());
+    }
 
     let bytes = plat
         .vm_read(task, sp, read_size)
         .map_err(|e| format!("stack read failed: {e}"))?;
     context.checkpoint()?;
 
-    let truncated = bytes.len() < read_size;
-    Ok(RawStackCapture {
-        sp,
-        bytes,
-        truncated,
+    let truncated = bytes.len() < desired_size;
+    Ok(StackReadOutcome {
+        capture: RawStackCapture {
+            sp,
+            bytes,
+            truncated,
+        },
+        budget_limited: read_size < desired_size,
     })
+}
+
+struct StackReadOutcome {
+    capture: RawStackCapture,
+    budget_limited: bool,
 }
 
 /// Determine how many bytes to read from SP, using VM region info if available.

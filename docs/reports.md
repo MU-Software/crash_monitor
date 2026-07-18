@@ -219,6 +219,13 @@ provide a spawn snapshot, `variables_source` is `"unavailable"` and `env_vars`
 is empty. `kernel_release` and `kernel_version` are `uname` values; neither is
 presented as the macOS product version.
 
+Thread capture retains at most 512 threads, 64 KiB per stack, and 8 MiB of
+stack bytes per event. The crashed thread consumes that budget first. Thread
+and screenshot collectors also share the capture pipeline's absolute deadline.
+Screenshot selection retains at most 8 frames/4 MiB, prioritizing higher
+producer `tier`, then newer timestamps. Budget truncation is reported in the
+corresponding collector diagnostic rather than silently expanding the report.
+
 ## CLI analysis tools
 
 The same binary reads report artifacts offline. It accepts either the plain

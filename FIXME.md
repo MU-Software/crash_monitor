@@ -571,10 +571,10 @@
 
 ### P1-45. stack과 screenshot capture에 전역 budget을 둔다
 
-- [ ] thread 수, thread당 stack bytes, 전체 stack bytes, capture deadline 상한을 둔다.
-- [ ] screenshot은 최근 N개, 전체 bytes, decode/copy deadline으로 제한한다.
-- [ ] screenshot `tier`를 우선순위 선택에 사용한다.
-- [ ] budget 초과 시 deterministic truncation과 diagnostics를 남긴다.
+- [x] thread 수, thread당 stack bytes, 전체 stack bytes, capture deadline 상한을 둔다.
+- [x] screenshot은 최근 N개, 전체 bytes, decode/copy deadline으로 제한한다.
+- [x] screenshot `tier`를 우선순위 선택에 사용한다.
+- [x] budget 초과 시 deterministic truncation과 diagnostics를 남긴다.
 
 범위: `src/collectors/thread.rs`, `src/shm/reader.rs`, capture policy.
 

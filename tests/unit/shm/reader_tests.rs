@@ -818,6 +818,45 @@ fn test_mapping_shape_reports_size_before_alignment_and_distinguishes_alignment(
 }
 
 #[test]
+fn screenshot_budget_prefers_lower_tier_then_newer_timestamp() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let valid_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, valid);
+    let timestamp_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, timestamp);
+    let tier_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, tier);
+    let data_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, data);
+    for (index, timestamp, tier, marker) in [
+        (0usize, 300u64, 9u32, 0x90u8),
+        (1, 100, 1, 0x11),
+        (2, 200, 1, 0x12),
+    ] {
+        unsafe {
+            write_val::<u32>(shm.base_ptr(), valid_base + index * size_of::<u32>(), 2);
+            write_val::<u64>(
+                shm.base_ptr(),
+                timestamp_base + index * size_of::<u64>(),
+                timestamp,
+            );
+            write_val::<u32>(shm.base_ptr(), tier_base + index * size_of::<u32>(), tier);
+            *shm.base_ptr()
+                .add(data_base + index * SCREENSHOT_BYTES_PER_SLOT) = marker;
+        }
+    }
+
+    let (shots, truncated) =
+        snapshot(&shm).read_screenshots_bounded(2, SCREENSHOT_BYTES_PER_SLOT * 2, || true);
+    assert!(truncated);
+    assert_eq!(shots.len(), 2);
+    assert_eq!(
+        (shots[0].tier, shots[0].timestamp_ns, shots[0].rgba[0]),
+        (1, 200, 0x12)
+    );
+    assert_eq!(
+        (shots[1].tier, shots[1].timestamp_ns, shots[1].rgba[0]),
+        (1, 100, 0x11)
+    );
+}
+
+#[test]
 fn test_read_screenshots_last_slot_stays_within_owned_snapshot() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     let index = SCREENSHOT_SLOTS as usize - 1;

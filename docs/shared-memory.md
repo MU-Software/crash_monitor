@@ -254,8 +254,12 @@ spinning; other slots remain eligible.
 
 The numeric `tier` is retained in raw and report attachment metadata. Lower
 tier values have higher selection priority; frames within a tier are ordered
-newest first. This deterministic ordering lets later capture budgets truncate
-the result without discarding a higher-priority producer tier first.
+newest first, followed by ascending slot index as a stable tie-breaker. Report
+capture retains at most 8 frames and 4 MiB of
+RGBA data, checking the collector deadline before every slot copy. A budget
+omission is deterministic and appears in `ScreenshotCollector` diagnostics.
+The later PNG conversion runs under its own post-processor deadline. Screenshot
+attachment metadata retains the selected slot's `tier` and `timestamp_ns`.
 
 ## Atomic ABI rules
 
