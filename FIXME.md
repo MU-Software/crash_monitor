@@ -378,10 +378,10 @@
 
 ### P1-25. JSON·screenshot·PNG 갱신을 원자적으로 commit한다
 
-- [ ] 최초 JSON과 RGBA/screenshot도 final path에 직접 쓰지 않고 private temp file에 기록한다.
-- [ ] write·flush·fsync 성공 뒤 atomic rename한다.
-- [ ] PNG 변환은 새 PNG와 갱신 JSON을 모두 성공적으로 commit한 뒤에만 RGBA를 삭제한다.
-- [ ] disk full, permission denied, process kill, rename 실패에서 JSON과 image reference가 서로 어긋나지 않는 fault-injection test를 추가한다.
+- [x] 최초 JSON과 RGBA/screenshot도 final path에 직접 쓰지 않고 private temp file에 기록한다.
+- [x] write·flush·fsync 성공 뒤 atomic rename한다.
+- [x] PNG 변환은 새 PNG와 갱신 JSON을 모두 성공적으로 commit한 뒤에만 RGBA를 삭제한다.
+- [x] disk full, permission denied, process kill, rename 실패에서 JSON과 image reference가 서로 어긋나지 않는 fault-injection test를 추가한다.
 
 범위: `src/pipeline/report.rs`, `src/postprocessors/png_converter.rs`.
 
