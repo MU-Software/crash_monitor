@@ -19,6 +19,11 @@ use chrono::Local;
 use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::utils::paths::{
+    create_private_directory, create_private_file, ensure_private_directory,
+    open_private_directory, open_private_file, publish_private_path, validate_private_file,
+};
+
 use super::{CrashEvent, ReportType};
 
 pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -273,12 +278,7 @@ impl ArtifactTransaction {
 
     pub(crate) fn begin_shared(report: Arc<ReportContext>) -> Result<Arc<Self>, String> {
         ensure_real_directory(report.output_root())?;
-        fs::create_dir(report.staging_dir()).map_err(|error| {
-            format!(
-                "cannot create report staging directory '{}': {error}",
-                report.staging_dir().display()
-            )
-        })?;
+        create_private_directory(report.staging_dir())?;
         let owner_lock = match try_lock_report_directory(report.staging_dir()) {
             Ok(Some(owner_lock)) => owner_lock,
             Ok(None) => {
@@ -359,16 +359,12 @@ impl ArtifactTransaction {
             ".{file_name}.{}.artifact.tmp",
             uuid::Uuid::new_v4()
         ));
-        let mut temporary = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .map_err(|error| {
-                format!(
-                    "cannot create temporary artifact '{}': {error}",
-                    temporary_path.display()
-                )
-            })?;
+        let mut temporary = create_private_file(&temporary_path).map_err(|error| {
+            format!(
+                "cannot create temporary artifact '{}': {error}",
+                temporary_path.display()
+            )
+        })?;
 
         let write_result = (|| {
             write(&mut temporary)?;
@@ -379,7 +375,7 @@ impl ArtifactTransaction {
                 .sync_all()
                 .map_err(|error| format!("cannot sync artifact '{file_name}': {error}"))?;
             drop(temporary);
-            fs::rename(&temporary_path, &final_path).map_err(|error| {
+            publish_private_path(&temporary_path, &final_path).map_err(|error| {
                 format!(
                     "cannot publish artifact '{}' as '{}': {error}",
                     temporary_path.display(),
@@ -429,7 +425,11 @@ impl ArtifactTransaction {
         kind: ArtifactKind,
     ) -> Result<(), String> {
         let name = artifact_name_in(path, self.staging_dir())?;
-        let metadata = fs::symlink_metadata(path)
+        let file = open_private_file(path).map_err(|error| {
+            format!("cannot safely open artifact '{}': {error}", path.display())
+        })?;
+        let metadata = file
+            .metadata()
             .map_err(|error| format!("cannot inspect artifact '{}': {error}", path.display()))?;
         if !metadata.file_type().is_file() {
             return Err(format!(
@@ -516,10 +516,7 @@ impl ArtifactTransaction {
             uuid::Uuid::new_v4()
         ));
         let manifest_path = self.staging_dir().join(MANIFEST_FILE_NAME);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_manifest)
+        let mut file = create_private_file(&temporary_manifest)
             .map_err(|error| format!("cannot create temporary report manifest: {error}"))?;
         let prepare_result = (|| -> Result<(), String> {
             file.write_all(&manifest_json)
@@ -529,7 +526,7 @@ impl ArtifactTransaction {
             file.sync_all()
                 .map_err(|error| format!("cannot sync report manifest: {error}"))?;
             drop(file);
-            fs::rename(&temporary_manifest, &manifest_path)
+            publish_private_path(&temporary_manifest, &manifest_path)
                 .map_err(|error| format!("cannot commit report manifest: {error}"))?;
             lock(&self.core).state = TransactionState::Prepared;
             sync_directory(self.staging_dir())?;
@@ -552,7 +549,7 @@ impl ArtifactTransaction {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("cannot inspect report destination: {error}")),
         }
-        fs::rename(self.staging_dir(), &report_dir).map_err(|error| {
+        publish_private_path(self.staging_dir(), &report_dir).map_err(|error| {
             format!(
                 "cannot publish report directory '{}' as '{}': {error}",
                 self.staging_dir().display(),
@@ -605,17 +602,16 @@ impl ArtifactTransaction {
         let mut artifacts = Vec::new();
         for (name, kind) in registered {
             let path = self.staging_dir().join(name);
-            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            let file = open_private_file(&path).map_err(|error| {
                 format!("manifest artifact '{}' is missing: {error}", path.display())
             })?;
-            if !metadata.file_type().is_file() {
-                return Err(format!(
-                    "manifest artifact is not a regular file: '{}'",
+            let metadata = file.metadata().map_err(|error| {
+                format!(
+                    "cannot inspect manifest artifact '{}': {error}",
                     path.display()
-                ));
-            }
-            File::open(&path)
-                .and_then(|file| file.sync_all())
+                )
+            })?;
+            file.sync_all()
                 .map_err(|error| format!("cannot sync artifact '{}': {error}", path.display()))?;
             artifacts.push(ManifestArtifact {
                 path: name.clone(),
@@ -689,6 +685,16 @@ impl Drop for ArtifactTransaction {
 /// Returns an error when the output root cannot be safely enumerated. Unsafe
 /// individual candidates are logged and left hidden for later inspection.
 pub fn recover_prepared_reports(output_root: &Path) -> Result<usize, String> {
+    match fs::symlink_metadata(output_root) {
+        Ok(_) => ensure_private_directory(output_root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect report output root '{}': {error}",
+                output_root.display()
+            ));
+        }
+    }
     recover_prepared_reports_with_limits(output_root, RecoveryLimits::default())
 }
 
@@ -827,7 +833,7 @@ fn recover_prepared_entry(
         Err(error) => return Err(format!("cannot inspect report destination: {error}")),
     }
     ensure_before_deadline(Some(deadline))?;
-    fs::rename(entry.path(), &destination).map_err(|error| {
+    publish_private_path(&entry.path(), &destination).map_err(|error| {
         format!(
             "cannot publish prepared directory as '{}': {error}",
             destination.display()
@@ -1055,10 +1061,7 @@ fn validate_manifest_sizes(
     for artifact in &manifest.artifacts {
         ensure_before_deadline(deadline)?;
         let path = directory.join(&artifact.path);
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-            .open(&path)
+        let file = open_private_file(&path)
             .map_err(|error| format!("cannot safely open manifest artifact: {error}"))?;
         let metadata = file
             .metadata()
@@ -1088,7 +1091,7 @@ enum ManifestReadError {
 fn read_manifest_file(path: &Path) -> Result<Vec<u8>, ManifestReadError> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
         .open(path)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -1097,6 +1100,7 @@ fn read_manifest_file(path: &Path) -> Result<Vec<u8>, ManifestReadError> {
                 ManifestReadError::Unsafe(format!("manifest cannot be opened safely: {error}"))
             }
         })?;
+    validate_private_file(&file, path).map_err(ManifestReadError::Unsafe)?;
     let metadata = file
         .metadata()
         .map_err(|error| ManifestReadError::Unsafe(format!("cannot inspect manifest: {error}")))?;
@@ -1134,21 +1138,7 @@ fn ensure_before_deadline(deadline: Option<Instant>) -> Result<(), String> {
 /// Acquire advisory ownership of a real directory without following a final
 /// symlink. `Ok(None)` means another cooperating monitor currently owns it.
 pub(crate) fn try_lock_report_directory(path: &Path) -> Result<Option<Flock<File>>, String> {
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(
-            nix::libc::O_DIRECTORY
-                | nix::libc::O_NOFOLLOW
-                | nix::libc::O_CLOEXEC
-                | nix::libc::O_NONBLOCK,
-        )
-        .open(path)
-        .map_err(|error| {
-            format!(
-                "cannot safely open report directory '{}': {error}",
-                path.display()
-            )
-        })?;
+    let directory = open_private_directory(path)?;
     let metadata = directory.metadata().map_err(|error| {
         format!(
             "cannot inspect report directory '{}': {error}",
@@ -1172,70 +1162,25 @@ pub(crate) fn try_lock_report_directory(path: &Path) -> Result<Option<Flock<File
 }
 
 fn ensure_real_directory(path: &Path) -> Result<(), String> {
-    let mut missing = Vec::new();
-    let mut cursor = path.to_path_buf();
-    loop {
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if metadata.file_type().is_dir() => break,
-            Ok(_) => {
-                return Err(format!(
-                    "report destination is not a real directory: '{}'",
-                    cursor.display()
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if cursor.as_os_str().is_empty() {
-                    return Err("report destination has no existing ancestor".into());
-                }
-                missing.push(cursor.clone());
-                cursor = match cursor.parent() {
-                    Some(parent) if parent.as_os_str().is_empty() => PathBuf::from("."),
-                    Some(parent) => parent.to_path_buf(),
-                    None => {
-                        return Err(format!(
-                            "report destination has no parent: '{}'",
-                            path.display()
-                        ));
-                    }
-                };
-            }
-            Err(error) => {
-                return Err(format!(
-                    "cannot inspect report destination '{}': {error}",
-                    cursor.display()
-                ));
-            }
-        }
-    }
-
-    for directory in missing.iter().rev() {
-        match fs::create_dir(directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(format!(
-                    "cannot create report destination '{}': {error}",
-                    directory.display()
-                ));
-            }
-        }
-        let metadata = fs::symlink_metadata(directory).map_err(|error| {
-            format!(
-                "cannot verify report destination '{}': {error}",
-                directory.display()
-            )
-        })?;
-        if !metadata.file_type().is_dir() {
+    let existed = match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
             return Err(format!(
-                "report destination is not a real directory: '{}'",
-                directory.display()
+                "cannot inspect report destination '{}': {error}",
+                path.display()
             ));
         }
-        sync_directory(directory)?;
-        let parent = directory
+    };
+    ensure_private_directory(path)?;
+    if !existed {
+        let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
+        // The private-directory helper already persists each creation. Keep
+        // this pipeline-level parent sync as an explicit pre-publication
+        // durability boundary (and as the injectable failure point in tests).
         sync_directory(parent)?;
     }
     Ok(())
@@ -1259,8 +1204,8 @@ fn sync_directory(path: &Path) -> Result<(), String> {
         ));
     }
 
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
+    open_private_directory(path)?
+        .sync_all()
         .map_err(|error| format!("cannot sync directory '{}': {error}", path.display()))
 }
 
