@@ -11,5 +11,6 @@ cargo test --workspace --all-targets
 ```
 
 Privileged E2E tests additionally require an Apple Development signing identity.
-Use `make e2e SIGN_IDENTITY="Apple Development: ..."`. Update user-facing docs,
-schema fixtures, and the release checklist whenever their contracts change.
+Use `make e2e SIGN_IDENTITY="Apple Development: ..."`; an identity SHA-1 is
+also accepted when names are ambiguous. Update user-facing docs, schema
+fixtures, and the release checklist whenever their contracts change.

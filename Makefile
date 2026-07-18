@@ -13,6 +13,7 @@
 # Codesigning identity for the debugger entitlement (task_for_pid, vm_read).
 # Without it the monitor cannot inspect a crashing child (and e2e self-skips).
 SIGN_IDENTITY ?= Apple Development
+SIGN_IDENTITY_RESOLVER := ./scripts/resolve-sign-identity.sh
 ENTITLEMENTS  := crash_monitor.entitlements
 DIALOG_ENTITLEMENTS := crash_dialog.entitlements
 
@@ -48,15 +49,14 @@ build-unsigned:
 build: build-unsigned
 
 check-sign-identity:
-	@test -n "$(SIGN_IDENTITY)" || (echo "SIGN_IDENTITY is required for privileged signing" >&2; exit 2)
-	@security find-identity -v -p codesigning | grep -F -- "$(SIGN_IDENTITY)" >/dev/null || \
-		(echo "codesigning identity not found: $(SIGN_IDENTITY)" >&2; exit 2)
+	@$(SIGN_IDENTITY_RESOLVER) "$(SIGN_IDENTITY)" >/dev/null
 
 # Check credentials before starting a potentially long release compilation.
 sign: check-sign-identity
 	$(MAKE) build-unsigned
-	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
-	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
+	@resolved_identity="$$($(SIGN_IDENTITY_RESOLVER) "$(SIGN_IDENTITY)")" && \
+		codesign --entitlements $(ENTITLEMENTS) --force --sign "$$resolved_identity" $(MONITOR_BIN) && \
+		codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$$resolved_identity" $(MONITOR_DIALOG_BIN)
 
 # Ad-hoc signing is suitable for local distribution checks only. It does not
 # grant task_for_pid and therefore cannot run privileged capture E2E tests.
@@ -75,8 +75,9 @@ verify-package: package
 e2e-build: check-sign-identity
 	cargo build --release --workspace --features test-support
 	cargo build --release --locked --manifest-path crates/crash_dialog_mock/Cargo.toml --target-dir target
-	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
-	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
+	@resolved_identity="$$($(SIGN_IDENTITY_RESOLVER) "$(SIGN_IDENTITY)")" && \
+		codesign --entitlements $(ENTITLEMENTS) --force --sign "$$resolved_identity" $(MONITOR_BIN) && \
+		codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$$resolved_identity" $(MONITOR_DIALOG_BIN)
 
 # ── Lint ──────────────────────────────────────────────────────
 lint:
@@ -144,13 +145,14 @@ integration-coverage:
 	cargo llvm-cov --workspace --tests $(COV_EXCLUDE) --html --output-dir coverage-report-integration
 	@echo "Integration coverage: coverage-report-integration/html/index.html"
 
-e2e-coverage: $(E2E_CHILD)
+e2e-coverage: check-sign-identity $(E2E_CHILD)
 	cargo llvm-cov clean --workspace
 	mkdir -p target
 	cargo llvm-cov show-env --sh > $(COV_ENV_FILE)
 	. $(COV_ENV_FILE); cargo build --release --workspace --features test-support
-	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
-	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
+	@resolved_identity="$$($(SIGN_IDENTITY_RESOLVER) "$(SIGN_IDENTITY)")" && \
+		codesign --entitlements $(ENTITLEMENTS) --force --sign "$$resolved_identity" $(MONITOR_BIN) && \
+		codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$$resolved_identity" $(MONITOR_DIALOG_BIN)
 	. $(COV_ENV_FILE); CRASH_MONITOR_E2E_BIN=$(abspath $(MONITOR_BIN)) E2E_REQUIRED=1 cargo test --test e2e_tests -- --include-ignored --test-threads=1
 	cargo llvm-cov report $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"

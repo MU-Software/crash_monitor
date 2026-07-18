@@ -33,6 +33,10 @@ make sign       # release build + codesign with the debugger entitlement
 Codesigning with `crash_monitor.entitlements` grants
 `com.apple.security.cs.debugger`, required for `task_for_pid()` on the child
 without sudo. Override the identity with `make sign SIGN_IDENTITY="…"`.
+The build resolves a matching identity name to its SHA-1 before invoking
+`codesign`. Duplicate certificates with the same identity name are therefore
+safe; if a query matches different identity names, set `SIGN_IDENTITY` to an
+exact name or SHA-1.
 
 ## Run
 
