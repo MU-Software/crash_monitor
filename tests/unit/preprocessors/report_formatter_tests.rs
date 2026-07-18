@@ -198,7 +198,13 @@ fn test_format_heap_summary_empty_is_none() {
 #[test]
 fn test_format_heap_summary_with_zones() {
     let heap = RawHeapData {
-        vm_summary: None,
+        vm_summary: Some(crate::platform::TaskVmSummary {
+            virtual_size: 10,
+            resident_size: 20,
+            phys_footprint: 30,
+            internal: 40,
+            compressed: 50,
+        }),
         malloc_zones: vec![RawMallocZone {
             name: "DefaultMallocZone".to_string(),
             region_count: 3,
@@ -209,9 +215,13 @@ fn test_format_heap_summary_with_zones() {
     let summary = format_heap_summary(&heap).expect("zones present → Some");
     assert_eq!(summary.zones.len(), 1);
     assert_eq!(summary.zones[0].name, "DefaultMallocZone");
-    assert_eq!(summary.zones[0].in_use_count, 3);
-    // in_use_bytes = resident_pages * page_size (16KB on ARM64 macOS).
-    assert!(summary.zones[0].in_use_bytes >= 2 * 4096);
+    assert_eq!(summary.zones[0].region_count, 3);
+    assert_eq!(summary.zones[0].virtual_size_bytes, 1_000_000);
+    assert!(summary.zones[0].resident_bytes_estimate >= 2 * 4096);
+    let vm = summary.task_vm.expect("task VM summary");
+    assert_eq!(vm.physical_footprint_bytes, 30);
+    assert_eq!(vm.internal_bytes, 40);
+    assert_eq!(vm.compressed_bytes, 50);
 }
 
 // ── build_diagnostics_json ──

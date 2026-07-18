@@ -231,14 +231,29 @@ pub struct VmRegionReport {
 
 #[derive(Serialize, Deserialize)]
 pub struct HeapSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_vm: Option<TaskVmSummaryReport>,
     pub zones: Vec<HeapZoneReport>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TaskVmSummaryReport {
+    pub virtual_size_bytes: u64,
+    pub resident_size_bytes: u64,
+    pub physical_footprint_bytes: u64,
+    pub internal_bytes: u64,
+    pub compressed_bytes: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct HeapZoneReport {
     pub name: String,
-    pub in_use_bytes: u64,
-    pub in_use_count: u64,
+    #[serde(alias = "in_use_bytes")]
+    pub resident_bytes_estimate: u64,
+    #[serde(alias = "in_use_count")]
+    pub region_count: u64,
+    #[serde(default)]
+    pub virtual_size_bytes: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

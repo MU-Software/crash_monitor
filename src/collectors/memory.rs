@@ -22,7 +22,6 @@ use std::sync::Arc;
 /// Aggregated heap data for the target process.
 #[derive(Default, Serialize, Deserialize)]
 pub struct RawHeapData {
-    #[allow(dead_code)] // Phase 4+: will be included in report for phys_footprint etc.
     pub vm_summary: Option<TaskVmSummary>,
     pub malloc_zones: Vec<RawMallocZone>,
 }
@@ -32,7 +31,6 @@ pub struct RawHeapData {
 pub struct RawMallocZone {
     pub name: String,
     pub region_count: u32,
-    #[allow(dead_code)] // available for richer reporting (virtual size vs resident)
     pub total_size: u64,
     pub resident_pages: u32,
 }

@@ -525,10 +525,10 @@
 
 ### P1-40. memory report field를 실제 의미와 일치시킨다
 
-- [ ] allocator 사용량이 아닌 resident pages 근사값을 `in_use_bytes`라고 부르지 않는다.
-- [ ] allocation count가 아닌 VM region 수를 `in_use_count`라고 부르지 않는다.
-- [ ] `phys_footprint`, internal, compressed 등 이미 수집한 VM summary를 report에 포함한다.
-- [ ] schema rename과 backward compatibility/migration을 함께 처리한다.
+- [x] allocator 사용량이 아닌 resident pages 근사값을 `in_use_bytes`라고 부르지 않는다.
+- [x] allocation count가 아닌 VM region 수를 `in_use_count`라고 부르지 않는다.
+- [x] `phys_footprint`, internal, compressed 등 이미 수집한 VM summary를 report에 포함한다.
+- [x] schema rename과 backward compatibility/migration을 함께 처리한다.
 
 범위: `src/collectors/memory.rs`, `src/preprocessors/report_formatter.rs`, report schema.
 

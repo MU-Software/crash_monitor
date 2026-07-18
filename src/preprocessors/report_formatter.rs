@@ -13,7 +13,7 @@ use crate::collectors::memory::RawHeapData;
 use crate::collectors::thread::RawThreadData;
 use crate::pipeline::report::{
     BacktraceFrame, HeapSummary, HeapZoneReport, LoadedImageReport, SessionReport,
-    StackMemoryReport, ThreadReport, VmRegionReport,
+    StackMemoryReport, TaskVmSummaryReport, ThreadReport, VmRegionReport,
 };
 use crate::pipeline::{CollectedData, Diagnostics, PluginStatus};
 use crate::platform::VmRegionInfo;
@@ -201,14 +201,21 @@ fn format_heap_summary(heap: &RawHeapData) -> Option<HeapSummary> {
         .iter()
         .map(|z| HeapZoneReport {
             name: z.name.clone(),
-            // resident_pages * page_size approximates in-use bytes;
-            // total_size is virtual (includes free spans), so not suitable here.
-            in_use_bytes: u64::from(z.resident_pages) * page_size(),
-            in_use_count: u64::from(z.region_count),
+            resident_bytes_estimate: u64::from(z.resident_pages) * page_size(),
+            region_count: u64::from(z.region_count),
+            virtual_size_bytes: z.total_size,
         })
         .collect();
 
-    Some(HeapSummary { zones })
+    let task_vm = heap.vm_summary.as_ref().map(|vm| TaskVmSummaryReport {
+        virtual_size_bytes: vm.virtual_size,
+        resident_size_bytes: vm.resident_size,
+        physical_footprint_bytes: vm.phys_footprint,
+        internal_bytes: vm.internal,
+        compressed_bytes: vm.compressed,
+    });
+
+    Some(HeapSummary { task_vm, zones })
 }
 
 // ═══════════════════════════════════════════════════

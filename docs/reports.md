@@ -100,7 +100,10 @@ shape is:
   ],
   "loaded_images": [ { "path", "base", "slide" } ],
   "memory_map":    [ { "address", "size", "prot", "info" } ],
-  "heap_summary":  { "zones": [ { "name", "in_use_bytes", "in_use_count" } ] },
+  "heap_summary":  {
+    "task_vm": { "virtual_size_bytes", "resident_size_bytes", "physical_footprint_bytes", "internal_bytes", "compressed_bytes" },
+    "zones": [ { "name", "resident_bytes_estimate", "region_count", "virtual_size_bytes" } ]
+  },
   "session":       { "id", "start", "duration_s" },
   "breadcrumbs":   [ { "timestamp", "category", "message", … } ],
   "fingerprint":   "…",          // hash of the top app frames, for grouping
@@ -141,6 +144,12 @@ Thread `id` is the system-wide `THREAD_IDENTIFIER_INFO.thread_id`, not the
 monitor-local Mach port name. `unwind_method`, `unwind_truncated`, and
 `unwind_note` expose the current frame-pointer-only quality. arm64e PAC bits are
 removed from return-address lookup values; raw stack bytes remain unchanged.
+
+Malloc-tag zone metrics are VM approximations: `resident_bytes_estimate` is
+resident pages times host page size, and `region_count` counts VM regions, not
+allocator objects. Legacy `in_use_bytes`/`in_use_count` inputs remain accepted
+as aliases. The task VM summary exposes footprint, internal, and compressed
+bytes without relabeling them as allocator usage.
 `exception.severity` is `fatal`. `EXC_BREAKPOINT` is subscribed as a fatal
 `crash` mapped to `SIGTRAP`, and `EXC_GUARD` as a fatal `crash` mapped to
 `SIGKILL`; both retain every raw code. `EXC_RESOURCE` is deliberately not
