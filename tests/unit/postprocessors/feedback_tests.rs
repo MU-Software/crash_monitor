@@ -51,6 +51,7 @@ fn write_test_report(dir: &std::path::Path) -> PathBuf {
         settings_snapshot: None,
         fingerprint: None,
         environment: None,
+        process_output: None,
         attachments: vec![],
         user_feedback: None,
         diagnostics: None,

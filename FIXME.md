@@ -225,9 +225,9 @@
 
 ### P1-08. child stdout/stderr의 bounded tail을 보존한다
 
-- [ ] spawn file actions로 stdout/stderr를 tee하거나 bounded ring buffer에 수집한다.
-- [ ] child가 대량 출력해도 backpressure로 교착하지 않으며 최대 byte 수를 넘지 않게 한다.
-- [ ] 종료 report에 stream별 tail, truncation 여부, read 오류를 포함한다.
+- [x] spawn file actions로 stdout/stderr를 tee하거나 bounded ring buffer에 수집한다.
+- [x] child가 대량 출력해도 backpressure로 교착하지 않으며 최대 byte 수를 넘지 않게 한다.
+- [x] 종료 report에 stream별 tail, truncation 여부, read 오류를 포함한다.
 
 범위: `src/platform/macos/ffi/spawn.rs`, termination report.
 

@@ -56,6 +56,8 @@ pub struct CrashReport {
     pub fingerprint: Option<String>,
     #[serde(default)]
     pub environment: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_output: Option<crate::platform::ChildOutputSnapshot>,
     #[serde(default)]
     pub attachments: Vec<serde_json::Value>,
     #[serde(default)]
@@ -673,6 +675,7 @@ pub fn build_report(
         settings_snapshot: formatted.settings_snapshot,
         fingerprint: data.fingerprint.clone(),
         environment: formatted.environment,
+        process_output: formatted.process_output,
         attachments: formatted.attachments,
         user_feedback: None, // Patched post-write by FeedbackPostProcessor
         diagnostics: formatted.diagnostics_json,

@@ -5,6 +5,9 @@ use mach2::message::MACH_MSG_TYPE_MAKE_SEND;
 use mach2::port::{MACH_PORT_RIGHT_RECEIVE, mach_port_t};
 use nix::libc;
 use std::fmt;
+use std::fs::File;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::Arc;
 
 use crate::platform::macos::types::{
     ARM_THREAD_STATE64, CRASH_EXCEPTION_MASK, EXCEPTION_STATE_IDENTITY, MACH_EXCEPTION_CODES_FLAG,
@@ -20,6 +23,10 @@ pub enum SpawnStage {
     AttrInit,
     /// Installing the Mach exception port in the spawn attributes failed.
     ExceptionPorts,
+    /// Creating or configuring stdout/stderr capture pipes failed.
+    OutputPipe,
+    /// Configuring `posix_spawn` file actions failed.
+    FileActions,
     /// Creating or setting up the child executable failed.
     PosixSpawn,
 }
@@ -29,6 +36,8 @@ impl fmt::Display for SpawnStage {
         f.write_str(match self {
             Self::AttrInit => "posix_spawnattr_init",
             Self::ExceptionPorts => "posix_spawnattr_setexceptionports_np",
+            Self::OutputPipe => "pipe/fcntl",
+            Self::FileActions => "posix_spawn_file_actions",
             Self::PosixSpawn => "posix_spawn",
         })
     }
@@ -106,18 +115,89 @@ unsafe extern "C" {
 /// Returns [`SpawnError`] with the failing stage and its errno-style return
 /// code if spawn-attribute initialization, exception-port setup, or
 /// `posix_spawn` fails.
+#[allow(dead_code)] // Compatibility wrapper used by focused spawn tests.
 pub fn spawn_with_exception_port(
     exc_port: mach_port_t,
     app_path: &std::ffi::CStr,
     argv: &[&std::ffi::CStr],
     envp: &[&std::ffi::CStr],
 ) -> Result<libc::pid_t, SpawnError> {
+    spawn_with_exception_port_impl(exc_port, app_path, argv, envp, None)
+}
+
+/// Spawn while redirecting stdout and stderr to continuously-drained bounded
+/// tails. Pipe read ends remain private to the monitor and all original pipe
+/// descriptors are closed by the child's file actions after `dup2`.
+///
+/// # Errors
+/// Returns a [`SpawnError`] when pipe setup, file actions, spawn attributes, or
+/// the synchronous `posix_spawn` operation fails.
+pub fn spawn_with_exception_port_and_output(
+    exc_port: mach_port_t,
+    app_path: &std::ffi::CStr,
+    argv: &[&std::ffi::CStr],
+    envp: &[&std::ffi::CStr],
+    output: Arc<crate::platform::macos::ChildOutputCapture>,
+) -> Result<libc::pid_t, SpawnError> {
+    spawn_with_exception_port_impl(exc_port, app_path, argv, envp, Some(output))
+}
+
+struct OutputPipes {
+    stdout_read: OwnedFd,
+    stdout_write: OwnedFd,
+    stderr_read: OwnedFd,
+    stderr_write: OwnedFd,
+}
+
+fn last_errno() -> libc::c_int {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
+}
+
+fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd), SpawnError> {
+    let mut fds = [-1; 2];
+    // SAFETY: `fds` points to space for exactly two descriptors.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(SpawnError::new(SpawnStage::OutputPipe, last_errno()));
+    }
+    // SAFETY: pipe returned two newly-owned descriptors.
+    let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    for fd in [&read, &write] {
+        // SAFETY: descriptor is owned and valid for the duration of the call.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(SpawnError::new(SpawnStage::OutputPipe, last_errno()));
+        }
+    }
+    Ok((read, write))
+}
+
+fn output_pipes() -> Result<OutputPipes, SpawnError> {
+    let (stdout_read, stdout_write) = cloexec_pipe()?;
+    let (stderr_read, stderr_write) = cloexec_pipe()?;
+    Ok(OutputPipes {
+        stdout_read,
+        stdout_write,
+        stderr_read,
+        stderr_write,
+    })
+}
+
+fn spawn_with_exception_port_impl(
+    exc_port: mach_port_t,
+    app_path: &std::ffi::CStr,
+    argv: &[&std::ffi::CStr],
+    envp: &[&std::ffi::CStr],
+    output: Option<Arc<crate::platform::macos::ChildOutputCapture>>,
+) -> Result<libc::pid_t, SpawnError> {
     use std::ptr;
 
     let behavior = EXCEPTION_STATE_IDENTITY | MACH_EXCEPTION_CODES_FLAG;
+    let pipes = output.as_ref().map(|_| output_pipes()).transpose()?;
 
     // SAFETY: posix_spawnattr lifecycle is init → configure → spawn → destroy.
-    unsafe {
+    let pid = unsafe {
         let mut attr: libc::posix_spawnattr_t = ptr::null_mut();
         let rc = libc::posix_spawnattr_init(&raw mut attr);
         if rc != 0 {
@@ -137,6 +217,51 @@ pub fn spawn_with_exception_port(
             return Err(SpawnError::new(SpawnStage::ExceptionPorts, rc));
         }
 
+        let mut file_actions: libc::posix_spawn_file_actions_t = ptr::null_mut();
+        let file_actions_ptr = if let Some(pipes) = &pipes {
+            let rc = libc::posix_spawn_file_actions_init(&raw mut file_actions);
+            if rc != 0 {
+                libc::posix_spawnattr_destroy(&raw mut attr);
+                return Err(SpawnError::new(SpawnStage::FileActions, rc));
+            }
+            let actions = [
+                libc::posix_spawn_file_actions_adddup2(
+                    &raw mut file_actions,
+                    pipes.stdout_write.as_raw_fd(),
+                    libc::STDOUT_FILENO,
+                ),
+                libc::posix_spawn_file_actions_adddup2(
+                    &raw mut file_actions,
+                    pipes.stderr_write.as_raw_fd(),
+                    libc::STDERR_FILENO,
+                ),
+                libc::posix_spawn_file_actions_addclose(
+                    &raw mut file_actions,
+                    pipes.stdout_read.as_raw_fd(),
+                ),
+                libc::posix_spawn_file_actions_addclose(
+                    &raw mut file_actions,
+                    pipes.stdout_write.as_raw_fd(),
+                ),
+                libc::posix_spawn_file_actions_addclose(
+                    &raw mut file_actions,
+                    pipes.stderr_read.as_raw_fd(),
+                ),
+                libc::posix_spawn_file_actions_addclose(
+                    &raw mut file_actions,
+                    pipes.stderr_write.as_raw_fd(),
+                ),
+            ];
+            if let Some(rc) = actions.into_iter().find(|rc| *rc != 0) {
+                libc::posix_spawn_file_actions_destroy(&raw mut file_actions);
+                libc::posix_spawnattr_destroy(&raw mut attr);
+                return Err(SpawnError::new(SpawnStage::FileActions, rc));
+            }
+            &raw const file_actions
+        } else {
+            ptr::null()
+        };
+
         // Build null-terminated argv/envp arrays
         let mut c_argv: Vec<*mut libc::c_char> =
             argv.iter().map(|s| s.as_ptr().cast_mut()).collect();
@@ -150,20 +275,32 @@ pub fn spawn_with_exception_port(
         let rc = libc::posix_spawn(
             &raw mut pid,
             app_path.as_ptr(),
-            ptr::null(), // file_actions
+            file_actions_ptr,
             &raw const attr,
             c_argv.as_ptr(),
             c_envp.as_ptr(),
         );
 
+        if pipes.is_some() {
+            libc::posix_spawn_file_actions_destroy(&raw mut file_actions);
+        }
         libc::posix_spawnattr_destroy(&raw mut attr);
 
         if rc != 0 {
             return Err(SpawnError::new(SpawnStage::PosixSpawn, rc));
         }
 
-        Ok(pid)
+        pid
+    };
+
+    if let (Some(output), Some(pipes)) = (output, pipes) {
+        drop(pipes.stdout_write);
+        drop(pipes.stderr_write);
+        output.attach_stdout(File::from(pipes.stdout_read));
+        output.attach_stderr(File::from(pipes.stderr_read));
     }
+
+    Ok(pid)
 }
 
 #[cfg(test)]
@@ -216,5 +353,34 @@ mod tests {
         let error = result.expect_err("a missing executable must fail synchronously");
         assert_eq!(error.stage, SpawnStage::PosixSpawn);
         assert_eq!(error.rc, libc::ENOENT);
+    }
+
+    #[test]
+    fn captured_output_is_drained_without_exceeding_the_tail_limit() {
+        let port = allocate_receive_port().expect("allocate exception receive port");
+        insert_send_right(port).expect("insert exception port send right");
+        let app_path = CString::new("/bin/sh").unwrap();
+        let script = CString::new("head -c 262144 /dev/zero; printf 'stderr-tail' >&2").unwrap();
+        let dash_c = CString::new("-c").unwrap();
+        let argv = [app_path.as_c_str(), dash_c.as_c_str(), script.as_c_str()];
+        let output = Arc::new(crate::platform::macos::ChildOutputCapture::new(1024));
+
+        let pid = spawn_with_exception_port_and_output(port, &app_path, &argv, &[], output.clone())
+            .expect("spawn output fixture");
+        // SAFETY: `pid` is the direct child returned above and status is valid.
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
+
+        let snapshot = output.snapshot_after_eof(std::time::Duration::from_secs(1));
+        assert_eq!(snapshot.stdout.tail.len(), 1024);
+        assert!(snapshot.stdout.truncated);
+        assert_eq!(snapshot.stderr.tail, "stderr-tail");
+        assert!(!snapshot.stderr.truncated);
+        assert!(snapshot.stdout.read_error.is_none());
+        assert!(snapshot.stderr.read_error.is_none());
+
+        // SAFETY: `port` is a receive right allocated by this test.
+        let destroy_result = unsafe { mach_port_destroy(self_task(), port) };
+        assert_eq!(destroy_result, 0, "destroy temporary exception port");
     }
 }

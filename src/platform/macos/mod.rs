@@ -13,6 +13,7 @@
     clippy::cast_ptr_alignment,       // byte buffers are from mach_msg, properly aligned by kernel
 )]
 
+mod child_output;
 mod exceptions;
 pub mod ffi;
 mod memory;
@@ -20,6 +21,10 @@ mod thread;
 pub mod types;
 
 // Re-export testable types and pure functions
+#[allow(unused_imports)] // ChildStreamTail is part of the public snapshot schema.
+pub use child_output::{
+    ChildOutputCapture, ChildOutputSnapshot, ChildStreamTail, DEFAULT_CHILD_OUTPUT_TAIL_BYTES,
+};
 #[allow(unused_imports)]
 pub use exceptions::{
     ExceptionMessageError, MACH_EXCEPTION_RAISE_STATE_IDENTITY_ID, ParsedExceptionMessage,

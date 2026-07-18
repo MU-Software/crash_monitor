@@ -1240,6 +1240,9 @@ fn merge_owned_collected_data(target: &mut CollectedData, owned: &mut CollectedD
     if target.raw.environment.is_none() {
         target.raw.environment = owned.raw.environment.take();
     }
+    if target.raw.process_output.is_none() {
+        target.raw.process_output = owned.raw.process_output.take();
+    }
 }
 
 fn persist_final_diagnostics(committed: &CommittedReport, diagnostics: &mut Diagnostics) {
@@ -1365,12 +1368,32 @@ pub fn default_macos_pipeline_from_config(
 
 /// Build the default pipeline while injecting the exact environment that will
 /// be supplied to the monitored child.
+///
+/// # Errors
+/// Returns a structured configuration error when the assembled runtime plugin
+/// registry or dependency graph is invalid.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_lines)]
 pub fn default_macos_pipeline_from_config_with_environment(
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
     validated: &crate::config::ValidatedConfig,
     child_environment: Option<std::sync::Arc<crate::collectors::ChildEnvironmentSnapshot>>,
+) -> Result<Pipeline, crate::config::ConfigValidationError> {
+    default_macos_pipeline_from_config_with_runtime(shm, validated, child_environment, None)
+}
+
+/// Build the default pipeline with monitor-owned spawn-time inputs.
+///
+/// # Errors
+/// Returns a structured configuration error when the assembled runtime plugin
+/// registry or dependency graph is invalid.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_lines)]
+pub fn default_macos_pipeline_from_config_with_runtime(
+    shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
+    validated: &crate::config::ValidatedConfig,
+    child_environment: Option<std::sync::Arc<crate::collectors::ChildEnvironmentSnapshot>>,
+    child_output: Option<std::sync::Arc<crate::platform::ChildOutputCapture>>,
 ) -> Result<Pipeline, crate::config::ConfigValidationError> {
     use crate::collectors::{
         DylibCollector, EnvironmentCollector, MemoryCollector, ThreadCollector,
@@ -1432,6 +1455,12 @@ pub fn default_macos_pipeline_from_config_with_environment(
     // ── Collectors ──
     let mut collectors: Vec<Box<dyn Collector>> = vec![];
     let mut attachment_copy_enabled = false;
+
+    if let Some(child_output) = child_output {
+        collectors.push(Box::new(crate::collectors::ProcessOutputCollector::new(
+            child_output,
+        )));
+    }
 
     if on("ThreadCollector") {
         collectors.push(Box::new(ThreadCollector::new(

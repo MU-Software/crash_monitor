@@ -6,6 +6,7 @@ pub mod context;
 pub mod dylib;
 pub mod environment;
 pub mod memory;
+pub mod process_output;
 pub mod screenshot;
 pub mod thread;
 
@@ -15,6 +16,7 @@ pub use context::ContextCollector;
 pub use dylib::DylibCollector;
 pub use environment::{ChildEnvironmentSnapshot, EnvironmentCollector};
 pub use memory::MemoryCollector;
+pub use process_output::ProcessOutputCollector;
 pub use screenshot::ScreenshotCollector;
 pub use thread::ThreadCollector;
 
@@ -38,4 +40,6 @@ pub struct RawData {
     pub symbols: std::collections::BTreeMap<u64, String>,
     /// Environment and system info, populated by `EnvironmentCollector`.
     pub environment: Option<environment::RawEnvironment>,
+    /// Continuously-drained bounded stdout/stderr tails from the monitored child.
+    pub process_output: Option<crate::platform::ChildOutputSnapshot>,
 }

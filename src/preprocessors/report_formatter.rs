@@ -40,6 +40,7 @@ pub struct FormattedData {
     pub settings_snapshot: Option<serde_json::Value>,
     pub attachments: Vec<serde_json::Value>,
     pub environment: Option<serde_json::Value>,
+    pub process_output: Option<crate::platform::ChildOutputSnapshot>,
 }
 
 // ═══════════════════════════════════════════════════
@@ -76,6 +77,7 @@ pub fn format(data: &CollectedData, diagnostics: &Diagnostics) -> FormattedData 
         settings_snapshot,
         attachments,
         environment,
+        process_output: raw.process_output.clone(),
     }
 }
 

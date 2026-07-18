@@ -470,10 +470,14 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let child_environment = Arc::new(collectors::ChildEnvironmentSnapshot::from_c_strings(
         &env_strings,
     ));
-    let pl = match pipeline::default_macos_pipeline_from_config_with_environment(
+    let child_output = Arc::new(platform::ChildOutputCapture::new(
+        platform::DEFAULT_CHILD_OUTPUT_TAIL_BYTES,
+    ));
+    let pl = match pipeline::default_macos_pipeline_from_config_with_runtime(
         shared_memory.clone(),
         &validated_config,
         Some(child_environment),
+        Some(child_output.clone()),
     ) {
         Ok(pipeline) => Arc::new(pipeline),
         Err(error) => {
@@ -496,14 +500,19 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // exits before the call returns still has its full observable lifetime
     // represented.
     let child_started_at = Instant::now();
-    let child_pid_raw =
-        match platform::spawn_with_exception_port(exc_port, &c_path, &c_argv, &c_envp) {
-            Ok(pid) => pid,
-            Err(e) => {
-                eprintln!("[monitor] {e}");
-                return event_loop::EXIT_MONITOR_INTERNAL;
-            }
-        };
+    let child_pid_raw = match platform::spawn_with_exception_port_and_output(
+        exc_port,
+        &c_path,
+        &c_argv,
+        &c_envp,
+        child_output,
+    ) {
+        Ok(pid) => pid,
+        Err(e) => {
+            eprintln!("[monitor] {e}");
+            return event_loop::EXIT_MONITOR_INTERNAL;
+        }
+    };
     let child_pid = nix::unistd::Pid::from_raw(child_pid_raw);
 
     eprintln!("[monitor] Child PID: {child_pid}");

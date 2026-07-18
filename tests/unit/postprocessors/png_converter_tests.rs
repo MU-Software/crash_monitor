@@ -57,6 +57,7 @@ fn empty_report() -> CrashReport {
         settings_snapshot: None,
         fingerprint: None,
         environment: None,
+        process_output: None,
         attachments: vec![],
         user_feedback: None,
         diagnostics: None,
