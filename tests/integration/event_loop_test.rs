@@ -73,6 +73,16 @@ impl EventSource for ScriptedPollSource {
             .pop_front()
             .expect("event loop exhausted the scripted poll sequence")
     }
+
+    fn wait_until(&mut self, deadline: Option<std::time::Instant>) -> Option<MonitorEvent> {
+        let event = self.poll();
+        if event.is_none()
+            && let Some(deadline) = deadline
+        {
+            std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+        }
+        event
+    }
 }
 
 /// Verifies that the core loop uses the deadline-aware blocking API instead
@@ -1223,7 +1233,7 @@ fn test_unclaimed_shm_never_arms_anr_watchdog() {
         platform: platform.clone(),
         output_dir: Some(tempdir.path().to_path_buf()),
     });
-    // Two idle iterations exceed this threshold by a wide margin. Without the
+    // Five deadline intervals exceed this threshold. Without the
     // producer-ready gate, the monitor-initialized zero heartbeat fires ANR.
     let anr_config = AnrConfig {
         warmup_ms: 0,
@@ -1231,7 +1241,8 @@ fn test_unclaimed_shm_never_arms_anr_watchdog() {
         check_interval_ms: 5,
         cooldown_ms: 0,
     };
-    let mut source = ScriptedPollSource::new(vec![None, None, Some(exited(0, 125))]);
+    let mut source =
+        ScriptedPollSource::new(vec![None, None, None, None, None, Some(exited(0, 125))]);
 
     let result = event_loop(
         &mut source,
@@ -1272,7 +1283,7 @@ fn test_ready_stale_heartbeat_triggers_anr_capture() {
     });
     let anr_config = AnrConfig {
         warmup_ms: 0,
-        threshold_ms: 100,
+        threshold_ms: 10,
         check_interval_ms: 5,
         cooldown_ms: 1_000,
     };
@@ -1326,7 +1337,7 @@ fn test_slow_anr_capture_time_does_not_trigger_a_second_anr() {
     });
     let anr_config = AnrConfig {
         warmup_ms: 0,
-        threshold_ms: 200,
+        threshold_ms: 20,
         check_interval_ms: 5,
         cooldown_ms: 0,
     };
@@ -1390,7 +1401,7 @@ fn test_slow_snapshot_monitor_time_does_not_trigger_false_anr() {
     });
     let anr_config = AnrConfig {
         warmup_ms: 0,
-        threshold_ms: 200,
+        threshold_ms: 20,
         check_interval_ms: 5,
         cooldown_ms: 0,
     };
@@ -1453,7 +1464,7 @@ fn test_snapshot_preserves_real_stale_time_around_excluded_monitor_work() {
     });
     let anr_config = AnrConfig {
         warmup_ms: 0,
-        threshold_ms: 250,
+        threshold_ms: 25,
         check_interval_ms: 5,
         cooldown_ms: 1_000,
     };
