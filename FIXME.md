@@ -1061,11 +1061,11 @@
 
 ### P2-47. capture helper에 상속되는 file descriptor를 allowlist로 제한한다
 
-- [ ] Darwin `POSIX_SPAWN_CLOEXEC_DEFAULT`를 capture-helper spawn attribute에 적용해 file action으로 명시하지 않은 descriptor를 모두 닫는다.
-- [ ] result channel FD 3만 필수 상속하고, stderr가 필요하면 `addinherit_np`로 의도적인 예외를 선언하거나 helper 오류를 bounded result envelope로 전달한다.
-- [ ] result source FD가 3인 경우의 duplicate/close 순서와 `FD_CLOEXEC` 처리를 유지해 exec 뒤 FD 3이 정확히 하나의 owner를 갖게 한다.
-- [ ] 의도적으로 `CLOEXEC`가 아닌 sentinel pipe/file/lock FD를 연 상태에서 helper를 spawn해 helper에서는 `EBADF`이고 parent 수명과 EOF/lock을 연장하지 않는지 검증한다.
-- [ ] 불필요한 FD가 닫힌 상태에서도 capability handoff, bounded result write, timeout kill/reap이 모두 동작하는 실제 exec 통합 테스트를 추가한다.
+- [x] Darwin `POSIX_SPAWN_CLOEXEC_DEFAULT`를 capture-helper spawn attribute에 적용해 file action으로 명시하지 않은 descriptor를 모두 닫는다.
+- [x] result channel FD 3만 필수 상속하고, stderr가 필요하면 `addinherit_np`로 의도적인 예외를 선언하거나 helper 오류를 bounded result envelope로 전달한다.
+- [x] result source FD가 3인 경우의 duplicate/close 순서와 `FD_CLOEXEC` 처리를 유지해 exec 뒤 FD 3이 정확히 하나의 owner를 갖게 한다.
+- [x] 의도적으로 `CLOEXEC`가 아닌 sentinel pipe/file/lock FD를 연 상태에서 helper를 spawn해 helper에서는 `EBADF`이고 parent 수명과 EOF/lock을 연장하지 않는지 검증한다.
+- [x] 불필요한 FD가 닫힌 상태에서도 capability handoff, bounded result write, timeout kill/reap이 모두 동작하는 실제 exec 통합 테스트를 추가한다.
 
 범위: `src/platform/macos/ffi/capture_spawn.rs`, `tests/integration/capture_isolation_test.rs`.
 

@@ -54,6 +54,13 @@ pub(crate) struct TaskCaptureRequest {
     capture_stack_memory: bool,
     collectors: Vec<TaskCollectorSpec>,
     expect_crashed_thread: bool,
+    /// Integration-only assertion that an arbitrary parent descriptor was
+    /// closed by the capture-helper spawn allowlist.
+    #[serde(default)]
+    inherited_fd_must_be_closed: Option<i32>,
+    /// Integration-only delay used to exercise supervisor timeout kill/reap.
+    #[serde(default)]
+    hold_after_handoff_ms: Option<u64>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -133,6 +140,8 @@ impl TaskCaptureRequest {
             capture_stack_memory: pipeline.collection_policy.capture_stack_memory,
             collectors,
             expect_crashed_thread: event.crashed_thread.is_some(),
+            inherited_fd_must_be_closed: None,
+            hold_after_handoff_ms: None,
         }))
     }
 
@@ -158,10 +167,16 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
             request.version
         ));
     }
+    if let Some(fd) = request.inherited_fd_must_be_closed {
+        verify_descriptor_is_closed(fd)?;
+    }
     let (task, crashed_thread) =
         crate::platform::macos::ffi::capture_spawn::inherited_capture_ports(
             request.expect_crashed_thread,
         )?;
+    if let Some(delay_ms) = request.hold_after_handoff_ms {
+        std::thread::sleep(Duration::from_millis(delay_ms.min(30_000)));
+    }
     let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform::default());
     let mut data = CollectedData::default();
     let mut diagnostics = Diagnostics::new();
@@ -214,6 +229,29 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
     output
         .sync_data()
         .map_err(|error| format!("cannot sync capture-helper result: {error}"))
+}
+
+fn verify_descriptor_is_closed(fd: i32) -> Result<(), String> {
+    if fd < 0 || fd == crate::platform::macos::ffi::capture_spawn::CAPTURE_HELPER_RESULT_FD {
+        return Err(format!(
+            "invalid capture-helper closed-descriptor probe {fd}"
+        ));
+    }
+    // SAFETY: F_GETFD only queries the helper descriptor table.
+    let result = unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFD) };
+    if result >= 0 {
+        return Err(format!(
+            "capture helper unexpectedly inherited parent descriptor {fd}"
+        ));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(nix::libc::EBADF) {
+        Ok(())
+    } else {
+        Err(format!(
+            "capture helper could not verify descriptor {fd} closure: {error}"
+        ))
+    }
 }
 
 pub(crate) fn run_isolated_capture(

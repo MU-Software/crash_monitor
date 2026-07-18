@@ -266,6 +266,16 @@ impl SpawnAttributes {
         Ok(())
     }
 
+    fn set_flags(&mut self, flags: libc::c_short) -> Result<(), String> {
+        // SAFETY: the attributes object is initialized and `flags` contains
+        // only Darwin posix_spawn flags supported by this process.
+        let rc = unsafe { libc::posix_spawnattr_setflags(&raw mut self.0, flags) };
+        if rc != 0 {
+            return Err(errno_style_error("posix_spawnattr_setflags", rc));
+        }
+        Ok(())
+    }
+
     const fn as_ptr(&self) -> *const libc::posix_spawnattr_t {
         &raw const self.0
     }
@@ -593,7 +603,9 @@ fn duplicate_result_fd(result_fd: RawFd) -> Result<OwnedFd, String> {
 /// exception-handler slot. After `exec`, the helper exchanges a private receive
 /// port over that channel and the parent transfers the protected task/thread
 /// rights in a bounded Mach message. The result file is made available as
-/// descriptor 3 across `exec`.
+/// descriptor 3 across `exec`. `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every
+/// descriptor not explicitly produced by the file-action list, so descriptor 3
+/// is the helper's only inherited file descriptor.
 ///
 /// # Errors
 /// Returns an error before a child exists when validation, descriptor setup,
@@ -636,6 +648,9 @@ pub fn spawn_capture_helper(
     file_actions.add_close(duplicated_result_fd)?;
 
     let mut attributes = SpawnAttributes::new()?;
+    let close_by_default = libc::c_short::try_from(libc::POSIX_SPAWN_CLOEXEC_DEFAULT)
+        .map_err(|_| "Darwin POSIX_SPAWN_CLOEXEC_DEFAULT does not fit c_short".to_string())?;
+    attributes.set_flags(close_by_default)?;
     attributes.set_transport_port(EXC_MASK_RPC_ALERT, handoff.raw())?;
 
     let mut child_pid = 0;
