@@ -629,6 +629,63 @@ struct MonitorSupervisor {
     exception_port: platform::OwnedExceptionPort,
     event_source: event_source::MacEventSource,
     shared_memory: Option<Arc<shm::SharedMemory>>,
+    lifecycle: SupervisorLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorState {
+    Starting,
+    Monitoring,
+    Capturing,
+    Finalizing,
+    Terminating,
+    Reaped,
+}
+
+#[derive(Debug)]
+struct SupervisorLifecycle {
+    state: SupervisorState,
+}
+
+impl SupervisorLifecycle {
+    const CLEANUP_ORDER: [&'static str; 6] = [
+        "suspend_guard",
+        "exception_listener",
+        "exception_port",
+        "task_port",
+        "shared_memory",
+        "child_process_group",
+    ];
+
+    const fn new() -> Self {
+        Self {
+            state: SupervisorState::Starting,
+        }
+    }
+
+    fn transition(&mut self, next: SupervisorState) -> Result<(), String> {
+        let allowed = matches!(
+            (self.state, next),
+            (SupervisorState::Starting, SupervisorState::Monitoring)
+                | (SupervisorState::Starting, SupervisorState::Terminating)
+                | (SupervisorState::Monitoring, SupervisorState::Capturing)
+                | (SupervisorState::Monitoring, SupervisorState::Finalizing)
+                | (SupervisorState::Monitoring, SupervisorState::Terminating)
+                | (SupervisorState::Capturing, SupervisorState::Monitoring)
+                | (SupervisorState::Capturing, SupervisorState::Finalizing)
+                | (SupervisorState::Capturing, SupervisorState::Terminating)
+                | (SupervisorState::Finalizing, SupervisorState::Terminating)
+                | (SupervisorState::Terminating, SupervisorState::Reaped)
+        );
+        if !allowed {
+            return Err(format!(
+                "invalid supervisor transition {:?} -> {next:?}",
+                self.state
+            ));
+        }
+        self.state = next;
+        Ok(())
+    }
 }
 
 impl Drop for MonitorSupervisor {
@@ -636,6 +693,7 @@ impl Drop for MonitorSupervisor {
         // Wake the exception listener before its receiver and task/SHM owners
         // are released. `destroy` is idempotent with the crash cleanup path.
         self.exception_port.destroy();
+        debug_assert_eq!(SupervisorLifecycle::CLEANUP_ORDER[2], "exception_port");
     }
 }
 
@@ -896,7 +954,12 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         exception_port,
         event_source: source,
         shared_memory,
+        lifecycle: SupervisorLifecycle::new(),
     };
+    if let Err(error) = supervisor.lifecycle.transition(SupervisorState::Monitoring) {
+        eprintln!("[monitor] {error}");
+        return event_loop::EXIT_MONITOR_INTERNAL;
+    }
 
     let event_loop::EventLoopResult {
         mut outcome,
@@ -927,6 +990,11 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         );
         event_loop::event_loop(event_source, context)
     };
+
+    if crash_finalization.is_some() {
+        let _ = supervisor.lifecycle.transition(SupervisorState::Capturing);
+        let _ = supervisor.lifecycle.transition(SupervisorState::Finalizing);
+    }
 
     if matches!(&outcome, event_loop::MonitorOutcome::ChildTerminated(_)) {
         supervisor.child.mark_reaped();
@@ -996,8 +1064,14 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // public outcome remains MonitorFailure, preserving captured evidence and
     // TaskResume diagnostics without allowing reaping to block forever.
     if must_reap_child {
+        if supervisor.lifecycle.state != SupervisorState::Terminating {
+            let _ = supervisor
+                .lifecycle
+                .transition(SupervisorState::Terminating);
+        }
         let termination = match supervisor.child.reap_after_crash(supervisor_sigkill_sent) {
             Ok(reason) => {
+                let _ = supervisor.lifecycle.transition(SupervisorState::Reaped);
                 eprintln!("[monitor] Contained child terminated: {reason:?}");
                 Some(reason)
             }
@@ -1023,6 +1097,15 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         // This enriches DetectedCrash but deliberately leaves MonitorFailure
         // unchanged, preserving the supervisor-facing containment exit code.
         outcome = outcome.with_crash_result(termination, report_path);
+    }
+
+    if matches!(&outcome, event_loop::MonitorOutcome::ChildTerminated(_)) {
+        if supervisor.lifecycle.state == SupervisorState::Monitoring {
+            let _ = supervisor
+                .lifecycle
+                .transition(SupervisorState::Terminating);
+        }
+        let _ = supervisor.lifecycle.transition(SupervisorState::Reaped);
     }
 
     outcome.exit_code()
@@ -1103,6 +1186,28 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     const TEST_REAP_DEADLINE: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn supervisor_state_machine_rejects_skips_and_defines_cleanup_order() {
+        let mut lifecycle = SupervisorLifecycle::new();
+        assert!(lifecycle.transition(SupervisorState::Finalizing).is_err());
+        lifecycle.transition(SupervisorState::Monitoring).unwrap();
+        lifecycle.transition(SupervisorState::Capturing).unwrap();
+        lifecycle.transition(SupervisorState::Finalizing).unwrap();
+        lifecycle.transition(SupervisorState::Terminating).unwrap();
+        lifecycle.transition(SupervisorState::Reaped).unwrap();
+        assert_eq!(
+            SupervisorLifecycle::CLEANUP_ORDER,
+            [
+                "suspend_guard",
+                "exception_listener",
+                "exception_port",
+                "task_port",
+                "shared_memory",
+                "child_process_group"
+            ]
+        );
+    }
 
     fn entitlement_plist(value: &str) -> Vec<u8> {
         format!(

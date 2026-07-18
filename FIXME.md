@@ -671,9 +671,9 @@
 
 ### P2-04. child와 capture resource를 supervisor state machine으로 관리한다
 
-- [ ] PID, process group, task port, exception port, listener, SHM, suspend guard의 소유 상태를 한곳에서 관리한다.
-- [ ] start, monitoring, capturing, finalizing, terminating, reaped 상태와 허용 전이를 정의한다.
-- [ ] 각 상태에서 오류·signal·panic이 발생해도 정리 순서가 결정적이게 한다.
+- [x] PID, process group, task port, exception port, listener, SHM, suspend guard의 소유 상태를 한곳에서 관리한다.
+- [x] start, monitoring, capturing, finalizing, terminating, reaped 상태와 허용 전이를 정의한다.
+- [x] 각 상태에서 오류·signal·panic이 발생해도 정리 순서가 결정적이게 한다.
 
 범위: `src/main.rs`, `src/event_loop.rs`, platform guards.
 
