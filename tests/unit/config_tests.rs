@@ -53,6 +53,7 @@ fn test_default_validation_collects_no_sensitive_data() {
         "ScreenshotCollector",
         "AttachmentCollector",
         "EnvironmentCollector",
+        "ProcessOutputCollector",
     ] {
         assert!(!validated.plugin_enabled(plugin_id));
     }
@@ -211,6 +212,7 @@ fn property_privacy_profile_and_consent_gate_sensitive_collectors() {
                 "ScreenshotCollector",
                 "AttachmentCollector",
                 "EnvironmentCollector",
+                "ProcessOutputCollector",
             ][..],
         ),
     ];
@@ -223,7 +225,8 @@ fn property_privacy_profile_and_consent_gate_sensitive_collectors() {
                     "memory": {{ "enabled": true }},
                     "screenshot": {{ "enabled": true }},
                     "attachment": {{ "enabled": true }},
-                    "environment": {{ "enabled": true }}
+                    "environment": {{ "enabled": true }},
+                    "process_output": {{ "enabled": true }}
                 }}
             }}"#
         );
@@ -237,6 +240,7 @@ fn property_privacy_profile_and_consent_gate_sensitive_collectors() {
             "ScreenshotCollector",
             "AttachmentCollector",
             "EnvironmentCollector",
+            "ProcessOutputCollector",
         ] {
             assert_eq!(
                 validated.plugin_enabled(plugin_id),
@@ -252,7 +256,7 @@ fn property_privacy_profile_and_consent_gate_sensitive_collectors() {
             validated.collection_policy().capture_shm_attachments,
             expected.contains(&"AttachmentCollector")
         );
-        assert_eq!(validated.diagnostics().len(), 4 - expected.len());
+        assert_eq!(validated.diagnostics().len(), 5 - expected.len());
     }
 }
 
@@ -269,6 +273,7 @@ fn test_profile_and_consent_do_not_auto_enable_sensitive_collectors() {
         "ScreenshotCollector",
         "AttachmentCollector",
         "EnvironmentCollector",
+        "ProcessOutputCollector",
     ] {
         assert!(!profile_only.plugin_enabled(plugin_id));
     }
@@ -287,6 +292,7 @@ fn test_profile_and_consent_do_not_auto_enable_sensitive_collectors() {
     assert!(!memory_opt_in.plugin_enabled("ScreenshotCollector"));
     assert!(!memory_opt_in.plugin_enabled("AttachmentCollector"));
     assert!(!memory_opt_in.plugin_enabled("EnvironmentCollector"));
+    assert!(!memory_opt_in.plugin_enabled("ProcessOutputCollector"));
     assert!(memory_opt_in.diagnostics().is_empty());
 }
 
@@ -748,6 +754,7 @@ const CONFIG_PLUGIN_PATHS: &[(&str, &str, &str)] = &[
     ("ScreenshotCollector", "collectors", "screenshot"),
     ("AttachmentCollector", "collectors", "attachment"),
     ("EnvironmentCollector", "collectors", "environment"),
+    ("ProcessOutputCollector", "collectors", "process_output"),
     ("SessionEnricher", "pre_processors", "session"),
     ("SymbolResolver", "pre_processors", "symbolizer"),
     ("Fingerprinter", "pre_processors", "fingerprint"),
@@ -883,7 +890,7 @@ fn config_with_category_plugin_mask(
 fn property_every_category_plugin_mask_resolves_exactly() {
     for (category, expected_plugin_count) in [
         ("filters", 2_usize),
-        ("collectors", 8),
+        ("collectors", 9),
         ("pre_processors", 6),
         ("post_processors", 8),
         ("notifiers", 2),

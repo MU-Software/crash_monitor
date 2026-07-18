@@ -2,7 +2,7 @@
 
 Crash reports can contain application state and user data. The built-in policy
 therefore treats stack bytes, the process memory map and heap summary,
-environment variables, screenshots, registered attachments, and raw
+environment variables, child stdout/stderr tails, screenshots, registered attachments, and raw
 shared-memory dumps as sensitive, opt-in evidence. Policy is normalized once
 at startup; a legacy collector toggle cannot bypass the privacy gates, and the
 same immutable decision controls collector registration, task-memory reads,
@@ -17,15 +17,15 @@ true:
 2. `privacy.consent` is `granted`;
 3. its individual toggle is explicitly `true`.
 
-| Privacy level | Stack bytes | Memory map / heap | Environment | Screenshots | Attachments | Raw SHM |
-| --- | --- | --- | --- | --- | --- | --- |
-| `minimal` (default) | off | off | off | off | off | off |
-| `diagnostic` | consent + toggle | consent + toggle | off | off | off | off |
-| `full` | consent + toggle | consent + toggle | consent + toggle | consent + toggle | consent + toggle | consent + toggle |
+| Privacy level | Stack bytes | Memory map / heap | Environment | Process output | Screenshots | Attachments | Raw SHM |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `minimal` (default) | off | off | off | off | off | off | off |
+| `diagnostic` | consent + toggle | consent + toggle | off | off | off | off | off |
+| `full` | consent + toggle | consent + toggle | consent + toggle | consent + toggle | consent + toggle | consent + toggle | consent + toggle |
 
 Every sensitive toggle defaults to `false`. Stack bytes use
 `collectors.thread.stack_memory`; raw breadcrumb/context wire dumps use
-`privacy.raw_shm`; the other four use their collector toggle. A full opt-in is
+`privacy.raw_shm`; the other five use their collector toggle. A full opt-in is
 deliberate:
 
 ```json
@@ -40,6 +40,7 @@ deliberate:
     "thread": { "enabled": true, "stack_memory": true },
     "memory": { "enabled": true },
     "environment": { "enabled": true },
+    "process_output": { "enabled": true },
     "screenshot": { "enabled": true },
     "attachment": { "enabled": true }
   }
@@ -54,6 +55,10 @@ breadcrumbs, annotations, attachment labels/original paths, child-output
 tails, and feedback—is sanitized again immediately before each JSON write.
 Exact home directories, descendants, and username-only values are masked;
 macOS path matching is ASCII case-insensitive to match common volume behavior.
+Child output has no reliable secret allowlist, so its bounded tails require the
+full profile, granted consent, and the explicit `collectors.process_output`
+toggle even though the monitor continues draining the pipes to avoid child
+backpressure.
 
 Screenshot pixels have no reliable general-purpose redaction transform. They
 remain excluded by default and require the full privacy profile, deployment

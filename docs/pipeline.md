@@ -247,7 +247,7 @@ outcome**, worse than a degraded report. The design rules:
 Report triggers and non-sensitive plugins are enabled by default. An optional
 `crash_reporter.json` in the data directory can disable behavior, opt in to
 sensitive evidence, or adjust parameters (rate-limit window, retention limits,
-fingerprint frame count, …). Stack bytes, memory, environment, screenshots,
+fingerprint frame count, …). Stack bytes, memory, environment, child process output, screenshots,
 attachments, and raw SHM persistence are resolved through the fail-closed
 profile and consent gates in [privacy.md](privacy.md) before plugin dependency
 closure. The resulting immutable policy controls both plugin registration and

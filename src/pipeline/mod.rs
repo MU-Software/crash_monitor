@@ -1594,7 +1594,9 @@ pub fn default_macos_pipeline_from_config_with_runtime(
     let mut collectors: Vec<Box<dyn Collector>> = vec![];
     let mut attachment_copy_enabled = false;
 
-    if let Some(child_output) = child_output {
+    if on("ProcessOutputCollector")
+        && let Some(child_output) = child_output
+    {
         collectors.push(Box::new(crate::collectors::ProcessOutputCollector::new(
             child_output,
         )));

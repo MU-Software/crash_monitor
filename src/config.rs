@@ -1,8 +1,8 @@
 //! Configuration system for crash reporter plugins.
 //!
 //! Report triggers and non-sensitive plugins are enabled by default. Collection
-//! of raw stack bytes, memory diagnostics, environment data, screenshots,
-//! attachments, and raw shared-memory dumps is fail-closed behind an explicit
+//! of raw stack bytes, memory diagnostics, environment data, process output,
+//! screenshots, attachments, and raw shared-memory dumps is fail-closed behind an explicit
 //! privacy profile, consent declaration, and evidence-specific opt-in. A missing
 //! file selects the minimal profile; an existing unreadable, unsafe, or malformed
 //! file fails startup before the monitored child is spawned.
@@ -552,6 +552,7 @@ pub struct CollectorConfig {
     pub screenshot: PluginToggle,
     pub attachment: PluginToggle,
     pub environment: PluginToggle,
+    pub process_output: PluginToggle,
 }
 
 impl Default for CollectorConfig {
@@ -566,6 +567,7 @@ impl Default for CollectorConfig {
             screenshot: PluginToggle::disabled(),
             attachment: PluginToggle::disabled(),
             environment: PluginToggle::disabled(),
+            process_output: PluginToggle::disabled(),
         }
     }
 }
@@ -845,6 +847,12 @@ const PLUGIN_SPECS: &[PluginSpec] = &[
     PluginSpec {
         category: PluginCategory::Collector,
         id: "EnvironmentCollector",
+        hard_dependencies: NO_DEPS,
+        order_dependencies: NO_DEPS,
+    },
+    PluginSpec {
+        category: PluginCategory::Collector,
+        id: "ProcessOutputCollector",
         hard_dependencies: NO_DEPS,
         order_dependencies: NO_DEPS,
     },
@@ -1245,11 +1253,12 @@ fn resolve_plugin_enablement(
     Ok((enabled, diagnostics))
 }
 
-const SENSITIVE_COLLECTORS: [&str; 4] = [
+const SENSITIVE_COLLECTORS: [&str; 5] = [
     "MemoryCollector",
     "ScreenshotCollector",
     "AttachmentCollector",
     "EnvironmentCollector",
+    "ProcessOutputCollector",
 ];
 
 fn sensitive_collector_toggle(collectors: &CollectorConfig, plugin_id: &str) -> bool {
@@ -1258,6 +1267,7 @@ fn sensitive_collector_toggle(collectors: &CollectorConfig, plugin_id: &str) -> 
         "ScreenshotCollector" => collectors.screenshot.enabled,
         "AttachmentCollector" => collectors.attachment.enabled,
         "EnvironmentCollector" => collectors.environment.enabled,
+        "ProcessOutputCollector" => collectors.process_output.enabled,
         _ => false,
     }
 }
@@ -1452,6 +1462,14 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
                 config,
                 "EnvironmentCollector",
                 config.collectors.environment.enabled,
+            ),
+        ),
+        (
+            "ProcessOutputCollector",
+            sensitive_collector_enabled(
+                config,
+                "ProcessOutputCollector",
+                config.collectors.process_output.enabled,
             ),
         ),
         (

@@ -3018,6 +3018,46 @@ fn test_macos_factory_registers_explicitly_consented_sensitive_collectors() {
 }
 
 #[test]
+fn test_macos_factory_gates_process_output_on_explicit_privacy_consent() {
+    let capture = Arc::new(crate::platform::ChildOutputCapture::new(64));
+    let default_config = crate::config::CrashReporterConfig::default()
+        .validate()
+        .unwrap();
+    let default_pipeline = default_macos_pipeline_from_config_with_runtime(
+        None,
+        &default_config,
+        None,
+        Some(capture.clone()),
+    )
+    .unwrap();
+    assert!(
+        !default_pipeline
+            .collectors
+            .iter()
+            .any(|collector| collector.name() == "ProcessOutputCollector")
+    );
+
+    let opted_in = serde_json::from_str::<crate::config::CrashReporterConfig>(
+        r#"{
+            "privacy": { "level": "full", "consent": "granted" },
+            "collectors": { "process_output": { "enabled": true } }
+        }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    let opted_in_pipeline =
+        default_macos_pipeline_from_config_with_runtime(None, &opted_in, None, Some(capture))
+            .unwrap();
+    assert!(
+        opted_in_pipeline
+            .collectors
+            .iter()
+            .any(|collector| collector.name() == "ProcessOutputCollector")
+    );
+}
+
+#[test]
 fn test_factory_runtime_metadata_matches_static_config_registry() {
     let validated = crate::config::CrashReporterConfig::default()
         .validate()
