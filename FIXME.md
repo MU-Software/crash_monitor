@@ -1047,6 +1047,26 @@
 
 범위: operations/troubleshooting documentation.
 
+### P2-46. capture helper의 `waitpid` 소유권과 `ECHILD` 정책을 통일한다
+
+- [ ] 정상 완료 poll, timeout 후 kill/reap, capability handoff 실패 정리에서 공통 typed reap 결과와 하나의 `ECHILD` 정책을 사용한다.
+- [ ] capture helper를 reap하는 주체가 정확히 하나라는 invariant를 명시하고, 별도 global/late reaper가 같은 PID를 소비하지 못하게 한다.
+- [ ] strict capture 경계에서 `ECHILD`를 단순 성공이나 `TimedOut` 증거로 사용하지 않고 wait 소유권 상실로 진단해 `CleanupUnproven` containment를 적용한다.
+- [ ] 정상 완료의 exit status 확인과 helper/Mach-right cleanup 증명을 구분해, status를 얻지 못한 결과가 성공으로 decode되지 않게 한다.
+- [ ] 세 경로에 `ECHILD`를 fault-inject해 target이 resume되지 않고 최소 evidence와 supervisor diagnostics가 보존되는지 테스트한다.
+
+범위: `src/pipeline/capture_isolation.rs`, `src/platform/macos/ffi/capture_spawn.rs`, capture worker tests.
+
+### P2-47. capture helper에 상속되는 file descriptor를 allowlist로 제한한다
+
+- [ ] Darwin `POSIX_SPAWN_CLOEXEC_DEFAULT`를 capture-helper spawn attribute에 적용해 file action으로 명시하지 않은 descriptor를 모두 닫는다.
+- [ ] result channel FD 3만 필수 상속하고, stderr가 필요하면 `addinherit_np`로 의도적인 예외를 선언하거나 helper 오류를 bounded result envelope로 전달한다.
+- [ ] result source FD가 3인 경우의 duplicate/close 순서와 `FD_CLOEXEC` 처리를 유지해 exec 뒤 FD 3이 정확히 하나의 owner를 갖게 한다.
+- [ ] 의도적으로 `CLOEXEC`가 아닌 sentinel pipe/file/lock FD를 연 상태에서 helper를 spawn해 helper에서는 `EBADF`이고 parent 수명과 EOF/lock을 연장하지 않는지 검증한다.
+- [ ] 불필요한 FD가 닫힌 상태에서도 capability handoff, bounded result write, timeout kill/reap이 모두 동작하는 실제 exec 통합 테스트를 추가한다.
+
+범위: `src/platform/macos/ffi/capture_spawn.rs`, `tests/integration/capture_isolation_test.rs`.
+
 ## 전체 완료 조건
 
 - [ ] `exit(1)`, uncaught signal, Mach exception, possible OOM, ANR, snapshot이 각각 고유 `ReportId`와 올바른 termination metadata로 보고된다.
