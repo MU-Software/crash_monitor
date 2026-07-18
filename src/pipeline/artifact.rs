@@ -921,6 +921,16 @@ pub fn scavenge_stale_pending(
 }
 
 fn scavenge_stale_pending_inner(output_root: &Path, max_age: Duration) -> Result<usize, String> {
+    match fs::symlink_metadata(output_root) {
+        Ok(_) => ensure_private_directory(output_root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect pending root '{}': {error}",
+                output_root.display()
+            ));
+        }
+    }
     let mut removed = 0;
     let now = SystemTime::now();
     for (index, entry) in fs::read_dir(output_root)
@@ -2576,5 +2586,17 @@ mod tests {
             1
         );
         assert!(!staging.exists());
+    }
+
+    #[test]
+    fn startup_scavenger_accepts_a_missing_first_run_root() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = root.path().join("not-created-yet");
+
+        assert_eq!(
+            scavenge_stale_pending(&pending, Duration::from_secs(1)).unwrap(),
+            0
+        );
+        assert!(!pending.exists());
     }
 }
