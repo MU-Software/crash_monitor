@@ -3,6 +3,7 @@ use crate::pipeline::report::SessionReport;
 use crate::pipeline::{CommittedReport, CrashEvent, PluginContext, ReportResult, ReportType};
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -206,6 +207,46 @@ fn test_append_session_record_accepts_regular_file() {
         std::fs::read_to_string(path).unwrap(),
         "{\"id\":\"session\"}\n"
     );
+    assert_eq!(
+        std::fs::metadata(dir.path().join("sessions.jsonl"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+}
+
+#[test]
+fn test_append_session_record_repairs_owned_mode_and_rejects_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.jsonl");
+    std::fs::write(&path, b"existing\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    append_session_record(
+        &path,
+        r#"{"id":"session"}"#,
+        &PluginContext::without_deadline(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+
+    std::fs::remove_file(&path).unwrap();
+    let outside = dir.path().join("outside.jsonl");
+    std::fs::write(&outside, b"outside\n").unwrap();
+    symlink(&outside, &path).unwrap();
+    let error = append_session_record(
+        &path,
+        r#"{"id":"blocked"}"#,
+        &PluginContext::without_deadline(),
+    )
+    .unwrap_err();
+    assert!(error.contains("cannot open") || error.contains("validate"));
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside\n");
 }
 
 #[test]

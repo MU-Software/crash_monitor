@@ -4,6 +4,7 @@ use crate::pipeline::{
 };
 use crate::postprocessors::RetentionManager;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
@@ -337,7 +338,7 @@ fn test_does_not_delete_report_with_unmanifested_extra_file() {
     let report = commit_report(&pending, &sent, 16, current_unix_time() - 10);
     fs::write(report.join("unexpected.tmp"), "must fail closed").unwrap();
 
-    let error = RetentionManager::with_dir(0, 0, 365, sent)
+    let error = RetentionManager::with_dir(0, 0, 365, sent.clone())
         .process(
             &dummy_event(),
             &mut dummy_result(),
@@ -371,6 +372,24 @@ fn test_never_follows_report_directory_or_artifact_symlinks() {
     fs::rename(&linked_report, &outside_report).unwrap();
     symlink(&outside_report, &linked_report).unwrap();
 
+    let error = RetentionManager::with_dir(0, 0, 365, sent.clone())
+        .process(
+            &dummy_event(),
+            &mut dummy_result(),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap_err();
+
+    assert!(error.contains("symlink entry"), "{error}");
+    assert!(
+        fs::symlink_metadata(&linked_report)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(outside_report.join("manifest.json").is_file());
+
+    fs::remove_file(&linked_report).unwrap();
     let invalid_artifact_report = commit_report(&pending, &sent, 16, now - 10);
     let outside_file = outside.join("outside.json");
     fs::write(&outside_file, vec![b'x'; 16]).unwrap();
@@ -385,14 +404,11 @@ fn test_never_follows_report_directory_or_artifact_symlinks() {
         )
         .unwrap_err();
 
-    assert!(error.contains("not a regular file"));
     assert!(
-        fs::symlink_metadata(linked_report)
-            .unwrap()
-            .file_type()
-            .is_symlink()
+        error.contains("cannot safely open private file")
+            && (error.contains("ELOOP") || error.contains("not a regular file")),
+        "{error}"
     );
-    assert!(outside_report.join("manifest.json").is_file());
     assert!(invalid_artifact_report.is_dir());
     assert_eq!(fs::read(outside_file).unwrap(), vec![b'x'; 16]);
 }
@@ -806,6 +822,89 @@ fn test_empty_dir_noop() {
             )
             .is_ok()
     );
+    assert_eq!(
+        fs::metadata(dir.path()).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_DIRECTORY_MODE
+    );
+    assert_eq!(
+        fs::metadata(dir.path().join(".retention.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+}
+
+#[test]
+fn test_scan_repairs_private_modes_for_legacy_and_committed_reports() {
+    let root = tempfile::tempdir().unwrap();
+    let pending = root.path().join("pending");
+    let sent = root.path().join("sent");
+    fs::create_dir(&pending).unwrap();
+    fs::create_dir(&sent).unwrap();
+    let legacy = sent.join("legacy.json");
+    fs::write(&legacy, b"{}").unwrap();
+    fs::set_permissions(&legacy, fs::Permissions::from_mode(0o644)).unwrap();
+    let committed = commit_report(&pending, &sent, 16, current_unix_time());
+    fs::set_permissions(&committed, fs::Permissions::from_mode(0o755)).unwrap();
+    for path in [
+        committed.join("manifest.json"),
+        committed.join("report.json"),
+        committed.join("attachment.txt"),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    RetentionManager::with_dir(64, 256, 365, sent)
+        .process(
+            &dummy_event(),
+            &mut dummy_result(),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::metadata(legacy).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+    assert_eq!(
+        fs::metadata(&committed).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_DIRECTORY_MODE
+    );
+    for path in [
+        committed.join("manifest.json"),
+        committed.join("report.json"),
+        committed.join("attachment.txt"),
+    ] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+            crate::utils::paths::PRIVATE_FILE_MODE
+        );
+    }
+}
+
+#[test]
+fn test_scan_rejects_legacy_symlink_without_following_target() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let sent = root.path().join("sent");
+    fs::create_dir(&sent).unwrap();
+    let outside = root.path().join("outside.json");
+    fs::write(&outside, b"outside").unwrap();
+    symlink(&outside, sent.join("legacy.json")).unwrap();
+
+    let error = RetentionManager::with_dir(64, 256, 365, sent)
+        .process(
+            &dummy_event(),
+            &mut dummy_result(),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap_err();
+
+    assert!(error.contains("symlink entry"));
+    assert_eq!(fs::read(outside).unwrap(), b"outside");
 }
 
 #[test]

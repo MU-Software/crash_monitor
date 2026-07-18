@@ -3,6 +3,7 @@ use crate::pipeline::{
 };
 use crate::postprocessors::LogRotator;
 use std::fmt::Write as _;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
@@ -83,6 +84,30 @@ fn test_truncates_when_large() {
     let after = std::fs::read_to_string(&log_path).unwrap();
     let lines_after: Vec<&str> = after.lines().collect();
     assert_eq!(lines_after.len(), 50, "should keep 50% of lines");
+    assert_eq!(
+        std::fs::metadata(&log_path).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+}
+
+#[test]
+fn test_rejects_symlink_log_without_replacing_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.jsonl");
+    let log_path = dir.path().join("sessions.jsonl");
+    std::fs::write(&outside, "outside\n").unwrap();
+    symlink(&outside, &log_path).unwrap();
+
+    let error = LogRotator::with_path(0, log_path)
+        .process(
+            &dummy_event(),
+            &mut dummy_result(),
+            &PluginContext::without_deadline(),
+        )
+        .unwrap_err();
+
+    assert!(error.contains("safely open"));
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "outside\n");
 }
 
 #[test]

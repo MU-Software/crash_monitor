@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 #[test]
 fn test_read_session_lock_rfc3339() {
@@ -14,6 +15,10 @@ fn test_read_session_lock_rfc3339() {
     let session = result.unwrap();
     assert_eq!(session.id, uuid);
     assert_eq!(session.start, timestamp);
+    assert_eq!(
+        std::fs::metadata(lock_path).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
 }
 
 #[test]
@@ -80,4 +85,30 @@ fn test_read_session_lock_rejects_non_regular_file() {
     std::fs::create_dir(tmp_dir.path().join("session.lock")).unwrap();
 
     assert!(read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline()).is_none());
+}
+
+#[test]
+fn test_read_session_lock_rejects_symlink_without_following_target() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let outside = tmp_dir.path().join("outside.lock");
+    let lock_path = tmp_dir.path().join("session.lock");
+    std::fs::write(
+        &outside,
+        b"550e8400-e29b-41d4-a716-446655440000\n2026-03-29T10:00:00+09:00\n",
+    )
+    .unwrap();
+    symlink(&outside, &lock_path).unwrap();
+
+    assert!(read_session_lock_from(tmp_dir.path(), &PluginContext::without_deadline()).is_none());
+    assert!(
+        std::fs::symlink_metadata(lock_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        std::fs::read_to_string(outside)
+            .unwrap()
+            .contains("550e8400")
+    );
 }

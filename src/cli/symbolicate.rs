@@ -4,6 +4,16 @@
 //! and resolve backtrace addresses to source file, function, and line number.
 
 use crate::pipeline::report::{self, CrashReport, LoadedImageReport};
+use crate::utils::paths::{PRIVATE_FILE_MODE, open_trusted_directory, validate_private_file};
+use nix::fcntl::{OFlag, openat, renameat};
+use nix::sys::stat::Mode;
+use std::fs::{self, File};
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Maximum dSYM file size (1 GB).
@@ -195,9 +205,198 @@ fn parse_hex_address(s: &str) -> Option<u64> {
 
 /// Write the modified report to disk.
 fn write_report(report: &CrashReport, path: &Path) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(report)
-        .map_err(|e| format!("JSON serialization failed: {e}"))?;
-    std::fs::write(path, json).map_err(|e| format!("failed to write '{}': {e}", path.display()))
+    let json =
+        serde_json::to_vec_pretty(report).map_err(|e| format!("JSON serialization failed: {e}"))?;
+    write_private_output(path, &json)
+        .map_err(|e| format!("failed to write '{}': {e}", path.display()))
+}
+
+fn write_private_output(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let requested_parent = path
+        .parent()
+        .ok_or_else(|| format!("output path has no parent: '{}'", path.display()))?;
+    let parent_path = if requested_parent.as_os_str().is_empty() {
+        std::env::current_dir()
+            .map_err(|error| format!("cannot resolve current directory: {error}"))?
+    } else if requested_parent.is_absolute() {
+        requested_parent.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("cannot resolve current directory: {error}"))?
+            .join(requested_parent)
+    };
+    let destination_name = path
+        .file_name()
+        .ok_or_else(|| format!("output path has no filename: '{}'", path.display()))?;
+    let parent = open_trusted_directory(&parent_path).map_err(|error| {
+        format!(
+            "cannot safely open output directory '{}': {error}",
+            parent_path.display()
+        )
+    })?;
+
+    let tmp_path = path.with_file_name(format!(
+        ".{}.symbolicate-{}.tmp",
+        destination_name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let tmp_name = tmp_path
+        .file_name()
+        .ok_or_else(|| format!("temporary output has no filename: '{}'", tmp_path.display()))?;
+    let descriptor = openat(
+        &parent,
+        tmp_name,
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::S_IRUSR | Mode::S_IWUSR,
+    )
+    .map_err(|error| format!("cannot create private temporary output: {error}"))?;
+    let mut tmp = File::from(descriptor);
+    let mut pending = match PendingOutput::new(&parent, tmp_name) {
+        Ok(pending) => pending,
+        Err(error) => {
+            drop(tmp);
+            let _ =
+                nix::unistd::unlinkat(&parent, tmp_name, nix::unistd::UnlinkatFlags::NoRemoveDir);
+            return Err(error);
+        }
+    };
+    tmp.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+        .map_err(|error| format!("cannot set private temporary output mode: {error}"))?;
+    validate_private_file(&tmp, &tmp_path)?;
+    let write_result = (|| -> Result<(), String> {
+        tmp.write_all(bytes)
+            .map_err(|error| format!("cannot write temporary output: {error}"))?;
+        tmp.flush()
+            .map_err(|error| format!("cannot flush temporary output: {error}"))?;
+        tmp.sync_all()
+            .map_err(|error| format!("cannot sync temporary output: {error}"))?;
+        Ok(())
+    })();
+    drop(tmp);
+    write_result?;
+
+    if validate_existing_output(&parent, destination_name, path)? {
+        renameat(&parent, tmp_name, &parent, destination_name)
+            .map_err(|error| format!("cannot atomically replace output: {error}"))?;
+    } else {
+        publish_new_output(&parent, tmp_name, destination_name)
+            .map_err(|error| format!("cannot exclusively publish output: {error}"))?;
+    }
+    pending.published();
+    parent
+        .sync_all()
+        .map_err(|error| format!("cannot sync output directory: {error}"))?;
+    Ok(())
+}
+
+fn validate_existing_output(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    path: &Path,
+) -> Result<bool, String> {
+    match openat(
+        parent,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => {
+            let file = File::from(descriptor);
+            validate_private_file(&file, path)?;
+            Ok(true)
+        }
+        Err(nix::errno::Errno::ENOENT) => Ok(false),
+        Err(error) => Err(format!(
+            "cannot safely open existing output '{}': {error}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn publish_new_output(
+    parent: &File,
+    source_name: &std::ffi::OsStr,
+    destination_name: &std::ffi::OsStr,
+) -> Result<(), std::io::Error> {
+    const RENAME_EXCL: u32 = 0x0000_0004;
+
+    unsafe extern "C" {
+        fn renameatx_np(
+            from_fd: nix::libc::c_int,
+            from: *const nix::libc::c_char,
+            to_fd: nix::libc::c_int,
+            to: *const nix::libc::c_char,
+            flags: u32,
+        ) -> nix::libc::c_int;
+    }
+
+    let source = std::ffi::CString::new(source_name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination = std::ffi::CString::new(destination_name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: `parent` is a live directory descriptor and both C strings are
+    // NUL-terminated for the duration of the Darwin renameatx_np call.
+    let status = unsafe {
+        renameatx_np(
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            destination.as_ptr(),
+            RENAME_EXCL,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn publish_new_output(
+    _parent: &File,
+    _source_name: &std::ffi::OsStr,
+    _destination_name: &std::ffi::OsStr,
+) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "exclusive output publication requires macOS",
+    ))
+}
+
+struct PendingOutput {
+    parent: File,
+    name: std::ffi::OsString,
+    published: bool,
+}
+
+impl PendingOutput {
+    fn new(parent: &File, name: &std::ffi::OsStr) -> Result<Self, String> {
+        Ok(Self {
+            parent: parent
+                .try_clone()
+                .map_err(|error| format!("cannot retain output directory handle: {error}"))?,
+            name: name.to_os_string(),
+            published: false,
+        })
+    }
+
+    fn published(&mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for PendingOutput {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = nix::unistd::unlinkat(
+                &self.parent,
+                self.name.as_os_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            );
+        }
+    }
 }
 
 /// Print a summary of symbolicated backtraces to stdout.

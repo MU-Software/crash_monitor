@@ -3,12 +3,15 @@
 
 use crate::platform;
 use crate::preprocessors::report_formatter;
+use crate::utils::paths::{
+    create_private_file, open_private_directory, open_private_file, publish_private_path,
+};
 
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
@@ -244,10 +247,11 @@ pub fn load_report(path: &Path) -> Result<CrashReport, String> {
 /// Returns `Err(String)` if the existing report cannot be loaded, serialized,
 /// rewritten, or atomically replaced.
 pub fn update_termination(path: &Path, reason: TerminationReason) -> Result<(), String> {
+    prepare_managed_report_parent(path)?;
     let original = if is_zip_path(path) {
-        read_report_json_from_zip(path)?
+        read_private_report_json_from_zip(path)?
     } else {
-        read_plain_report(path)?
+        read_private_plain_report(path)?
     };
     let mut document: serde_json::Value = serde_json::from_slice(&original)
         .map_err(|e| format!("invalid report JSON in '{}': {e}", path.display()))?;
@@ -270,15 +274,22 @@ pub fn update_termination(path: &Path, reason: TerminationReason) -> Result<(), 
 }
 
 pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    prepare_managed_report_parent(path)?;
+    let existed = validate_private_existing_file(path)?;
     let tmp_path = termination_tmp_path(path)?;
-    let write_result = (|| -> Result<(), std::io::Error> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
+    let mut file = create_private_file(&tmp_path).map_err(|e| {
+        format!(
+            "cannot create private temporary report '{}': {e}",
+            tmp_path.display()
+        )
+    })?;
+    let write_result = (|| -> Result<(), String> {
+        file.write_all(bytes)
+            .map_err(|e| format!("cannot write private temporary report: {e}"))?;
+        file.flush()
+            .map_err(|e| format!("cannot flush private temporary report: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync private temporary report: {e}"))?;
         Ok(())
     })();
     if let Err(e) = write_result {
@@ -288,24 +299,31 @@ pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
             tmp_path.display()
         ));
     }
-    if let Err(e) = fs::rename(&tmp_path, path) {
+    drop(file);
+    let publish_result = if existed {
+        fs::rename(&tmp_path, path).map_err(|error| error.to_string())
+    } else {
+        publish_private_path(&tmp_path, path)
+    };
+    if let Err(e) = publish_result {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("cannot replace report '{}': {e}", path.display()));
     }
     let parent = path
         .parent()
         .ok_or_else(|| format!("report path has no parent: '{}'", path.display()))?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    open_private_directory(parent)?
+        .sync_all()
         .map_err(|e| format!("cannot sync report directory '{}': {e}", parent.display()))?;
     Ok(())
 }
 
 fn rewrite_report_json_in_zip(path: &Path, report_json: &[u8]) -> Result<(), String> {
     let tmp_path = termination_tmp_path(path)?;
+    let mut owns_tmp = false;
     let rewrite_result = (|| -> Result<(), String> {
-        let source = fs::File::open(path)
-            .map_err(|e| format!("cannot open ZIP '{}': {e}", path.display()))?;
+        let source = open_private_existing_file(path)
+            .map_err(|e| format!("cannot safely open ZIP '{}': {e}", path.display()))?;
         let mut archive = zip::ZipArchive::new(source)
             .map_err(|e| format!("invalid ZIP '{}': {e}", path.display()))?;
         let preferred = path
@@ -315,8 +333,9 @@ fn rewrite_report_json_in_zip(path: &Path, report_json: &[u8]) -> Result<(), Str
         let report_index = find_report_json_index(&mut archive, preferred.as_deref())
             .ok_or_else(|| format!("no report JSON (*.json) inside ZIP '{}'", path.display()))?;
 
-        let destination = fs::File::create(&tmp_path)
+        let destination = create_private_file(&tmp_path)
             .map_err(|e| format!("cannot create temporary ZIP '{}': {e}", tmp_path.display()))?;
+        owns_tmp = true;
         let mut writer = zip::ZipWriter::new(destination);
         writer.set_raw_comment(archive.comment().to_vec().into_boxed_slice());
 
@@ -327,14 +346,12 @@ fn rewrite_report_json_in_zip(path: &Path, report_json: &[u8]) -> Result<(), Str
             if index == report_index {
                 let name = entry.name().to_string();
                 let compression = entry.compression();
-                let unix_mode = entry.unix_mode();
                 let last_modified = entry.last_modified();
                 drop(entry);
 
-                let mut options = SimpleFileOptions::default().compression_method(compression);
-                if let Some(mode) = unix_mode {
-                    options = options.unix_permissions(mode);
-                }
+                let mut options = SimpleFileOptions::default()
+                    .compression_method(compression)
+                    .unix_permissions(0o600);
                 if let Some(modified) = last_modified {
                     options = options.last_modified_time(modified);
                 }
@@ -351,21 +368,64 @@ fn rewrite_report_json_in_zip(path: &Path, report_json: &[u8]) -> Result<(), Str
             }
         }
 
-        writer
+        let output = writer
             .finish()
             .map_err(|e| format!("cannot finalize updated ZIP '{}': {e}", path.display()))?;
+        output
+            .sync_all()
+            .map_err(|e| format!("cannot sync updated ZIP '{}': {e}", path.display()))?;
         Ok(())
     })();
 
     if let Err(e) = rewrite_result {
-        let _ = fs::remove_file(&tmp_path);
+        if owns_tmp {
+            let _ = fs::remove_file(&tmp_path);
+        }
         return Err(e);
     }
     if let Err(e) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("cannot replace ZIP '{}': {e}", path.display()));
     }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("ZIP path has no parent: '{}'", path.display()))?;
+    open_private_directory(parent)?
+        .sync_all()
+        .map_err(|e| format!("cannot sync ZIP directory '{}': {e}", parent.display()))?;
     Ok(())
+}
+
+fn open_private_existing_file(path: &Path) -> Result<fs::File, String> {
+    open_private_file(path)
+}
+
+fn validate_private_existing_file(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => open_private_file(path).map(|_| true).map_err(|error| {
+            format!(
+                "cannot validate existing report '{}': {error}",
+                path.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "cannot inspect report '{}': {error}",
+            path.display()
+        )),
+    }
+}
+
+fn prepare_managed_report_parent(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("managed report path has no parent: '{}'", path.display()))?;
+    open_private_directory(parent).map(|_| ()).map_err(|error| {
+        format!(
+            "cannot prepare private report directory '{}': {error}",
+            parent.display()
+        )
+    })
 }
 
 fn termination_tmp_path(path: &Path) -> Result<PathBuf, String> {
@@ -388,8 +448,28 @@ fn is_zip_path(path: &Path) -> bool {
 
 /// Read a plain (uncompressed) report file, enforcing the size cap.
 fn read_plain_report(path: &Path) -> Result<Vec<u8>, String> {
-    let metadata =
-        fs::metadata(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+    let file = fs::File::open(path)
+        .map_err(|error| format!("cannot open external report '{}': {error}", path.display()))?;
+    read_plain_report_file(file, path)
+}
+
+/// Read a monitor-managed report through the private-storage policy. Unlike
+/// [`read_plain_report`], this rejects unsafe ownership, modes, ACLs, and every
+/// symlink component before the report can be rewritten in place.
+fn read_private_plain_report(path: &Path) -> Result<Vec<u8>, String> {
+    let file = open_private_existing_file(path).map_err(|error| {
+        format!(
+            "cannot safely open private report '{}': {error}",
+            path.display()
+        )
+    })?;
+    read_plain_report_file(file, path)
+}
+
+fn read_plain_report_file(mut file: fs::File, path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect report '{}': {error}", path.display()))?;
     if metadata.len() > MAX_REPORT_SIZE {
         return Err(format!(
             "report file too large ({} bytes, max {} bytes)",
@@ -397,7 +477,17 @@ fn read_plain_report(path: &Path) -> Result<Vec<u8>, String> {
             MAX_REPORT_SIZE
         ));
     }
-    fs::read(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    Read::by_ref(&mut file)
+        .take(MAX_REPORT_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_REPORT_SIZE {
+        return Err(format!(
+            "report file grew beyond the maximum of {MAX_REPORT_SIZE} bytes"
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Extract the report JSON bytes from a `ZIPArchiver`-produced archive.
@@ -406,8 +496,22 @@ fn read_plain_report(path: &Path) -> Result<Vec<u8>, String> {
 /// archive's stem), else the first `*.json` entry. The decompressed entry
 /// size is capped at `MAX_REPORT_SIZE` (zip-bomb guard).
 fn read_report_json_from_zip(path: &Path) -> Result<Vec<u8>, String> {
-    let file =
-        fs::File::open(path).map_err(|e| format!("cannot open '{}': {e}", path.display()))?;
+    let file = fs::File::open(path)
+        .map_err(|error| format!("cannot open external ZIP '{}': {error}", path.display()))?;
+    read_report_json_from_zip_file(path, file)
+}
+
+fn read_private_report_json_from_zip(path: &Path) -> Result<Vec<u8>, String> {
+    let file = open_private_existing_file(path).map_err(|error| {
+        format!(
+            "cannot safely open private ZIP '{}': {error}",
+            path.display()
+        )
+    })?;
+    read_report_json_from_zip_file(path, file)
+}
+
+fn read_report_json_from_zip_file(path: &Path, file: fs::File) -> Result<Vec<u8>, String> {
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("invalid ZIP '{}': {e}", path.display()))?;
 

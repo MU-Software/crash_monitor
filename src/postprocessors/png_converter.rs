@@ -5,15 +5,18 @@
 //! to PNG, deletes the originals, and rewrites the report JSON. Conversion
 //! failures keep the `.rgba` in place (partial-success preservation, principle #3).
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::pipeline::report::CrashReport;
 use crate::pipeline::{
     ArtifactKind, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
     ReportResult,
+};
+use crate::utils::paths::{
+    create_private_file, open_private_directory, open_private_file, publish_private_path,
 };
 
 pub struct PNGConverter;
@@ -63,17 +66,22 @@ impl PNGConverter {
         result: &mut ReportResult,
         context: &PluginContext,
         mut after_png_write: impl FnMut(),
+        mut sync_published_directory: impl FnMut(&Path) -> Result<(), String>,
     ) -> Result<(), String> {
         context.checkpoint()?;
         let Some(json_path) = result.json_path.as_ref() else {
             return Ok(()); // No report → nothing to do
         };
 
-        let mut crash_report = load_report_for_conversion(json_path, context)?;
         let dir = json_path
             .parent()
             .ok_or_else(|| "report has no parent dir".to_string())?
             .to_path_buf();
+        // Report files are managed artifacts. Correct owned mode drift on the
+        // containing directory before opening any report or attachment so the
+        // no-follow private-file checks apply consistently to legacy reports.
+        open_private_directory(&dir)?;
+        let mut crash_report = load_report_for_conversion(json_path, context)?;
 
         let mut converted_rgba = Vec::new();
         for attachment in &mut crash_report.attachments {
@@ -83,7 +91,13 @@ impl PNGConverter {
             if converted_rgba.is_empty() {
                 context.checkpoint()?;
             }
-            if let Some(rgba_path) = convert_one(&dir, attachment, context, &mut after_png_write) {
+            if let Some(rgba_path) = convert_one(
+                &dir,
+                attachment,
+                context,
+                &mut after_png_write,
+                &mut sync_published_directory,
+            ) {
                 if let Some(transaction) = context.artifact_transaction() {
                     transaction.register_file(&rgba_path.png_path, ArtifactKind::ScreenshotPng)?;
                 }
@@ -131,7 +145,16 @@ impl PNGConverter {
         context: &PluginContext,
         after_png_write: impl FnMut(),
     ) -> Result<(), String> {
-        Self::process_impl(result, context, after_png_write)
+        Self::process_impl(result, context, after_png_write, sync_private_directory)
+    }
+
+    #[cfg(test)]
+    fn process_with_directory_sync(
+        result: &mut ReportResult,
+        context: &PluginContext,
+        sync_published_directory: impl FnMut(&Path) -> Result<(), String>,
+    ) -> Result<(), String> {
+        Self::process_impl(result, context, || {}, sync_published_directory)
     }
 }
 
@@ -154,7 +177,7 @@ impl PostProcessor for PNGConverter {
         result: &mut ReportResult,
         context: &PluginContext,
     ) -> Result<(), String> {
-        Self::process_impl(result, context, || {})
+        Self::process_impl(result, context, || {}, sync_private_directory)
     }
 }
 
@@ -166,6 +189,7 @@ fn convert_one(
     attachment: &mut serde_json::Value,
     context: &PluginContext,
     after_png_write: &mut impl FnMut(),
+    sync_published_directory: &mut impl FnMut(&Path) -> Result<(), String>,
 ) -> Option<ConvertedRgba> {
     if context.is_timed_out() {
         return None;
@@ -221,7 +245,7 @@ fn convert_one(
         .strip_suffix(".rgba")
         .map(|stem| format!("{stem}.png"))?;
     let png_path = dir.join(&png_name);
-    if let Err(e) = publish_png(&png_path, &png_bytes, context) {
+    if let Err(e) = publish_png(&png_path, &png_bytes, context, sync_published_directory) {
         eprintln!("[monitor] PNGConverter: write PNG failed for {png_name}: {e}");
         return None;
     }
@@ -289,12 +313,8 @@ fn read_rgba_exact(
     context: &PluginContext,
 ) -> Result<(Vec<u8>, FileIdentity), String> {
     context.checkpoint()?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        // Never block on a substituted FIFO and never follow a final symlink.
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|error| error.to_string())?;
+    let mut file =
+        open_private_file(path).map_err(|error| format!("RGBA input is not private: {error}"))?;
     context.checkpoint()?;
 
     let metadata = file.metadata().map_err(|error| error.to_string())?;
@@ -356,11 +376,17 @@ fn read_rgba_exact(
 }
 
 fn replace_report_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    publish_bytes_atomically(path, bytes, None, "report")
+    let mut sync = sync_private_directory;
+    publish_bytes_atomically(path, bytes, None, "report", &mut sync)
 }
 
-fn publish_png(path: &Path, bytes: &[u8], context: &PluginContext) -> Result<(), String> {
-    publish_bytes_atomically(path, bytes, Some(context), "PNG")
+fn publish_png(
+    path: &Path,
+    bytes: &[u8],
+    context: &PluginContext,
+    sync_published_directory: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    publish_bytes_atomically(path, bytes, Some(context), "PNG", sync_published_directory)
 }
 
 fn publish_bytes_atomically(
@@ -368,6 +394,7 @@ fn publish_bytes_atomically(
     bytes: &[u8],
     context: Option<&PluginContext>,
     kind: &str,
+    sync_published_directory: &mut impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let file_name = path
         .file_name()
@@ -377,14 +404,9 @@ fn publish_bytes_atomically(
         ".{file_name}.png-converter-{}.tmp",
         uuid::Uuid::new_v4()
     ));
-    let mut pending = PendingTempFile::new(tmp_path.clone());
-    let mut tmp = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&tmp_path)
+    let mut tmp = create_private_file(&tmp_path)
         .map_err(|error| format!("Failed to create {kind} temporary file: {error}"))?;
+    let mut pending = PendingTempFile::new(tmp_path.clone());
 
     for chunk in bytes.chunks(RGBA_READ_CHUNK_BYTES) {
         if let Some(context) = context {
@@ -402,24 +424,46 @@ fn publish_bytes_atomically(
         context.checkpoint()?;
     }
 
-    fs::rename(&tmp_path, path).map_err(|error| format!("Failed to replace {kind}: {error}"))?;
+    if context.is_some() {
+        publish_private_path(&tmp_path, path)
+            .map_err(|error| format!("Failed to publish {kind}: {error}"))?;
+    } else {
+        // The report already exists and intentionally changes in place after
+        // its opened descriptor was validated above.
+        fs::rename(&tmp_path, path)
+            .map_err(|error| format!("Failed to replace {kind}: {error}"))?;
+    }
+    pending.published();
     let parent = path
         .parent()
         .ok_or_else(|| format!("{kind} path has no parent: '{}'", path.display()))?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("Failed to sync {kind} directory: {error}"))?;
-    pending.published();
+    if let Err(error) = sync_published_directory(parent) {
+        let warning = format!(
+            "{kind} '{}' was published but its directory could not be synced: {error}",
+            path.display()
+        );
+        if let Some(transaction) = context.and_then(PluginContext::artifact_transaction) {
+            transaction.record_durability_warning(warning);
+        } else {
+            eprintln!("[monitor] PNGConverter: {warning}");
+        }
+    }
     Ok(())
+}
+
+fn sync_private_directory(path: &Path) -> Result<(), String> {
+    open_private_directory(path)?.sync_all().map_err(|error| {
+        format!(
+            "failed to sync private directory '{}': {error}",
+            path.display()
+        )
+    })
 }
 
 fn load_report_for_conversion(path: &Path, context: &PluginContext) -> Result<CrashReport, String> {
     context.checkpoint()?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|error| format!("cannot open report '{}': {error}", path.display()))?;
+    let mut file = open_private_file(path)
+        .map_err(|error| format!("report '{}' is not private: {error}", path.display()))?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("cannot inspect report '{}': {error}", path.display()))?;

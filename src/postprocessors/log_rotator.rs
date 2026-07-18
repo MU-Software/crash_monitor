@@ -6,9 +6,11 @@ use crate::pipeline::{
     CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, PostProcessorPhase,
     Priority, ReportResult,
 };
-use std::fs::{self, File, OpenOptions};
+use crate::utils::paths::{
+    create_private_file, ensure_private_directory, open_private_directory, open_private_file,
+};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 // Rotation may read at most this much beyond the configured trigger. This keeps
@@ -82,15 +84,17 @@ impl PostProcessor for LogRotator {
     ) -> Result<(), String> {
         context.checkpoint()?;
         let log_path = self.log_path()?;
+        let log_dir = log_path
+            .parent()
+            .ok_or_else(|| format!("sessions.jsonl has no parent: '{}'", log_path.display()))?;
+        ensure_private_directory(log_dir)
+            .map_err(|error| format!("cannot prepare private session directory: {error}"))?;
 
-        let mut file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
-            .open(&log_path)
-        {
-            Ok(file) => file,
+        let mut file = match fs::symlink_metadata(&log_path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("cannot open sessions.jsonl: {error}")),
+            Err(error) => return Err(format!("cannot inspect sessions.jsonl: {error}")),
+            Ok(_) => open_private_file(&log_path)
+                .map_err(|error| format!("cannot safely open sessions.jsonl: {error}"))?,
         };
         let metadata = file
             .metadata()
@@ -191,12 +195,7 @@ fn replace_log_atomically(
         uuid::Uuid::new_v4()
     ));
     context.checkpoint()?;
-    let mut tmp = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&tmp_path)
+    let mut tmp = create_private_file(&tmp_path)
         .map_err(|error| format!("cannot create rotation tmp: {error}"))?;
     let write_result = (|| {
         for line in lines {
@@ -211,6 +210,8 @@ fn replace_log_atomically(
         }
         tmp.flush()
             .map_err(|error| format!("rotation flush failed: {error}"))?;
+        tmp.sync_all()
+            .map_err(|error| format!("rotation sync failed: {error}"))?;
         context.checkpoint()?;
         Ok::<(), String>(())
     })();
@@ -223,6 +224,12 @@ fn replace_log_atomically(
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("rotation rename failed: {error}"));
     }
+    let parent = log_path
+        .parent()
+        .ok_or_else(|| format!("sessions.jsonl has no parent: '{}'", log_path.display()))?;
+    open_private_directory(parent)?
+        .sync_all()
+        .map_err(|error| format!("session directory sync failed: {error}"))?;
     Ok(())
 }
 

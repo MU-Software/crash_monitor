@@ -454,6 +454,42 @@ pub(crate) fn open_private_directory(path: &Path) -> Result<File, String> {
     Ok(directory)
 }
 
+/// Open a caller-selected output directory without changing its mode.
+///
+/// This policy is intentionally distinct from [`open_private_directory`]: a
+/// CLI caller may select an existing `0755` directory, so the final directory
+/// is preserved rather than corrected to `0700`. Every component is still
+/// traversed through no-follow descriptors. The final directory must be owned
+/// by the effective user or root, must grant owner read/traverse access, must
+/// not be group/other writable, and must not have an extended ACL that grants
+/// additional access.
+pub(crate) fn open_trusted_directory(path: &Path) -> Result<File, String> {
+    let (mut parent, mut components, mut resolved) = path_walk(path)?;
+    let final_component = components
+        .pop()
+        .ok_or_else(|| format!("trusted directory has no name: '{}'", path.display()))?;
+    for component in components {
+        resolved.push(&component);
+        parent = open_directory_at_with_retry(&parent, &component, &resolved).map_err(|error| {
+            format!(
+                "cannot safely open trusted path ancestor '{}': {error}",
+                resolved.display()
+            )
+        })?;
+        validate_trusted_ancestor(&parent, &resolved)?;
+    }
+    resolved.push(&final_component);
+    let directory =
+        open_directory_at_with_retry(&parent, &final_component, &resolved).map_err(|error| {
+            format!(
+                "cannot safely open trusted directory '{}': {error}",
+                resolved.display()
+            )
+        })?;
+    validate_trusted_output_directory(&directory, &resolved)?;
+    Ok(directory)
+}
+
 fn path_walk(path: &Path) -> Result<(File, Vec<OsString>, PathBuf), String> {
     let mut absolute = false;
     let mut components = Vec::new();
@@ -585,6 +621,45 @@ fn validate_trusted_ancestor(handle: &File, path: &Path) -> Result<(), String> {
     if has_allowing_extended_acl(handle)? {
         return Err(format!(
             "private path ancestor '{}' has an extended ACL that grants access",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_trusted_output_directory(handle: &File, path: &Path) -> Result<(), String> {
+    let metadata = handle.metadata().map_err(|error| {
+        format!(
+            "cannot inspect trusted output directory '{}': {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "trusted output path is not a directory: '{}'",
+            path.display()
+        ));
+    }
+
+    // SAFETY: `geteuid` has no preconditions and does not dereference memory.
+    let effective_uid = unsafe { nix::libc::geteuid() };
+    if metadata.uid() != effective_uid && metadata.uid() != 0 {
+        return Err(format!(
+            "trusted output directory '{}' is owned by uid {}, expected effective uid {effective_uid} or root",
+            path.display(),
+            metadata.uid()
+        ));
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o500 != 0o500 || mode & 0o022 != 0 {
+        return Err(format!(
+            "trusted output directory '{}' has unsafe mode {mode:04o}",
+            path.display()
+        ));
+    }
+    if has_allowing_extended_acl(handle)? {
+        return Err(format!(
+            "trusted output directory '{}' has an extended ACL that grants access",
             path.display()
         ));
     }

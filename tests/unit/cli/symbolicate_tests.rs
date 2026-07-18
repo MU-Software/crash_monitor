@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::report::LoadedImageReport;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 #[test]
 fn test_parse_hex_address_with_prefix() {
@@ -110,4 +111,138 @@ fn test_build_slide_map_no_slide() {
     let slides = build_slide_map(&images);
     assert_eq!(slides.len(), 1);
     assert_eq!(slides[0].slide, 0); // defaults to 0
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn private_output_is_0600_without_changing_parent_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let output_dir = root.path().join("output");
+    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let parent_inode = std::fs::metadata(&output_dir).unwrap().ino();
+    let output = output_dir.join("symbolicated.json");
+
+    write_private_output(&output, b"private").unwrap();
+
+    assert_eq!(std::fs::read(&output).unwrap(), b"private");
+    assert_eq!(
+        std::fs::metadata(&output).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+    assert_eq!(
+        std::fs::metadata(&output_dir).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+    assert_eq!(std::fs::metadata(&output_dir).unwrap().ino(), parent_inode);
+}
+
+#[test]
+fn private_output_validates_replacement_and_rejects_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    let output_dir = root.path().join("output");
+    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = output_dir.join("symbolicated.json");
+    std::fs::write(&output, b"old").unwrap();
+    std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    write_private_output(&output, b"new").unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"new");
+    assert_eq!(
+        std::fs::metadata(&output).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+
+    std::fs::remove_file(&output).unwrap();
+    let outside = output_dir.join("outside.json");
+    std::fs::write(&outside, b"outside").unwrap();
+    symlink(&outside, &output).unwrap();
+    let error = write_private_output(&output, b"blocked").unwrap_err();
+    assert!(error.contains("safely open existing output"));
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    assert!(
+        std::fs::read_dir(&output_dir)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".symbolicate-"))
+    );
+}
+
+#[test]
+fn replacement_in_other_writable_directory_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let output_dir = root.path().join("shared");
+    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let output = output_dir.join("symbolicated.json");
+    std::fs::write(&output, b"old").unwrap();
+
+    let error = write_private_output(&output, b"new").unwrap_err();
+
+    assert!(error.contains("unsafe mode"), "{error}");
+    assert_eq!(std::fs::read(&output).unwrap(), b"old");
+}
+
+#[test]
+fn new_output_in_other_writable_directory_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let output_dir = root.path().join("shared");
+    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let output = output_dir.join("symbolicated.json");
+
+    let error = write_private_output(&output, b"new").unwrap_err();
+
+    assert!(error.contains("unsafe mode"), "{error}");
+    assert!(!output.exists());
+}
+
+#[test]
+fn output_parent_symlink_is_rejected_without_writing_target() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    let linked = root.path().join("linked");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(&target, &linked).unwrap();
+
+    let error = write_private_output(&linked.join("symbolicated.json"), b"new").unwrap_err();
+
+    assert!(error.contains("safely open"), "{error}");
+    assert!(!target.join("symbolicated.json").exists());
+    assert!(
+        std::fs::symlink_metadata(linked)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn output_parent_allow_acl_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let output_dir = root.path().join("acl-output");
+    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let status = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone allow read"])
+        .arg(&output_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let output = output_dir.join("symbolicated.json");
+    let error = write_private_output(&output, b"new").unwrap_err();
+
+    assert!(error.contains("grants access"), "{error}");
+    assert!(!output.exists());
+    let _ = std::process::Command::new("/bin/chmod")
+        .arg("-N")
+        .arg(output_dir)
+        .status();
 }

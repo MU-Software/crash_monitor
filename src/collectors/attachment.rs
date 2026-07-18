@@ -15,6 +15,7 @@ use crate::pipeline::{
     ArtifactKind, CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution,
     PreProcessor, Priority,
 };
+use crate::utils::paths::{create_private_file, open_private_directory, publish_private_path};
 // ═══════════════════════════════════════════════════
 //  Raw data type
 // ═══════════════════════════════════════════════════
@@ -120,11 +121,12 @@ struct PendingAttachmentFile {
 
 impl PendingAttachmentFile {
     fn create(path: PathBuf) -> Result<Self, String> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("temporary attachment has no parent: '{}'", path.display()))?;
+        open_private_directory(parent)
+            .map_err(|error| format!("prepare temporary attachment directory failed: {error}"))?;
+        let file = create_private_file(&path)
             .map_err(|error| format!("create temporary attachment failed: {error}"))?;
         Ok(Self {
             path,
@@ -139,15 +141,15 @@ impl PendingAttachmentFile {
             .ok_or_else(|| "temporary attachment is already closed".to_string())
     }
 
-    fn commit(mut self, destination: &Path) -> Result<(), String> {
-        self.commit_with_remove(destination, |path| std::fs::remove_file(path))
+    fn commit(mut self, destination: &Path) -> Result<Option<String>, String> {
+        self.commit_with_sync(destination, sync_parent_directory)
     }
 
-    fn commit_with_remove(
+    fn commit_with_sync(
         &mut self,
         destination: &Path,
-        mut remove_file: impl FnMut(&Path) -> std::io::Result<()>,
-    ) -> Result<(), String> {
+        sync_directory: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<Option<String>, String> {
         let file = self
             .file
             .take()
@@ -155,25 +157,25 @@ impl PendingAttachmentFile {
         file.sync_all()
             .map_err(|error| format!("sync temporary attachment failed: {error}"))?;
         drop(file);
-        std::fs::hard_link(&self.path, destination)
+        publish_private_path(&self.path, destination)
             .map_err(|error| format!("commit temporary attachment failed: {error}"))?;
-        if let Err(error) = remove_file(&self.path) {
-            let cleanup = remove_file(destination).err();
-            return Err(match cleanup {
-                Some(cleanup) => format!(
-                    "commit temporary attachment could not unlink '{}': {error}; cleanup of '{}' also failed: {cleanup}",
-                    self.path.display(),
-                    destination.display()
-                ),
-                None => format!(
-                    "commit temporary attachment could not unlink '{}': {error}",
-                    self.path.display()
-                ),
-            });
-        }
         self.committed = true;
-        Ok(())
+        Ok(sync_directory(destination).err().map(|error| {
+            format!(
+                "attachment '{}' was published but its directory could not be synced: {error}",
+                destination.display()
+            )
+        }))
     }
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("attachment path has no parent: '{}'", path.display()))?;
+    open_private_directory(parent)?
+        .sync_all()
+        .map_err(|error| format!("sync attachment directory failed: {error}"))
 }
 
 impl Drop for PendingAttachmentFile {
@@ -274,7 +276,7 @@ fn copy_registered_attachment(
     destination: &Path,
     temporary_path: PathBuf,
     context: &PluginContext,
-) -> Result<u64, String> {
+) -> Result<(u64, Option<String>), String> {
     context.checkpoint()?;
     let mut source = OpenOptions::new()
         .read(true)
@@ -307,8 +309,8 @@ fn copy_registered_attachment(
         context,
     )?;
     context.checkpoint()?;
-    temporary.commit(destination)?;
-    Ok(copied)
+    let durability_warning = temporary.commit(destination)?;
+    Ok((copied, durability_warning))
 }
 
 fn attachment_filename_component(value: &str, fallback: &str) -> String {
@@ -386,8 +388,13 @@ impl PreProcessor for AttachmentCopier {
                 uuid::Uuid::new_v4()
             ));
 
-            let size = match copy_registered_attachment(src, &dest, temporary_path, context) {
-                Ok(size) => size,
+            let (size, durability_warning) = match copy_registered_attachment(
+                src,
+                &dest,
+                temporary_path,
+                context,
+            ) {
+                Ok(copied) => copied,
                 Err(error) if context.is_timed_out() => return Err(error),
                 Err(error) => {
                     eprintln!(
@@ -401,6 +408,13 @@ impl PreProcessor for AttachmentCopier {
             };
             if let Some(transaction) = transaction {
                 transaction.register_file(&dest, ArtifactKind::Attachment)?;
+            }
+            if let Some(warning) = durability_warning {
+                if let Some(transaction) = transaction {
+                    transaction.record_durability_warning(warning);
+                } else {
+                    eprintln!("[monitor] AttachmentCopier: {warning}");
+                }
             }
 
             data.raw.attachments.push(RawCopiedAttachment {
@@ -428,10 +442,11 @@ impl PreProcessor for AttachmentCopier {
 mod tests {
     use super::*;
     use crate::pipeline::ReportType;
+    use crate::pipeline::{ArtifactTransaction, ReportContext};
     use nix::sys::stat::Mode;
     use nix::unistd::mkfifo;
     use std::io::{Cursor, Read};
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     struct InterruptingWriter;
 
@@ -503,6 +518,14 @@ mod tests {
         assert_eq!(
             std::fs::read(&data.raw.attachments[0].copied_path).unwrap(),
             b"diagnostic"
+        );
+        assert_eq!(
+            std::fs::metadata(&data.raw.attachments[0].copied_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            crate::utils::paths::PRIVATE_FILE_MODE
         );
     }
 
@@ -599,32 +622,64 @@ mod tests {
     }
 
     #[test]
-    fn temporary_commit_unlink_failure_is_reported_and_destination_is_rolled_back() {
+    fn temporary_commit_directory_sync_failure_keeps_published_destination() {
         let tempdir = tempfile::tempdir().unwrap();
         let temporary = tempdir.path().join("temporary.tmp");
         let destination = tempdir.path().join("attachment.log");
         let mut pending = PendingAttachmentFile::create(temporary.clone()).unwrap();
         pending.file_mut().unwrap().write_all(b"new").unwrap();
-        let mut first_remove = true;
 
-        let error = pending
-            .commit_with_remove(&destination, |path| {
-                if first_remove {
-                    first_remove = false;
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "simulated unlink failure",
-                    ))
-                } else {
-                    std::fs::remove_file(path)
-                }
+        let warning = pending
+            .commit_with_sync(&destination, |_| {
+                Err("simulated attachment directory sync failure".into())
             })
-            .unwrap_err();
+            .unwrap()
+            .unwrap();
         drop(pending);
 
-        assert!(error.contains("could not unlink"), "{error}");
-        assert!(!destination.exists());
+        assert!(warning.contains("simulated attachment directory sync failure"));
+        assert_eq!(std::fs::read(destination).unwrap(), b"new");
         assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn attachment_sync_warning_preserves_exact_transaction_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+        let destination = transaction.staging_dir().join("attachment.log");
+        let temporary = transaction.staging_dir().join(".attachment.log.tmp");
+        let mut pending = PendingAttachmentFile::create(temporary).unwrap();
+        pending
+            .file_mut()
+            .unwrap()
+            .write_all(b"private attachment")
+            .unwrap();
+
+        let warning = pending
+            .commit_with_sync(&destination, |_| {
+                Err("injected attachment directory sync failure".into())
+            })
+            .unwrap()
+            .unwrap();
+        transaction
+            .register_file(&destination, ArtifactKind::Attachment)
+            .unwrap();
+        transaction.record_durability_warning(warning);
+
+        let committed = transaction.commit().unwrap();
+        assert!(
+            committed
+                .durability_warnings
+                .iter()
+                .any(|warning| warning.contains("injected attachment directory sync failure"))
+        );
+        let manifest = crate::pipeline::load_manifest(&committed.manifest_path).unwrap();
+        assert_eq!(manifest.artifacts.len(), 1);
+        assert_eq!(manifest.artifacts[0].path, "attachment.log");
+        assert_eq!(manifest.artifacts[0].kind, ArtifactKind::Attachment);
+        assert!(committed.report_dir.join("attachment.log").is_file());
     }
 
     #[test]

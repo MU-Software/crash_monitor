@@ -1,7 +1,8 @@
-use super::{MAX_MOVE_FILE_BYTES, STREAM_BUFFER_BYTES, move_file_with};
+use super::{MAX_MOVE_FILE_BYTES, STREAM_BUFFER_BYTES, move_file_with, move_file_with_operations};
 use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
 use crate::postprocessors::MoveToSent;
 use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 fn make_event() -> CrashEvent {
@@ -78,8 +79,17 @@ fn test_moves_only_exact_registered_artifacts() {
         "crash_20260524_1234_screenshot_000.png",
         "crash_20260524_1234.zip",
     ] {
-        assert!(sent.join(name).exists(), "{name} should be in sent");
+        let destination = sent.join(name);
+        assert!(destination.exists(), "{name} should be in sent");
+        assert_eq!(
+            std::fs::metadata(destination).unwrap().permissions().mode() & 0o7777,
+            crate::utils::paths::PRIVATE_FILE_MODE
+        );
     }
+    assert_eq!(
+        std::fs::metadata(&sent).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_DIRECTORY_MODE
+    );
     // json_path + raw_path patched to new location
     assert_eq!(
         result.json_path.unwrap(),
@@ -299,6 +309,14 @@ fn test_exdev_fallback_streams_to_tmp_then_publishes() {
     assert_eq!(chunks, 3, "copy must proceed in fixed-size chunks");
     assert!(!source.exists());
     assert_eq!(std::fs::read(&destination).unwrap(), payload);
+    assert_eq!(
+        std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
     assert_no_move_temporary_files(dir.path());
 }
 
@@ -408,6 +426,56 @@ fn test_move_rejects_symlink_before_rename() {
     assert!(source.exists());
     assert!(!destination.exists());
     assert_eq!(std::fs::read_to_string(target).unwrap(), "payload");
+}
+
+#[test]
+fn test_successful_rename_is_not_rolled_back_by_directory_sync_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    std::fs::write(&source, b"payload").unwrap();
+
+    move_file_with_operations(
+        &source,
+        &destination,
+        &PluginContext::without_deadline(),
+        |source, destination| std::fs::rename(source, destination),
+        (|| {}, || {}),
+        |_, _| Err("injected directory sync failure".into()),
+        |_| panic!("same-filesystem move must not call the copy cleanup"),
+    )
+    .unwrap();
+
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(destination).unwrap(), b"payload");
+}
+
+#[test]
+fn test_exdev_published_destination_stays_canonical_when_source_cleanup_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let destination = dir.path().join("destination.json");
+    std::fs::write(&source, b"payload").unwrap();
+
+    move_file_with_operations(
+        &source,
+        &destination,
+        &PluginContext::without_deadline(),
+        |_, _| Err(std::io::Error::from_raw_os_error(nix::libc::EXDEV)),
+        (|| {}, || {}),
+        |_, _| Err("injected directory sync failure".into()),
+        |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected source cleanup failure",
+            ))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
+    assert_eq!(std::fs::read(&source).unwrap(), b"payload");
+    assert_no_move_temporary_files(dir.path());
 }
 
 fn assert_no_move_temporary_files(dir: &std::path::Path) {

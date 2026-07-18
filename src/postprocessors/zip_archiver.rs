@@ -6,9 +6,11 @@ use crate::pipeline::{
     ArtifactKind, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
     ReportResult,
 };
+use crate::utils::paths::{
+    create_private_file, open_private_directory, open_private_file, publish_private_path,
+};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
@@ -29,12 +31,8 @@ struct PendingArchive {
 
 impl PendingArchive {
     fn create(path: PathBuf) -> Result<(Self, fs::File), String> {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&path)
-            .map_err(|e| format!("cannot create ZIP file: {e}"))?;
+        let file =
+            create_private_file(&path).map_err(|e| format!("cannot create ZIP file: {e}"))?;
         Ok((
             Self {
                 path,
@@ -66,6 +64,7 @@ impl ZIPArchiver {
         mut after_archive_publish: impl FnMut(),
         mut after_archive_chunk: impl FnMut(),
         mut after_archive_finalize: impl FnMut(),
+        sync_archive_directory: impl FnOnce(&Path) -> Result<(), String>,
     ) -> Result<(), String> {
         context.checkpoint()?;
         let Some(json_path) = result.json_path.clone() else {
@@ -75,6 +74,9 @@ impl ZIPArchiver {
         let dir = json_path
             .parent()
             .ok_or_else(|| "no parent directory".to_string())?;
+        // Archiving operates only on managed report artifacts. Correct owned
+        // mode drift before any input is opened or a temporary ZIP is created.
+        open_private_directory(dir)?;
 
         let files = collect_report_files(result, context)?;
         if files.is_empty() {
@@ -106,11 +108,22 @@ impl ZIPArchiver {
         after_archive_finalize();
         context.checkpoint()?;
 
-        // Atomic rename
-        if let Err(e) = fs::rename(&pending_archive.path, &zip_path) {
+        // Atomic exclusive publication: a raced destination is never replaced.
+        if let Err(e) = publish_private_path(&pending_archive.path, &zip_path) {
             return Err(format!("ZIP rename failed: {e}"));
         }
         pending_archive.mark_published();
+        if let Err(error) = sync_archive_directory(dir) {
+            let warning = format!(
+                "ZIP '{}' was published but its directory could not be synced: {error}",
+                zip_path.display()
+            );
+            if let Some(transaction) = context.artifact_transaction() {
+                transaction.record_durability_warning(warning);
+            } else {
+                eprintln!("[monitor] ZIPArchiver: {warning}");
+            }
+        }
 
         if let Some(transaction) = context.artifact_transaction() {
             transaction.register_file(&zip_path, ArtifactKind::Archive)?;
@@ -166,7 +179,14 @@ impl ZIPArchiver {
         context: &PluginContext,
         after_archive_publish: impl FnMut(),
     ) -> Result<(), String> {
-        Self::process_impl(result, context, after_archive_publish, || {}, || {})
+        Self::process_impl(
+            result,
+            context,
+            after_archive_publish,
+            || {},
+            || {},
+            sync_private_directory,
+        )
     }
 
     #[cfg(test)]
@@ -175,7 +195,14 @@ impl ZIPArchiver {
         context: &PluginContext,
         after_archive_chunk: impl FnMut(),
     ) -> Result<(), String> {
-        Self::process_impl(result, context, || {}, after_archive_chunk, || {})
+        Self::process_impl(
+            result,
+            context,
+            || {},
+            after_archive_chunk,
+            || {},
+            sync_private_directory,
+        )
     }
 
     #[cfg(test)]
@@ -184,7 +211,23 @@ impl ZIPArchiver {
         context: &PluginContext,
         after_archive_finalize: impl FnMut(),
     ) -> Result<(), String> {
-        Self::process_impl(result, context, || {}, || {}, after_archive_finalize)
+        Self::process_impl(
+            result,
+            context,
+            || {},
+            || {},
+            after_archive_finalize,
+            sync_private_directory,
+        )
+    }
+
+    #[cfg(test)]
+    fn process_with_directory_sync(
+        result: &mut ReportResult,
+        context: &PluginContext,
+        sync_archive_directory: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<(), String> {
+        Self::process_impl(result, context, || {}, || {}, || {}, sync_archive_directory)
     }
 }
 
@@ -213,7 +256,7 @@ impl PostProcessor for ZIPArchiver {
         result: &mut ReportResult,
         context: &PluginContext,
     ) -> Result<(), String> {
-        Self::process_impl(result, context, || {}, || {}, || {})
+        Self::process_impl(result, context, || {}, || {}, || {}, sync_private_directory)
     }
 }
 
@@ -279,7 +322,9 @@ fn write_zip(
 ) -> Result<(), String> {
     context.checkpoint()?;
     let mut writer = zip::ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o600);
     let mut total_written = 0_u64;
     let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
 
@@ -358,11 +403,8 @@ fn write_zip(
 }
 
 fn open_regular_file(path: &Path) -> Result<fs::File, String> {
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| format!("cannot open '{}': {e}", path.display()))?;
+    let file = open_private_file(path)
+        .map_err(|e| format!("cannot safely open archive input '{}': {e}", path.display()))?;
     let metadata = file
         .metadata()
         .map_err(|e| format!("cannot inspect '{}': {e}", path.display()))?;
@@ -380,6 +422,12 @@ fn open_regular_file(path: &Path) -> Result<fs::File, String> {
         ));
     }
     Ok(file)
+}
+
+fn sync_private_directory(path: &Path) -> Result<(), String> {
+    open_private_directory(path)?
+        .sync_all()
+        .map_err(|error| format!("ZIP directory sync failed: {error}"))
 }
 
 #[cfg(test)]

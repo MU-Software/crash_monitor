@@ -2,6 +2,7 @@
 
 use super::*;
 use std::io::{Read, Write};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -65,6 +66,27 @@ fn load_report_reads_plain_json() {
     assert_eq!(report.header.pid, 1234);
     assert_eq!(report.header.report_id, None);
     assert!(report.termination.is_none());
+}
+
+#[test]
+fn external_report_load_does_not_apply_managed_storage_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = dir.path().join("exported-report.json");
+    std::fs::write(&path, sample_report_json()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let report = load_report(&path).expect("external report should remain importable");
+
+    assert_eq!(report.header.pid, 1234);
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+        0o644
+    );
 }
 
 #[test]
@@ -198,7 +220,61 @@ fn update_termination_atomically_rewrites_plain_report() {
         updated["header"]["future_schema_field"],
         original["header"]["future_schema_field"]
     );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
     assert!(!dir.path().join(".crash_test.json.termination.tmp").exists());
+}
+
+#[test]
+fn atomic_replace_exclusively_creates_private_output_and_rejects_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new-report.json");
+    atomic_replace(&path, b"{\"private\":true}").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"{\"private\":true}");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+
+    std::fs::remove_file(&path).unwrap();
+    let outside = dir.path().join("outside.json");
+    std::fs::write(&outside, b"outside").unwrap();
+    symlink(&outside, &path).unwrap();
+    let error = atomic_replace(&path, b"replacement").unwrap_err();
+    assert!(error.contains("validate existing report"));
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+}
+
+#[test]
+fn update_termination_rejects_managed_report_symlink_before_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.json");
+    let linked = dir.path().join("managed.json");
+    let original = sample_report_json();
+    std::fs::write(&outside, &original).unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&outside, &linked).unwrap();
+
+    let error = update_termination(
+        &linked,
+        TerminationReason::Signaled {
+            signal: 11,
+            core_dumped: false,
+            runtime_ms: 1,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("safely open private report"), "{error}");
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), original);
+    assert!(
+        std::fs::symlink_metadata(linked)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[test]
@@ -230,6 +306,10 @@ fn update_termination_rewrites_zip_and_preserves_attachments() {
         .read_to_end(&mut preserved)
         .unwrap();
     assert_eq!(preserved, attachment);
+    assert_eq!(
+        std::fs::metadata(&zip_path).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
     assert!(!dir.path().join(".crash_test.zip.termination.tmp").exists());
 }
 

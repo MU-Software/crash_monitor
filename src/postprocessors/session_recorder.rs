@@ -7,11 +7,15 @@ use crate::pipeline::{
     PostProcessorPhase, Priority, ReportResult,
 };
 use crate::utils::paths;
+use crate::utils::paths::{
+    create_private_file, ensure_private_directory, open_private_directory, open_private_file,
+    validate_private_file,
+};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 #[cfg(test)]
 thread_local! {
@@ -45,7 +49,7 @@ fn session_data_dir() -> Result<std::path::PathBuf, String> {
     #[cfg(test)]
     if let Some(path) = TEST_DATA_DIR_OVERRIDE.with(|override_path| override_path.borrow().clone())
     {
-        fs::create_dir_all(&path)
+        ensure_private_directory(&path)
             .map_err(|error| format!("Failed to create test data dir: {error}"))?;
         return Ok(path);
     }
@@ -162,6 +166,8 @@ fn record_crash_in_dir(
     context: &PluginContext,
 ) -> Result<(), String> {
     context.checkpoint()?;
+    ensure_private_directory(dir)
+        .map_err(|error| format!("cannot prepare private session directory: {error}"))?;
     let record = SessionRecord {
         id: session.id.clone(),
         start: session.start.clone(),
@@ -179,18 +185,40 @@ fn record_crash_in_dir(
     append_session_record(&jsonl_path, &json, context)?;
 
     let lock_path = dir.join("session.lock");
-    match fs::remove_file(&lock_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "cannot remove committed session lock '{}': {error}",
-                lock_path.display()
-            ));
-        }
-    }
+    remove_private_session_lock(&lock_path)?;
     context.checkpoint()?;
     Ok(())
+}
+
+fn remove_private_session_lock(path: &std::path::Path) -> Result<(), String> {
+    let named = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect committed session lock '{}': {error}",
+                path.display()
+            ));
+        }
+    };
+    let file = open_private_file(path)
+        .map_err(|error| format!("cannot validate session lock '{}': {error}", path.display()))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened session lock: {error}"))?;
+    if named.dev() != opened.dev() || named.ino() != opened.ino() {
+        return Err(format!(
+            "committed session lock changed before removal: '{}'",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|error| {
+        format!(
+            "cannot remove committed session lock '{}': {error}",
+            path.display()
+        )
+    })?;
+    sync_parent_directory(path)
 }
 
 fn append_session_record(
@@ -204,26 +232,89 @@ fn append_session_record(
         ));
     }
     context.checkpoint()?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| format!("cannot open '{}': {error}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
-    if !metadata.file_type().is_file() {
-        return Err(format!("'{}' is not a regular file", path.display()));
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("session log has no parent: '{}'", path.display()))?;
+    open_private_directory(parent)
+        .map_err(|error| format!("cannot prepare private session directory: {error}"))?;
+    let (mut file, created) = open_private_session_log(path)?;
     context.checkpoint()?;
     file.write_all(json.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
         .map_err(|error| format!("cannot append '{}': {error}", path.display()))?;
     file.sync_all()
         .map_err(|error| format!("cannot sync '{}': {error}", path.display()))?;
+    if created {
+        sync_parent_directory(path)?;
+    }
     context.checkpoint()
+}
+
+fn open_private_session_log(path: &std::path::Path) -> Result<(fs::File, bool), String> {
+    match open_existing_session_log(path) {
+        Ok(file) => Ok((file, false)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let created = match create_private_file(path) {
+                Ok(file) => {
+                    drop(file);
+                    true
+                }
+                Err(create_error) => {
+                    let file = open_existing_session_log(path).map_err(|open_error| {
+                        format!(
+                            "cannot create private session log '{}': {create_error}; retry open failed: {open_error}",
+                            path.display()
+                        )
+                    })?;
+                    validate_private_file(&file, path).map_err(|validation_error| {
+                        format!(
+                            "cannot validate raced session log '{}': {validation_error}",
+                            path.display()
+                        )
+                    })?;
+                    return Ok((file, false));
+                }
+            };
+            let file = open_existing_session_log(path).map_err(|open_error| {
+                format!(
+                    "cannot reopen private session log '{}': {open_error}",
+                    path.display()
+                )
+            })?;
+            validate_private_file(&file, path).map_err(|validation_error| {
+                format!(
+                    "cannot validate private session log '{}': {validation_error}",
+                    path.display()
+                )
+            })?;
+            Ok((file, created))
+        }
+        Err(error) => Err(format!("cannot open '{}': {error}", path.display())),
+    }
+    .and_then(|(file, created)| {
+        validate_private_file(&file, path)
+            .map_err(|error| format!("cannot validate '{}': {error}", path.display()))?;
+        Ok((file, created))
+    })
+}
+
+fn open_existing_session_log(path: &std::path::Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .append(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)
+}
+
+fn sync_parent_directory(path: &std::path::Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("session log has no parent: '{}'", path.display()))?;
+    open_private_directory(parent)?.sync_all().map_err(|error| {
+        format!(
+            "cannot sync session directory '{}': {error}",
+            parent.display()
+        )
+    })
 }
 
 #[cfg(test)]

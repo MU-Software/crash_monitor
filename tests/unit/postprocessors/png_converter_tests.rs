@@ -3,11 +3,14 @@ use crate::pipeline::report::{
     self, CrashReport, ExceptionReport, HeapSummary, LoadedImageReport, ReportHeader, ThreadReport,
     VmRegionReport,
 };
-use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
+use crate::pipeline::{
+    ArtifactKind, ArtifactTransaction, CrashEvent, Plugin, PluginContext, PostProcessor,
+    ReportContext, ReportResult, ReportType,
+};
 use crate::postprocessors::PNGConverter;
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -151,6 +154,12 @@ fn test_converts_rgba_to_png_and_removes_original() {
         dir.path().join("a_screenshot_000.png").exists(),
         ".png should be created"
     );
+    for path in [&json_path, &dir.path().join("a_screenshot_000.png")] {
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+            crate::utils::paths::PRIVATE_FILE_MODE
+        );
+    }
 
     let updated = report::load_report(&json_path).unwrap();
     assert_eq!(updated.attachments.len(), 1);
@@ -197,13 +206,13 @@ fn test_report_fifo_and_symlink_are_rejected_without_blocking() {
             &PluginContext::without_deadline(),
         )
         .unwrap_err();
-    assert!(error.contains("cannot open report"));
+    assert!(error.contains("not private") || error.contains("safely open private"));
     assert!(rgba_path.exists());
     assert!(!symlink_dir.path().join("image.png").exists());
 }
 
 #[test]
-fn test_existing_png_symlink_is_replaced_without_following_it() {
+fn test_existing_png_symlink_blocks_publication_without_following_it() {
     let dir = tempfile::tempdir().unwrap();
     let outside = dir.path().join("outside.txt");
     std::fs::write(&outside, b"do not overwrite").unwrap();
@@ -225,12 +234,13 @@ fn test_existing_png_symlink_is_replaced_without_following_it() {
         std::fs::symlink_metadata(&png_path)
             .unwrap()
             .file_type()
-            .is_file()
+            .is_symlink()
     );
     assert_eq!(
         report::load_report(&json_path).unwrap().attachments[0]["file"],
-        "image.png"
+        "image.rgba"
     );
+    assert!(dir.path().join("image.rgba").exists());
 }
 
 #[test]
@@ -475,6 +485,69 @@ fn test_cancellation_after_png_write_commits_json_before_returning() {
     assert!(
         !leaked_temp,
         "atomic replacement must not leak temporary files"
+    );
+}
+
+#[test]
+fn test_png_directory_sync_failure_preserves_exact_transaction_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let event = make_event();
+    let transaction = ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+    let staging = transaction.staging_dir().to_path_buf();
+    let rgba_path = staging.join("report_screenshot_000.rgba");
+    let json_path = write_report_with_rgba_attachments(
+        &staging,
+        &[("report_screenshot_000.rgba", 2, 2, vec![0_u8; 16])],
+    );
+    transaction
+        .register_file(&json_path, ArtifactKind::Report)
+        .unwrap();
+    transaction
+        .register_file(&rgba_path, ArtifactKind::ScreenshotRgba)
+        .unwrap();
+    let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone(), rgba_path],
+        raw_path: None,
+        json_path: Some(json_path),
+        session: None,
+    };
+    let context = PluginContext::without_deadline().with_artifact_transaction(transaction.clone());
+
+    PNGConverter::process_with_directory_sync(&mut result, &context, |_| {
+        Err("injected PNG directory sync failure".into())
+    })
+    .unwrap();
+
+    let committed = transaction.commit().unwrap();
+    assert!(
+        committed
+            .durability_warnings
+            .iter()
+            .any(|warning| warning.contains("injected PNG directory sync failure"))
+    );
+    let manifest = crate::pipeline::load_manifest(&committed.manifest_path).unwrap();
+    assert_eq!(
+        manifest
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.path.as_str(), artifact.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            ("report.json", ArtifactKind::Report),
+            ("report_screenshot_000.png", ArtifactKind::ScreenshotPng),
+        ]
+    );
+    assert!(
+        committed
+            .report_dir
+            .join("report_screenshot_000.png")
+            .is_file()
+    );
+    assert!(
+        !committed
+            .report_dir
+            .join("report_screenshot_000.rgba")
+            .exists()
     );
 }
 

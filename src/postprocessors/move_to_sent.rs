@@ -7,11 +7,15 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::pipeline::{
     CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+};
+use crate::utils::paths::{
+    create_private_file, ensure_private_directory, open_private_directory, open_private_file,
+    publish_private_path,
 };
 
 // Large enough for the bounded ZIPArchiver output plus compression/header
@@ -42,7 +46,7 @@ impl MoveToSent {
 
     fn resolve_sent_dir(&self, pending: &Path) -> Result<PathBuf, String> {
         if let Some(ref p) = self.sent_dir_override {
-            fs::create_dir_all(p).map_err(|e| format!("create sent override: {e}"))?;
+            ensure_private_directory(p).map_err(|e| format!("create sent override: {e}"))?;
             return Ok(p.clone());
         }
         // Production: prefer the documented `sent_dir()` (under data_dir).
@@ -52,17 +56,19 @@ impl MoveToSent {
         // Fallback: sibling of pending. Used when output_dir is overridden
         // (e.g., integration tests) but sent_dir_override isn't.
         let sibling = crate::utils::paths::sent_dir_for(pending);
-        fs::create_dir_all(&sibling).map_err(|e| format!("create sent sibling: {e}"))?;
+        ensure_private_directory(&sibling).map_err(|e| format!("create sent sibling: {e}"))?;
         Ok(sibling)
     }
 
     fn resolve_transaction_sent_dir(&self, output_root: &Path) -> Result<PathBuf, String> {
         if let Some(ref path) = self.sent_dir_override {
-            fs::create_dir_all(path).map_err(|error| format!("create sent override: {error}"))?;
+            ensure_private_directory(path)
+                .map_err(|error| format!("create sent override: {error}"))?;
             return Ok(path.clone());
         }
         let sibling = crate::utils::paths::sent_dir_for(output_root);
-        fs::create_dir_all(&sibling).map_err(|error| format!("create sent sibling: {error}"))?;
+        ensure_private_directory(&sibling)
+            .map_err(|error| format!("create sent sibling: {error}"))?;
         Ok(sibling)
     }
 
@@ -176,11 +182,30 @@ impl PostProcessor for MoveToSent {
 /// Move a file from `src` to `dst`. Falls back to copy + delete when `rename`
 /// fails with `EXDEV` (cross-filesystem) — relevant for some test sandboxes.
 fn move_file(src: &Path, dst: &Path, context: &PluginContext) -> Result<(), String> {
+    let source_device = fs::symlink_metadata(src)
+        .map_err(|error| format!("cannot inspect source '{}': {error}", src.display()))?
+        .dev();
+    let destination_parent = dst
+        .parent()
+        .ok_or_else(|| format!("destination has no parent: '{}'", dst.display()))?;
+    let destination_device = fs::metadata(destination_parent)
+        .map_err(|error| {
+            format!(
+                "cannot inspect destination directory '{}': {error}",
+                destination_parent.display()
+            )
+        })?
+        .dev();
     move_file_with(
         src,
         dst,
         context,
-        |source, destination| fs::rename(source, destination),
+        move |source, destination| {
+            if source_device != destination_device {
+                return Err(std::io::Error::from_raw_os_error(nix::libc::EXDEV));
+            }
+            publish_private_path(source, destination).map_err(std::io::Error::other)
+        },
         || {},
         || {},
     )
@@ -194,21 +219,76 @@ fn move_file_with(
     after_copy_chunk: impl FnMut(),
     after_copy_complete: impl FnOnce(),
 ) -> Result<(), String> {
+    move_file_with_operations(
+        src,
+        dst,
+        context,
+        rename,
+        (after_copy_chunk, after_copy_complete),
+        sync_parent_directory,
+        |path| fs::remove_file(path),
+    )
+}
+
+fn move_file_with_operations(
+    src: &Path,
+    dst: &Path,
+    context: &PluginContext,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    copy_hooks: (impl FnMut(), impl FnOnce()),
+    mut sync_parent: impl FnMut(&Path, &str) -> Result<(), String>,
+    remove_source: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     context.checkpoint()?;
+    let source_parent = src
+        .parent()
+        .ok_or_else(|| format!("source has no parent: '{}'", src.display()))?;
+    open_private_directory(source_parent).map_err(|error| {
+        format!(
+            "cannot safely open source directory '{}': {error}",
+            source_parent.display()
+        )
+    })?;
+    let destination_parent = dst
+        .parent()
+        .ok_or_else(|| format!("destination has no parent: '{}'", dst.display()))?;
+    if destination_parent != source_parent {
+        open_private_directory(destination_parent).map_err(|error| {
+            format!(
+                "cannot safely open destination directory '{}': {error}",
+                destination_parent.display()
+            )
+        })?;
+    }
     let metadata = fs::symlink_metadata(src)
         .map_err(|e| format!("cannot inspect source '{}': {e}", src.display()))?;
     validate_regular_size(src, &metadata)?;
+    let source = open_private_file(src)
+        .map_err(|e| format!("cannot safely open source '{}': {e}", src.display()))?;
+    let opened_metadata = source
+        .metadata()
+        .map_err(|e| format!("cannot inspect source '{}': {e}", src.display()))?;
+    if !same_file(&metadata, &opened_metadata) || metadata.len() != opened_metadata.len() {
+        return Err(format!("source changed before move: '{}'", src.display()));
+    }
     context.checkpoint()?;
 
     match rename(src, dst) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            warn_directory_sync(dst, "destination", &mut sync_parent);
+            if src.parent() != dst.parent() {
+                warn_directory_sync(src, "source", &mut sync_parent);
+            }
+            Ok(())
+        }
         Err(error) if error.raw_os_error() == Some(nix::libc::EXDEV) => copy_across_filesystems(
             src,
             dst,
             context,
             &metadata,
-            after_copy_chunk,
-            after_copy_complete,
+            copy_hooks,
+            &mut sync_parent,
+            remove_source,
         ),
         Err(error) => Err(format!("rename: {error}")),
     }
@@ -219,14 +299,13 @@ fn copy_across_filesystems(
     dst: &Path,
     context: &PluginContext,
     initial_metadata: &fs::Metadata,
-    mut after_copy_chunk: impl FnMut(),
-    after_copy_complete: impl FnOnce(),
+    copy_hooks: (impl FnMut(), impl FnOnce()),
+    sync_parent: &mut impl FnMut(&Path, &str) -> Result<(), String>,
+    remove_source: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
+    let (mut after_copy_chunk, after_copy_complete) = copy_hooks;
     context.checkpoint()?;
-    let mut input = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(src)
+    let mut input = open_private_file(src)
         .map_err(|e| format!("cannot open source '{}': {e}", src.display()))?;
     let source_metadata = input
         .metadata()
@@ -240,16 +319,12 @@ fn copy_across_filesystems(
     context.checkpoint()?;
 
     let tmp_path = move_tmp_path(dst)?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)
-        .map_err(|e| {
-            format!(
-                "cannot create move temporary file '{}': {e}",
-                tmp_path.display()
-            )
-        })?;
+    let mut output = create_private_file(&tmp_path).map_err(|e| {
+        format!(
+            "cannot create move temporary file '{}': {e}",
+            tmp_path.display()
+        )
+    })?;
 
     let copy_result = (|| -> Result<(), String> {
         let mut copied = 0_u64;
@@ -289,8 +364,11 @@ fn copy_across_filesystems(
         }
         after_copy_complete();
         output
-            .set_permissions(source_metadata.permissions())
-            .map_err(|e| format!("cannot set move temporary permissions: {e}"))?;
+            .flush()
+            .map_err(|e| format!("cannot flush move temporary file: {e}"))?;
+        output
+            .sync_all()
+            .map_err(|e| format!("cannot sync move temporary file: {e}"))?;
         drop(output);
 
         let current_metadata = fs::symlink_metadata(src)
@@ -305,8 +383,16 @@ fn copy_across_filesystems(
         // before publish, but not between publishing the destination, deleting
         // the source, and updating ReportResult in the caller.
         context.checkpoint()?;
-        fs::rename(&tmp_path, dst).map_err(|e| format!("publish copied file: {e}"))?;
-        fs::remove_file(src).map_err(|e| format!("remove source after copy: {e}"))?;
+        publish_private_path(&tmp_path, dst).map_err(|e| format!("publish copied file: {e}"))?;
+        warn_directory_sync(dst, "destination", sync_parent);
+        match remove_source(src) {
+            Ok(()) => warn_directory_sync(src, "source", sync_parent),
+            Err(error) => eprintln!(
+                "[monitor] MoveToSent: destination '{}' is canonical but redundant source '{}' could not be removed: {error}",
+                dst.display(),
+                src.display()
+            ),
+        }
         Ok(())
     })();
 
@@ -314,6 +400,31 @@ fn copy_across_filesystems(
         let _ = fs::remove_file(&tmp_path);
     }
     copy_result
+}
+
+fn warn_directory_sync(
+    path: &Path,
+    kind: &str,
+    sync_parent: &mut impl FnMut(&Path, &str) -> Result<(), String>,
+) {
+    if let Err(error) = sync_parent(path, kind) {
+        eprintln!(
+            "[monitor] MoveToSent: {kind} '{}' changed atomically but its parent directory could not be synced: {error}",
+            path.display()
+        );
+    }
+}
+
+fn sync_parent_directory(path: &Path, kind: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{kind} path has no parent: '{}'", path.display()))?;
+    open_private_directory(parent)?.sync_all().map_err(|error| {
+        format!(
+            "cannot sync {kind} directory '{}': {error}",
+            parent.display()
+        )
+    })
 }
 
 fn validate_regular_size(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {

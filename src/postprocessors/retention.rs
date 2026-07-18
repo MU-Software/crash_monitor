@@ -19,6 +19,10 @@ use crate::pipeline::{
     CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, PostProcessorPhase,
     Priority, ReportManifest, ReportResult,
 };
+use crate::utils::paths::{
+    create_private_file, ensure_private_directory, open_private_directory, open_private_file,
+    publish_private_path, validate_private_file,
+};
 use nix::errno::Errno;
 use nix::fcntl::{Flock, FlockArg};
 use std::collections::BTreeMap;
@@ -249,14 +253,12 @@ fn collect_entries_bounded(
             .file_type()
             .map_err(|error| format!("cannot inspect retention entry {name:?}: {error}"))?;
         if file_type.is_file() {
-            let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            let file = open_private_file(&entry.path()).map_err(|error| {
+                format!("cannot validate legacy retention entry {name:?}: {error}")
+            })?;
+            let metadata = file.metadata().map_err(|error| {
                 format!("cannot inspect legacy retention entry {name:?}: {error}")
             })?;
-            if !metadata.file_type().is_file() {
-                return Err(format!(
-                    "legacy retention entry changed while being inspected: {name:?}"
-                ));
-            }
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             entries.push(ReportEntry {
                 path: entry.path(),
@@ -275,6 +277,8 @@ fn collect_entries_bounded(
                     )
                 })?,
             );
+        } else if file_type.is_symlink() {
+            return Err(format!("retention root contains a symlink entry: {name:?}"));
         }
     }
     Ok(entries)
@@ -294,7 +298,8 @@ fn validate_retention_root(dir: &Path) -> Result<(), String> {
             dir.display()
         ));
     }
-    Ok(())
+    ensure_private_directory(dir)
+        .map_err(|error| format!("retention root is not private '{}': {error}", dir.display()))
 }
 
 fn acquire_retention_lock(dir: &Path, context: &PluginContext) -> Result<RetentionLock, String> {
@@ -308,24 +313,11 @@ fn acquire_retention_lock(dir: &Path, context: &PluginContext) -> Result<Retenti
     };
 
     let lock_path = dir.join(RETENTION_LOCK_FILE_NAME);
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(&lock_path)
-        .map_err(|error| {
-            format!(
-                "cannot safely open retention lock '{}': {error}",
-                lock_path.display()
-            )
-        })?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("cannot inspect retention lock: {error}"))?;
-    if !metadata.file_type().is_file() {
-        return Err("retention lock is not a regular file".into());
+    let (mut file, created) = open_retention_lock_file(&lock_path)?;
+    if created {
+        open_private_directory(dir)?
+            .sync_all()
+            .map_err(|error| format!("cannot sync retention root: {error}"))?;
     }
 
     loop {
@@ -349,6 +341,52 @@ fn acquire_retention_lock(dir: &Path, context: &PluginContext) -> Result<Retenti
             }
         }
     }
+}
+
+fn open_retention_lock_file(path: &Path) -> Result<(fs::File, bool), String> {
+    match open_existing_retention_lock(path) {
+        Ok(file) => {
+            validate_private_file(&file, path).map_err(|error| {
+                format!(
+                    "cannot safely open retention lock '{}': {error}",
+                    path.display()
+                )
+            })?;
+            Ok((file, false))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match create_private_file(path) {
+                Ok(file) => Ok((file, true)),
+                Err(create_error) => {
+                    let file = open_existing_retention_lock(path).map_err(|open_error| {
+                        format!(
+                            "cannot safely create retention lock '{}': {create_error}; retry open failed: {open_error}",
+                            path.display()
+                        )
+                    })?;
+                    validate_private_file(&file, path).map_err(|validation_error| {
+                        format!(
+                            "cannot safely open retention lock '{}': {validation_error}",
+                            path.display()
+                        )
+                    })?;
+                    Ok((file, false))
+                }
+            }
+        }
+        Err(error) => Err(format!(
+            "cannot safely open retention lock '{}': {error}",
+            path.display()
+        )),
+    }
+}
+
+fn open_existing_retention_lock(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)
 }
 
 fn cleanup_retention_tombstones(dir: &Path, context: &PluginContext) -> Result<(), String> {
@@ -444,6 +482,12 @@ fn inspect_committed_report(
     if !initial_metadata.file_type().is_dir() {
         return Err("report path is not a real directory".into());
     }
+    ensure_private_directory(report_dir)
+        .map_err(|error| format!("report directory is not private: {error}"))?;
+    let report_directory = open_private_directory(report_dir)?;
+    let initial_metadata = report_directory
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened report directory: {error}"))?;
 
     let mut expected = manifest_artifact_sizes(report_dir, report_name)?;
 
@@ -464,11 +508,11 @@ fn inspect_committed_report(
             .file_name()
             .into_string()
             .map_err(|_| "report contains a non-UTF-8 entry".to_string())?;
-        let metadata = fs::symlink_metadata(entry.path())
+        let file = open_private_file(&entry.path())
+            .map_err(|error| format!("cannot validate report entry {name:?}: {error}"))?;
+        let metadata = file
+            .metadata()
             .map_err(|error| format!("cannot inspect report entry {name:?}: {error}"))?;
-        if !metadata.file_type().is_file() {
-            return Err(format!("report entry is not a regular file: {name:?}"));
-        }
         if name == MANIFEST_FILE_NAME {
             if saw_manifest {
                 return Err("report contains duplicate manifest entries".into());
@@ -546,11 +590,8 @@ fn manifest_artifact_sizes(
 }
 
 fn read_manifest_no_follow(path: &Path) -> Result<Vec<u8>, String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| format!("cannot safely open manifest: {error}"))?;
+    let file =
+        open_private_file(path).map_err(|error| format!("cannot safely open manifest: {error}"))?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("cannot inspect manifest: {error}"))?;
@@ -618,6 +659,9 @@ fn remove_entry(
                 if !metadata.file_type().is_dir() {
                     return Err("committed report is no longer a real directory".into());
                 }
+                ensure_private_directory(&entry.path).map_err(|error| {
+                    format!("committed report directory is not private: {error}")
+                })?;
                 // The current transaction already owns this directory's
                 // advisory lock. Other reports must be acquired independently
                 // so a live finalizer in this or another process stays safe.
@@ -649,7 +693,7 @@ fn remove_entry(
                     ".retention-{report_name}.{}.deleting",
                     uuid::Uuid::new_v4().simple()
                 ));
-                fs::rename(&entry.path, &tombstone).map_err(|error| {
+                publish_private_path(&entry.path, &tombstone).map_err(|error| {
                     format!("cannot atomically hide committed report before deletion: {error}")
                 })?;
 
@@ -736,8 +780,8 @@ fn sync_parent_directory(path: &Path) -> Result<(), String> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+    open_private_directory(path)?
+        .sync_all()
         .map_err(|error| format!("cannot sync directory '{}': {error}", path.display()))
 }
 

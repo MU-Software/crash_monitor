@@ -1,9 +1,14 @@
 use super::{
     MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_FILE_BYTES, MAX_ARCHIVE_TOTAL_BYTES, STREAM_BUFFER_BYTES,
 };
-use crate::pipeline::{CrashEvent, Plugin, PluginContext, PostProcessor, ReportResult, ReportType};
+use crate::pipeline::{
+    ArtifactKind, ArtifactTransaction, CrashEvent, Plugin, PluginContext, PostProcessor,
+    ReportContext, ReportResult, ReportType,
+};
 use crate::postprocessors::ZIPArchiver;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 fn dummy_event() -> CrashEvent {
     CrashEvent {
@@ -19,6 +24,69 @@ fn dummy_event() -> CrashEvent {
         pid: 1234,
         process_name: "test".into(),
         hang_duration_ms: None,
+    }
+}
+
+#[test]
+#[ignore = "spawned with an isolated process-global umask"]
+fn zip_writer_private_mode_under_subprocess_umask_helper() {
+    let Ok(mask) = std::env::var("CRASH_MONITOR_P014_WRITER_UMASK") else {
+        return;
+    };
+    let root = PathBuf::from(std::env::var_os("CRASH_MONITOR_P014_WRITER_ROOT").unwrap());
+    let mask = nix::libc::mode_t::from_str_radix(&mask, 8).unwrap();
+    // SAFETY: only this ignored helper runs in the dedicated child process.
+    unsafe {
+        nix::libc::umask(mask);
+    }
+
+    let json_path = root.join("report.json");
+    let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone()],
+        raw_path: None,
+        json_path: Some(json_path),
+        session: None,
+    };
+    ZIPArchiver
+        .process(
+            &dummy_event(),
+            &mut result,
+            &PluginContext::without_deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(root.join("report.zip"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
+}
+
+#[test]
+fn zip_writer_is_private_under_permissive_and_restrictive_umasks() {
+    for mask in ["000", "777"] {
+        let root = tempfile::tempdir().unwrap();
+        let json_path = root.path().join("report.json");
+        std::fs::write(&json_path, b"{}").unwrap();
+        std::fs::set_permissions(&json_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "postprocessors::zip_archiver::tests::zip_writer_private_mode_under_subprocess_umask_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CRASH_MONITOR_P014_WRITER_UMASK", mask)
+            .env("CRASH_MONITOR_P014_WRITER_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ZIP writer under umask {mask} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -51,7 +119,47 @@ fn test_creates_zip_with_json_and_png() {
 
     let zip_path = dir.path().join("crash_20260411_120000_1234.zip");
     assert!(zip_path.exists(), "ZIP file should be created");
+    assert_eq!(
+        std::fs::metadata(&zip_path).unwrap().permissions().mode() & 0o7777,
+        crate::utils::paths::PRIVATE_FILE_MODE
+    );
     assert_eq!(result.json_path.as_deref(), Some(zip_path.as_path()));
+}
+
+#[test]
+fn test_zip_directory_sync_failure_preserves_exact_transaction_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let event = dummy_event();
+    let transaction = ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+    let json_path = transaction
+        .write_bytes("report.json", ArtifactKind::Report, b"{}")
+        .unwrap();
+    let mut result = ReportResult {
+        artifact_paths: vec![json_path.clone()],
+        raw_path: None,
+        json_path: Some(json_path),
+        session: None,
+    };
+    let context = PluginContext::without_deadline().with_artifact_transaction(transaction.clone());
+
+    ZIPArchiver::process_with_directory_sync(&mut result, &context, |_| {
+        Err("injected ZIP directory sync failure".into())
+    })
+    .unwrap();
+
+    let committed = transaction.commit().unwrap();
+    assert!(
+        committed
+            .durability_warnings
+            .iter()
+            .any(|warning| warning.contains("injected ZIP directory sync failure"))
+    );
+    let manifest = crate::pipeline::load_manifest(&committed.manifest_path).unwrap();
+    assert_eq!(manifest.artifacts.len(), 1);
+    assert_eq!(manifest.artifacts[0].path, "report.zip");
+    assert_eq!(manifest.artifacts[0].kind, ArtifactKind::Archive);
+    assert!(committed.report_dir.join("report.zip").is_file());
+    assert!(!committed.report_dir.join("report.json").exists());
 }
 
 #[test]
@@ -85,7 +193,11 @@ fn test_zip_contains_all_files() {
     let mut archive = zip::ZipArchive::new(file).unwrap();
 
     let mut names: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| {
+            let entry = archive.by_index(i).unwrap();
+            assert_eq!(entry.unix_mode().map(|mode| mode & 0o7777), Some(0o600));
+            entry.name().to_string()
+        })
         .collect();
     names.sort();
 

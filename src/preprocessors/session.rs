@@ -6,11 +6,9 @@ use crate::pipeline::report::SessionReport;
 use crate::pipeline::{
     CollectedData, CrashEvent, Plugin, PluginContext, PluginExecution, PreProcessor, Priority,
 };
-use crate::utils::paths;
+use crate::utils::paths::{self, open_private_directory, open_private_file};
 use chrono::Local;
-use std::fs::OpenOptions;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 const MAX_SESSION_LOCK_BYTES: usize = 4 * 1024;
@@ -59,15 +57,10 @@ fn read_session_lock(context: &PluginContext) -> Option<SessionReport> {
 /// Read session info from a specific data directory.
 /// Pure function — pass an explicit path to avoid global env mutation in tests.
 fn read_session_lock_from(dir: &Path, context: &PluginContext) -> Option<SessionReport> {
+    open_private_directory(dir).ok()?;
     let lock_path = dir.join("session.lock");
 
-    // O_NONBLOCK prevents a raced-in FIFO/device from blocking the cooperative
-    // pipeline thread, while O_NOFOLLOW rejects symlink substitution.
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
-        .open(&lock_path)
-        .ok()?;
+    let mut file = open_private_file(&lock_path).ok()?;
     let metadata = file.metadata().ok()?;
     if !metadata.file_type().is_file()
         || metadata.len() > u64::try_from(MAX_SESSION_LOCK_BYTES).ok()?

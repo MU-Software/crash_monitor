@@ -224,6 +224,7 @@ enum TransactionState {
 #[derive(Debug)]
 struct TransactionCore {
     artifacts: BTreeMap<String, ArtifactKind>,
+    durability_warnings: Vec<String>,
     destination_root: PathBuf,
     state: TransactionState,
     active_operations: usize,
@@ -298,6 +299,7 @@ impl ArtifactTransaction {
             _owner_lock: owner_lock,
             core: Mutex::new(TransactionCore {
                 artifacts: BTreeMap::new(),
+                durability_warnings: Vec::new(),
                 destination_root,
                 state: TransactionState::Open,
                 active_operations: 0,
@@ -338,12 +340,24 @@ impl ArtifactTransaction {
     ///
     /// # Errors
     /// Returns an error for an invalid or duplicate name, transaction state
-    /// conflict, writer failure, sync failure, or atomic publication failure.
+    /// conflict, writer/file-sync failure, or atomic publication failure.
+    /// A directory-sync failure after publication is retained as a durability
+    /// warning so the registry can still describe the visible artifact exactly.
     pub fn write_artifact(
         &self,
         file_name: &str,
         kind: ArtifactKind,
         write: impl FnOnce(&mut File) -> Result<(), String>,
+    ) -> Result<PathBuf, String> {
+        self.write_artifact_with_directory_sync(file_name, kind, write, sync_directory)
+    }
+
+    fn write_artifact_with_directory_sync(
+        &self,
+        file_name: &str,
+        kind: ArtifactKind,
+        write: impl FnOnce(&mut File) -> Result<(), String>,
+        sync_staging_directory: impl FnOnce(&Path) -> Result<(), String>,
     ) -> Result<PathBuf, String> {
         let _operation = self.begin_operation()?;
         validate_artifact_name(file_name)?;
@@ -381,8 +395,19 @@ impl ArtifactTransaction {
                     final_path.display()
                 )
             })?;
-            sync_directory(self.staging_dir())?;
-            self.register_file_during_operation(&final_path, kind)
+            // Publication is the state transition: once the final name exists,
+            // make the exact registry agree before any fallible durability
+            // operation. The file was created and validated by this method, so
+            // insertion cannot fail after publication.
+            lock(&self.core)
+                .artifacts
+                .insert(file_name.to_string(), kind);
+            if let Err(error) = sync_staging_directory(self.staging_dir()) {
+                self.record_durability_warning(format!(
+                    "artifact '{file_name}' was published but its staging directory could not be synced: {error}"
+                ));
+            }
+            Ok(())
         })();
 
         if write_result.is_err() {
@@ -416,6 +441,12 @@ impl ArtifactTransaction {
     pub fn register_file(&self, path: &Path, kind: ArtifactKind) -> Result<(), String> {
         let _operation = self.begin_operation()?;
         self.register_file_during_operation(path, kind)
+    }
+
+    /// Preserve a non-fatal durability failure that occurred after an artifact
+    /// had already crossed its atomic publication boundary.
+    pub(crate) fn record_durability_warning(&self, warning: String) {
+        lock(&self.core).durability_warnings.push(warning);
     }
 
     fn register_file_during_operation(
@@ -562,7 +593,7 @@ impl ArtifactTransaction {
             report_id: self.report.report_id().clone(),
             manifest_path: report_dir.join(MANIFEST_FILE_NAME),
             report_dir,
-            durability_warnings: Vec::new(),
+            durability_warnings: lock(&self.core).durability_warnings.clone(),
         };
         {
             let mut core = lock(&self.core);
@@ -1276,6 +1307,36 @@ mod tests {
         final_names.sort();
         assert_eq!(final_names, ["manifest.json", "report.json", "thread.raw"]);
         assert!(!transaction.staging_dir().exists());
+    }
+
+    #[test]
+    fn published_artifact_directory_sync_failure_is_committed_as_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+
+        let path = transaction
+            .write_artifact_with_directory_sync(
+                "report.json",
+                ArtifactKind::Report,
+                |file| file.write_all(b"{}").map_err(|error| error.to_string()),
+                |_| Err("injected staging directory sync failure".into()),
+            )
+            .unwrap();
+
+        assert_eq!(transaction.artifact_paths(), vec![path]);
+        let committed = transaction.commit().unwrap();
+        assert!(
+            committed
+                .durability_warnings
+                .iter()
+                .any(|warning| warning.contains("injected staging directory sync failure"))
+        );
+        let manifest = load_manifest(&committed.manifest_path).unwrap();
+        assert_eq!(manifest.artifacts.len(), 1);
+        assert_eq!(manifest.artifacts[0].path, "report.json");
+        assert!(committed.report_dir.join("report.json").is_file());
     }
 
     #[test]
