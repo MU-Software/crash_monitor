@@ -387,10 +387,10 @@
 
 ### P1-26. ZIP과 이동을 manifest 기반으로 수행한다
 
-- [ ] `starts_with(stem)` 파일 검색을 제거하고 현재 `ReportId` manifest의 exact artifact만 archive한다.
-- [ ] PID `123`/`1234` 또는 prefix가 비슷한 report의 artifact가 섞이거나 삭제되지 않게 한다.
-- [ ] ZIP 성공과 원본 삭제 뒤 `ReportResult`/manifest가 실제 ZIP 또는 `sent` 최종 경로를 가리키게 한다.
-- [ ] notifier는 삭제된 JSON이 아니라 최종 artifact descriptor를 받는다.
+- [x] `starts_with(stem)` 파일 검색을 제거하고 현재 `ReportId` manifest의 exact artifact만 archive한다.
+- [x] PID `123`/`1234` 또는 prefix가 비슷한 report의 artifact가 섞이거나 삭제되지 않게 한다.
+- [x] ZIP 성공과 원본 삭제 뒤 `ReportResult`/manifest가 실제 ZIP 또는 `sent` 최종 경로를 가리키게 한다.
+- [x] notifier는 삭제된 JSON이 아니라 최종 artifact descriptor를 받는다.
 
 범위: `src/postprocessors/zip_archiver.rs`, `src/postprocessors/move_to_sent.rs`, notifier traits.
 
