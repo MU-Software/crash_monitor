@@ -56,6 +56,13 @@ pub enum MonitorEvent {
 pub trait EventSource {
     /// Poll for the next event. Returns `None` if no event is ready yet.
     fn poll(&mut self) -> Option<MonitorEvent>;
+
+    /// Wait for an event until `deadline`. Production sources override this
+    /// with an OS-backed blocking wait; the immediate default keeps scripted
+    /// test sources small and deterministic.
+    fn wait_until(&mut self, _deadline: Option<Instant>) -> Option<MonitorEvent> {
+        self.poll()
+    }
 }
 
 // ═══════════════════════════════════════════════════
@@ -345,7 +352,12 @@ pub fn event_loop(
     let mut last_anr_check = Instant::now();
 
     loop {
-        match source.poll() {
+        let next_watchdog_check = anr_state.as_ref().and_then(|_| {
+            anr_config.and_then(|config| {
+                last_anr_check.checked_add(Duration::from_millis(config.check_interval_ms))
+            })
+        });
+        match source.wait_until(next_watchdog_check) {
             Some(MonitorEvent::Crash {
                 received_at,
                 exception_type,
@@ -542,8 +554,6 @@ pub fn event_loop(
                         }
                     }
                 }
-
-                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }

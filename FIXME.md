@@ -190,8 +190,8 @@
 
 ### P1-04. 50ms polling을 event-driven wait로 교체한다
 
-- [ ] process exit, exception wakeup, signal pipe, watchdog timer를 `kqueue` 또는 동등한 deadline-aware wait에 통합한다.
-- [ ] wakeup 지연, idle CPU 사용량, signal burst, simultaneous exit/exception을 검증한다.
+- [x] process exit, exception wakeup, signal pipe, watchdog timer를 `kqueue` 또는 동등한 deadline-aware wait에 통합한다.
+- [x] wakeup 지연, idle CPU 사용량, signal burst, simultaneous exit/exception을 검증한다.
 
 범위: `src/event_loop.rs`, `src/event_source.rs`.
 

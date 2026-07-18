@@ -10,14 +10,17 @@
 //! in `event_loop` and is unit-tested via `TestEventSource`; this module owns the
 //! untestable OS wiring (signal handler, pipe, `waitpid`).
 
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::libc;
+use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::event_loop::{EventSource, MonitorEvent};
@@ -97,28 +100,112 @@ fn drain_signal_pipe(read_fd: &OwnedFd) -> bool {
 // ═══════════════════════════════════════════════════
 
 pub struct MacEventSource {
-    exc_rx: std::sync::mpsc::Receiver<platform::ExceptionListenerEvent>,
+    exc_rx: mpsc::Receiver<platform::ExceptionListenerEvent>,
+    exception_wake_fd: OwnedFd,
     signal_read_fd: OwnedFd,
     child_pid: nix::unistd::Pid,
     child_started_at: Instant,
+    kqueue: Kqueue,
 }
 
 impl MacEventSource {
     /// Assemble the event source from its three OS channels: the Mach exception
     /// receiver, the SIGUSR1 pipe read end, and the child PID for `waitpid`.
-    #[must_use]
     pub fn new(
-        exc_rx: std::sync::mpsc::Receiver<platform::ExceptionListenerEvent>,
+        exc_rx: mpsc::Receiver<platform::ExceptionListenerEvent>,
         signal_read_fd: OwnedFd,
         child_pid: nix::unistd::Pid,
         child_started_at: Instant,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let (exc_rx, exception_wake_fd) = bridge_exception_listener(exc_rx)?;
+        let kqueue = Kqueue::new().map_err(|error| format!("kqueue failed: {error}"))?;
+        let changes = [
+            KEvent::new(
+                signal_read_fd.as_raw_fd() as usize,
+                EventFilter::EVFILT_READ,
+                EvFlags::EV_ADD | EvFlags::EV_ENABLE | EvFlags::EV_CLEAR,
+                FilterFlag::empty(),
+                0,
+                0,
+            ),
+            KEvent::new(
+                exception_wake_fd.as_raw_fd() as usize,
+                EventFilter::EVFILT_READ,
+                EvFlags::EV_ADD | EvFlags::EV_ENABLE | EvFlags::EV_CLEAR,
+                FilterFlag::empty(),
+                0,
+                0,
+            ),
+            KEvent::new(
+                child_pid.as_raw() as usize,
+                EventFilter::EVFILT_PROC,
+                EvFlags::EV_ADD | EvFlags::EV_ENABLE | EvFlags::EV_ONESHOT,
+                FilterFlag::NOTE_EXIT,
+                0,
+                0,
+            ),
+        ];
+        let mut no_events = [];
+        kqueue
+            .kevent(&changes, &mut no_events, Some(libc::timespec::default()))
+            .map_err(|error| format!("registering kqueue event sources failed: {error}"))?;
+
+        Ok(Self {
             exc_rx,
+            exception_wake_fd,
             signal_read_fd,
             child_pid,
             child_started_at,
-        }
+            kqueue,
+        })
+    }
+}
+
+/// Turn the standard listener channel into a file-descriptor wakeup that can
+/// participate in the same kqueue as process and signal events.
+fn bridge_exception_listener(
+    incoming: mpsc::Receiver<platform::ExceptionListenerEvent>,
+) -> Result<(mpsc::Receiver<platform::ExceptionListenerEvent>, OwnedFd), String> {
+    let (wake_read, wake_write) = nonblocking_cloexec_pipe("exception wake pipe")?;
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("exception-event-wakeup".to_string())
+        .spawn(move || {
+            while let Ok(event) = incoming.recv() {
+                if tx.send(event).is_err() {
+                    return;
+                }
+                wake_fd(&wake_write);
+            }
+            // Wake the supervisor so a disconnected listener is observed
+            // immediately rather than only at a watchdog deadline.
+            wake_fd(&wake_write);
+        })
+        .map_err(|error| format!("spawning exception wake bridge failed: {error}"))?;
+    Ok((rx, wake_read))
+}
+
+fn nonblocking_cloexec_pipe(context: &str) -> Result<(OwnedFd, OwnedFd), String> {
+    let (read_fd, write_fd) =
+        unistd::pipe().map_err(|error| format!("{context} failed: {error}"))?;
+    for fd in [&read_fd, &write_fd] {
+        fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+            .map_err(|error| format!("{context} CLOEXEC failed: {error}"))?;
+        let flags = fcntl(fd, FcntlArg::F_GETFL)
+            .map_err(|error| format!("{context} F_GETFL failed: {error}"))?;
+        fcntl(
+            fd,
+            FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+        )
+        .map_err(|error| format!("{context} O_NONBLOCK failed: {error}"))?;
+    }
+    Ok((read_fd, write_fd))
+}
+
+fn wake_fd(fd: &OwnedFd) {
+    match unistd::write(fd, &[1]) {
+        Ok(_) | Err(nix::errno::Errno::EAGAIN) => {}
+        Err(error) => eprintln!("[monitor] exception wake pipe write failed: {error}"),
     }
 }
 
@@ -145,6 +232,13 @@ fn poll_exception_listener(
     }
 }
 
+fn prioritize_ready_events(
+    child: Option<MonitorEvent>,
+    listener: Option<MonitorEvent>,
+) -> Option<MonitorEvent> {
+    child.or(listener)
+}
+
 /// Normalize every terminal `WaitStatus` without losing signal/core metadata.
 /// Non-terminal statuses deliberately return `None`.
 #[must_use]
@@ -169,8 +263,9 @@ pub fn termination_from_wait_status(
 
 impl EventSource for MacEventSource {
     fn poll(&mut self) -> Option<MonitorEvent> {
+        drain_wake_fd(&self.exception_wake_fd);
         // Check for Mach exception (crash)
-        let listener_failure = match poll_exception_listener(&self.exc_rx) {
+        let listener_event = match poll_exception_listener(&self.exc_rx) {
             ExceptionListenerPoll::Exception(exc_info) => {
                 eprintln!(
                     "[monitor] Crash detected: {} (code={:#x}, subcode={:#x})",
@@ -178,16 +273,18 @@ impl EventSource for MacEventSource {
                     exc_info.code,
                     exc_info.subcode
                 );
-                return Some(MonitorEvent::Crash {
+                Some(MonitorEvent::Crash {
                     received_at: exc_info.received_at,
                     exception_type: exc_info.exception_type,
                     code: exc_info.code,
                     subcode: exc_info.subcode,
                     raw_codes: exc_info.raw_codes,
                     request: exc_info.request,
-                });
+                })
             }
-            ExceptionListenerPoll::Failure(message) => Some(message),
+            ExceptionListenerPoll::Failure(message) => {
+                Some(MonitorEvent::MonitorFailure { message })
+            }
             ExceptionListenerPoll::Empty => None,
         };
 
@@ -195,33 +292,33 @@ impl EventSource for MacEventSource {
 
         // A terminal wait status wins over lower-priority snapshot/listener
         // events so a dead task can never enter the live-task capture path.
-        loop {
+        let child_event = loop {
             match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
                 Ok(status) => {
                     if let Some(reason) =
                         termination_from_wait_status(status, self.child_started_at.elapsed())
                     {
                         eprintln!("[monitor] Child terminated: {reason:?}.");
-                        return Some(MonitorEvent::ChildTerminated(reason));
+                        break Some(MonitorEvent::ChildTerminated(reason));
                     }
-                    break;
+                    break None;
                 }
                 Err(nix::errno::Errno::EINTR) => {}
                 Err(nix::errno::Errno::ECHILD) => {
-                    return Some(MonitorEvent::MonitorFailure {
+                    break Some(MonitorEvent::MonitorFailure {
                         message: "waitpid lost ownership of the child (ECHILD)".to_string(),
                     });
                 }
                 Err(e) => {
-                    return Some(MonitorEvent::MonitorFailure {
+                    break Some(MonitorEvent::MonitorFailure {
                         message: format!("waitpid failed: {e}"),
                     });
                 }
             }
-        }
+        };
 
-        if let Some(message) = listener_failure {
-            return Some(MonitorEvent::MonitorFailure { message });
+        if let Some(event) = prioritize_ready_events(child_event, listener_event) {
+            return Some(event);
         }
 
         // Check for SIGUSR1 (manual snapshot) only while the child is alive.
@@ -231,6 +328,62 @@ impl EventSource for MacEventSource {
         }
 
         None
+    }
+
+    fn wait_until(&mut self, deadline: Option<Instant>) -> Option<MonitorEvent> {
+        if let Some(event) = self.poll() {
+            return Some(event);
+        }
+
+        loop {
+            let timeout = deadline.map(|deadline| {
+                duration_to_timespec(deadline.saturating_duration_since(Instant::now()))
+            });
+            let placeholder = KEvent::new(
+                self.exception_wake_fd.as_raw_fd() as usize,
+                EventFilter::EVFILT_READ,
+                EvFlags::empty(),
+                FilterFlag::empty(),
+                0,
+                0,
+            );
+            let mut events = [placeholder; 3];
+            match self.kqueue.kevent(&[], &mut events, timeout) {
+                Ok(0) => return None,
+                Ok(_) => return self.poll(),
+                Err(nix::errno::Errno::EINTR) => {
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        return None;
+                    }
+                }
+                Err(error) => {
+                    return Some(MonitorEvent::MonitorFailure {
+                        message: format!("kqueue wait failed: {error}"),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn drain_wake_fd(fd: &OwnedFd) {
+    let mut buffer = [0_u8; 64];
+    loop {
+        match unistd::read(fd, &mut buffer) {
+            Ok(0) | Err(nix::errno::Errno::EAGAIN) => return,
+            Ok(_) | Err(nix::errno::Errno::EINTR) => {}
+            Err(error) => {
+                eprintln!("[monitor] exception wake pipe drain failed: {error}");
+                return;
+            }
+        }
+    }
+}
+
+fn duration_to_timespec(duration: Duration) -> libc::timespec {
+    libc::timespec {
+        tv_sec: duration.as_secs().try_into().unwrap_or(libc::time_t::MAX),
+        tv_nsec: duration.subsec_nanos().into(),
     }
 }
 

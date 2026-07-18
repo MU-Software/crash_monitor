@@ -103,3 +103,22 @@ fn unexpected_listener_disconnect_is_a_supervisor_failure() {
             if message.contains("disconnected without a terminal event")
     ));
 }
+
+#[test]
+fn terminal_child_status_has_priority_over_a_simultaneous_listener_failure() {
+    let child = Some(MonitorEvent::ChildTerminated(TerminationReason::Exited {
+        exit_code: 0,
+        runtime_ms: 1,
+    }));
+    let listener = Some(MonitorEvent::MonitorFailure {
+        message: "simultaneous listener event".to_string(),
+    });
+
+    assert!(matches!(
+        prioritize_ready_events(child, listener),
+        Some(MonitorEvent::ChildTerminated(TerminationReason::Exited {
+            exit_code: 0,
+            ..
+        }))
+    ));
+}

@@ -581,8 +581,18 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Build event source from Mac-specific channels
     #[allow(clippy::cast_sign_loss)] // PID is always positive
     let child_pid_u32 = child_pid_raw as u32;
-    let mut source =
-        event_source::MacEventSource::new(exc_rx, signal_read_fd, child_pid, child_started_at);
+    let mut source = match event_source::MacEventSource::new(
+        exc_rx,
+        signal_read_fd,
+        child_pid,
+        child_started_at,
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("[monitor] failed to initialize event source: {error}");
+            return event_loop::EXIT_MONITOR_INTERNAL;
+        }
+    };
 
     let event_loop::EventLoopResult {
         mut outcome,

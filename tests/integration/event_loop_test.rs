@@ -75,6 +75,28 @@ impl EventSource for ScriptedPollSource {
     }
 }
 
+/// Verifies that the core loop uses the deadline-aware blocking API instead
+/// of repeatedly calling `poll` and sleeping.
+struct DeadlineAwareSource {
+    event: Option<MonitorEvent>,
+    waits: Arc<AtomicUsize>,
+    saw_deadline: Arc<AtomicUsize>,
+}
+
+impl EventSource for DeadlineAwareSource {
+    fn poll(&mut self) -> Option<MonitorEvent> {
+        panic!("event_loop must use wait_until")
+    }
+
+    fn wait_until(&mut self, deadline: Option<std::time::Instant>) -> Option<MonitorEvent> {
+        self.waits.fetch_add(1, Ordering::SeqCst);
+        if deadline.is_some() {
+            self.saw_deadline.fetch_add(1, Ordering::SeqCst);
+        }
+        self.event.take()
+    }
+}
+
 // ═══════════════════════════════════════════════════
 //  Helpers
 // ═══════════════════════════════════════════════════
@@ -1142,6 +1164,43 @@ fn test_snapshot_event_continues() {
         json_count >= 1,
         "Should produce a snapshot report, got {json_count}"
     );
+}
+
+#[test]
+fn event_loop_blocks_once_with_the_watchdog_deadline() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline(tempdir.path());
+    let shm =
+        Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
+    publish_anr_readiness(&shm, 1);
+    let waits = Arc::new(AtomicUsize::new(0));
+    let saw_deadline = Arc::new(AtomicUsize::new(0));
+    let mut source = DeadlineAwareSource {
+        event: Some(exited(0, 1)),
+        waits: waits.clone(),
+        saw_deadline: saw_deadline.clone(),
+    };
+    let config = AnrConfig {
+        warmup_ms: 0,
+        threshold_ms: 5_000,
+        check_interval_ms: 2_000,
+        cooldown_ms: 60_000,
+    };
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        0,
+        9999,
+        "test_app",
+        &noop_reply,
+        Some(&shm),
+        Some(&config),
+    );
+
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(waits.load(Ordering::SeqCst), 1);
+    assert_eq!(saw_deadline.load(Ordering::SeqCst), 1);
 }
 
 #[test]
