@@ -880,14 +880,14 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // heartbeat and the shared-memory producer-ready handshake. Environment
     // overrides allow E2E tests to use shorter timeouts.
     let anr_config = if pl.report_enabled(pipeline::ReportType::Anr) {
-        let watchdog = match watchdog_config_with_explicit_env_overrides(validated_config.watchdog())
-        {
-            Ok(watchdog) => watchdog,
-            Err(error) => {
-                eprintln!("[monitor] Invalid watchdog environment override: {error}");
-                return event_loop::EXIT_MONITOR_INTERNAL;
-            }
-        };
+        let watchdog =
+            match watchdog_config_with_explicit_env_overrides(validated_config.watchdog()) {
+                Ok(watchdog) => watchdog,
+                Err(error) => {
+                    eprintln!("[monitor] Invalid watchdog environment override: {error}");
+                    return event_loop::EXIT_MONITOR_INTERNAL;
+                }
+            };
         Some(event_loop::AnrConfig {
             warmup_ms: watchdog.warmup_ms,
             threshold_ms: watchdog.threshold_ms,

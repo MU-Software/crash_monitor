@@ -385,12 +385,10 @@ fn enabled_duration_and_count_ranges_are_validated() {
 
 #[test]
 fn watchdog_duration_error_does_not_imply_an_enable_toggle() {
-    let error = serde_json::from_str::<CrashReporterConfig>(
-        r#"{"watchdog":{"threshold_ms":0}}"#,
-    )
-    .unwrap()
-    .validate()
-    .unwrap_err();
+    let error = serde_json::from_str::<CrashReporterConfig>(r#"{"watchdog":{"threshold_ms":0}}"#)
+        .unwrap()
+        .validate()
+        .unwrap_err();
 
     assert_eq!(
         error.to_string(),

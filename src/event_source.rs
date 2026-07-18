@@ -466,11 +466,8 @@ impl EventSource for MacEventSource {
             // legitimately report a still-running child on POSIX systems.
             // Without an OS process wakeup, bound the descriptor wait so the
             // authoritative waitpid poll remains live even when ANR is off.
-            let effective_deadline = child_wait_deadline(
-                deadline,
-                self.child_exit_wakeup_registered,
-                Instant::now(),
-            );
+            let effective_deadline =
+                child_wait_deadline(deadline, self.child_exit_wakeup_registered, Instant::now());
             let timeout = effective_deadline.map(|deadline| {
                 duration_to_timespec(deadline.saturating_duration_since(Instant::now()))
             });
