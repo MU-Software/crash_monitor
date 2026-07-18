@@ -679,12 +679,12 @@
 
 ### P2-05. config는 한 번 load·validate한 immutable 값만 사용한다
 
-- [ ] main과 pipeline factory의 이중 `load_config`를 제거한다.
-- [ ] missing file과 malformed/read-error를 구분하고 오류를 조용히 default로 바꾸지 않는다.
-- [ ] unknown field를 warning 또는 deny하고 모든 numeric range를 validate한다.
-- [ ] `max_events=0`, retention 0, ANR threshold/interval, timeout 등 sentinel과 범위를 문서화한다.
-- [ ] JSON을 primary source로 하고 ANR/timeout environment override는 명시적인 test/ops override로 제한한다.
-- [ ] `check-config` command를 제공하고 `config::is_enabled`는 실제로 사용하거나 제거한다.
+- [x] main과 pipeline factory의 이중 `load_config`를 제거한다.
+- [x] missing file과 malformed/read-error를 구분하고 오류를 조용히 default로 바꾸지 않는다.
+- [x] unknown field를 warning 또는 deny하고 모든 numeric range를 validate한다.
+- [x] `max_events=0`, retention 0, ANR threshold/interval, timeout 등 sentinel과 범위를 문서화한다.
+- [x] JSON을 primary source로 하고 ANR/timeout environment override는 명시적인 test/ops override로 제한한다.
+- [x] `check-config` command를 제공하고 `config::is_enabled`는 실제로 사용하거나 제거한다.
 
 범위: `src/config.rs`, `src/main.rs`, pipeline factory.
 

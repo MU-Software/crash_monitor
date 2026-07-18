@@ -341,6 +341,62 @@ fn test_default_parameter_values() {
     assert_eq!(config.post_processors.retention.max_reports, 16);
     assert_eq!(config.post_processors.retention.max_size_mb, 64);
     assert_eq!(config.post_processors.retention.max_age_days, 7);
+    assert_eq!(config.watchdog.warmup_ms, 10_000);
+    assert_eq!(config.watchdog.threshold_ms, 5_000);
+    assert_eq!(config.watchdog.check_interval_ms, 2_000);
+    assert_eq!(config.watchdog.cooldown_ms, 60_000);
+}
+
+#[test]
+fn unknown_fields_are_rejected_at_every_config_level() {
+    for json in [
+        r#"{"mystery":true}"#,
+        r#"{"watchdog":{"mystery":1}}"#,
+        r#"{"filters":{"rate_limiter":{"mystery":1}}}"#,
+    ] {
+        let error = serde_json::from_str::<CrashReporterConfig>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+}
+
+#[test]
+fn enabled_duration_and_count_ranges_are_validated() {
+    for (json, expected_field) in [
+        (
+            r#"{"watchdog":{"threshold_ms":0}}"#,
+            "watchdog.threshold_ms",
+        ),
+        (
+            r#"{"filters":{"rate_limiter":{"window_secs":0}}}"#,
+            "filters.rate_limiter.window_secs",
+        ),
+        (
+            r#"{"pre_processors":{"fingerprint":{"top_frames":0}}}"#,
+            "pre_processors.fingerprint.top_frames",
+        ),
+    ] {
+        let error = serde_json::from_str::<CrashReporterConfig>(json)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains(expected_field), "{error}");
+    }
+}
+
+#[test]
+fn zero_rate_limit_and_retention_thresholds_keep_documented_sentinel_meaning() {
+    let config = serde_json::from_str::<CrashReporterConfig>(
+        r#"{
+            "filters":{"rate_limiter":{"max_events":0}},
+            "post_processors":{"retention":{"max_reports":1,"max_size_mb":0,"max_age_days":0}}
+        }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    assert_eq!(config.config().filters.rate_limiter.max_events, 0);
+    assert_eq!(config.config().post_processors.retention.max_size_mb, 0);
+    assert_eq!(config.config().post_processors.retention.max_age_days, 0);
 }
 
 #[test]

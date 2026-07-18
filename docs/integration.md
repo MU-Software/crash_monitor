@@ -105,8 +105,22 @@ automatically.
 
 ## ANR tuning
 
-The watchdog timings default to production-safe values and can be overridden via
-the environment (used mainly by tests to shorten them):
+The JSON config is authoritative. Its production defaults are:
+
+```json
+{
+  "watchdog": {
+    "warmup_ms": 10000,
+    "threshold_ms": 5000,
+    "check_interval_ms": 2000,
+    "cooldown_ms": 60000
+  }
+}
+```
+
+All four values must be greater than zero. Operations and test harnesses may
+explicitly set `CRASH_MONITOR_ALLOW_ENV_OVERRIDES=1` to enable these temporary
+overrides; without that gate the environment cannot silently replace JSON:
 
 | Variable | Meaning |
 |----------|---------|
@@ -144,3 +158,11 @@ writes do not run. Per-trigger controls live under `triggers`; see
 semantics. A missing file selects the minimal privacy profile. An existing
 unreadable, malformed, non-regular, or symlinked file fails startup before the
 child is spawned.
+
+Unknown fields are rejected. Enabled duration fields and
+`pre_processors.fingerprint.top_frames` must be greater than zero.
+`filters.rate_limiter.max_events=0` intentionally rejects every event; it does
+not disable the filter. Enabled retention requires `max_reports>0`, while zero
+`max_size_mb` or `max_age_days` are immediate-delete thresholds. Validate the
+same loader and range rules without starting a child with
+`crash_monitor check-config [--config PATH]`.

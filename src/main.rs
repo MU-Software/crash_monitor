@@ -67,6 +67,12 @@ enum Commands {
         #[arg(long)]
         request_json: String,
     },
+    /// Validate configuration without starting a monitored child.
+    CheckConfig {
+        /// File to check; omit to use the standard data-directory config.
+        #[arg(long)]
+        config: Option<String>,
+    },
     /// Run the monitor with a child process
     Run {
         /// Path to the child executable
@@ -115,6 +121,23 @@ fn env_u64(key: &str, default: u64) -> u64 {
         eprintln!("[monitor] Warning: {key}={val:?} is not a valid u64, using default {default}");
         default
     })
+}
+
+fn watchdog_config_with_explicit_env_overrides(
+    config: config::WatchdogConfig,
+) -> config::WatchdogConfig {
+    if std::env::var_os("CRASH_MONITOR_ALLOW_ENV_OVERRIDES").as_deref() != Some(OsStr::new("1")) {
+        return config;
+    }
+    config::WatchdogConfig {
+        warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", config.warmup_ms),
+        threshold_ms: env_u64("CRASH_MONITOR_ANR_THRESHOLD_MS", config.threshold_ms),
+        check_interval_ms: env_u64(
+            "CRASH_MONITOR_ANR_CHECK_INTERVAL_MS",
+            config.check_interval_ms,
+        ),
+        cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", config.cooldown_ms),
+    }
 }
 
 const CRASH_MONITOR_SHM_ENV: &str = "CRASH_MONITOR_SHM";
@@ -842,14 +865,15 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Configuration alone does not arm it: the child must publish its first
     // heartbeat and the shared-memory producer-ready handshake. Environment
     // overrides allow E2E tests to use shorter timeouts.
-    let anr_config = pl
-        .report_enabled(pipeline::ReportType::Anr)
-        .then(|| event_loop::AnrConfig {
-            warmup_ms: env_u64("CRASH_MONITOR_ANR_WARMUP_MS", 10_000),
-            threshold_ms: env_u64("CRASH_MONITOR_ANR_THRESHOLD_MS", 5_000),
-            check_interval_ms: env_u64("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", 2_000),
-            cooldown_ms: env_u64("CRASH_MONITOR_ANR_COOLDOWN_MS", 60_000),
-        });
+    let anr_config = pl.report_enabled(pipeline::ReportType::Anr).then(|| {
+        let watchdog = watchdog_config_with_explicit_env_overrides(validated_config.watchdog());
+        event_loop::AnrConfig {
+            warmup_ms: watchdog.warmup_ms,
+            threshold_ms: watchdog.threshold_ms,
+            check_interval_ms: watchdog.check_interval_ms,
+            cooldown_ms: watchdog.cooldown_ms,
+        }
+    });
 
     // Build event source from Mac-specific channels
     #[allow(clippy::cast_sign_loss)] // PID is always positive
@@ -1018,6 +1042,30 @@ fn main() {
                 Err(error) => {
                     eprintln!("[capture-helper] {error}");
                     1
+                }
+            }
+        }
+        Some(Commands::CheckConfig { config: path }) => {
+            let result = path
+                .as_deref()
+                .map_or_else(config::load_validated_config, |path| {
+                    config::load_validated_config_from_path(std::path::Path::new(path))
+                });
+            match result {
+                Ok(validated) => {
+                    println!(
+                        "configuration valid (reporting {})",
+                        if validated.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    );
+                    0
+                }
+                Err(error) => {
+                    eprintln!("invalid configuration: {error}");
+                    2
                 }
             }
         }

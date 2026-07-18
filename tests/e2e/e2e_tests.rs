@@ -818,6 +818,7 @@ fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
 
     let output = monitor_cmd(data_dir.path())
         .env("CRASH_MONITOR_ANR_WARMUP_MS", "100")
+        .env("CRASH_MONITOR_ALLOW_ENV_OVERRIDES", "1")
         .env("CRASH_MONITOR_ANR_THRESHOLD_MS", "100")
         .env("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", "50")
         .arg("run")
@@ -852,6 +853,7 @@ fn test_e2e_anr() {
     // Override ANR timings via env vars to keep the test fast.
     let mut child = monitor_cmd(data_dir.path())
         .env("CRASH_MONITOR_ANR_WARMUP_MS", "500")
+        .env("CRASH_MONITOR_ALLOW_ENV_OVERRIDES", "1")
         .env("CRASH_MONITOR_ANR_THRESHOLD_MS", "500")
         .env("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", "250")
         .arg("run")

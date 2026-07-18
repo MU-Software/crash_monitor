@@ -20,12 +20,13 @@ use crate::utils::paths;
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CrashReporterConfig {
     pub enabled: bool,
     pub report_dir: Option<String>,
     pub privacy: PrivacyConfig,
     pub triggers: TriggersConfig,
+    pub watchdog: WatchdogConfig,
     pub filters: FilterConfig,
     pub collectors: CollectorConfig,
     pub pre_processors: PreProcessorConfig,
@@ -40,7 +41,7 @@ pub struct CrashReporterConfig {
 /// file is a deployment-time consent declaration; it does not display or
 /// substitute for an application UI.
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PrivacyConfig {
     pub level: PrivacyLevel,
     pub consent: ConsentState,
@@ -172,6 +173,12 @@ impl ValidatedConfig {
     pub const fn collection_policy(&self) -> CollectionPolicy {
         self.collection_policy
     }
+
+    /// Validated watchdog timings from the immutable startup config.
+    #[must_use]
+    pub const fn watchdog(&self) -> WatchdogConfig {
+        self.config.watchdog
+    }
 }
 
 /// A non-fatal configuration decision worth surfacing at startup.
@@ -240,6 +247,10 @@ pub enum ConfigValidationError {
     /// no encryption writer. Startup fails before any report is captured.
     ApplicationEncryptionUnavailable,
     RetentionMaxReportsZero,
+    InvalidNumericRange {
+        field: &'static str,
+        requirement: &'static str,
+    },
     DuplicatePluginId {
         plugin_id: String,
         first_category: PluginCategory,
@@ -272,6 +283,9 @@ impl std::fmt::Display for ConfigValidationError {
             Self::RetentionMaxReportsZero => f.write_str(
                 "post_processors.retention.max_reports must be greater than zero when retention is enabled",
             ),
+            Self::InvalidNumericRange { field, requirement } => {
+                write!(f, "{field} {requirement}")
+            }
             Self::DuplicatePluginId {
                 plugin_id,
                 first_category,
@@ -392,6 +406,41 @@ impl CrashReporterConfig {
         {
             return Err(ConfigValidationError::RetentionMaxReportsZero);
         }
+        for (invalid, field) in [
+            (
+                self.filters.rate_limiter.enabled && self.filters.rate_limiter.window_secs == 0,
+                "filters.rate_limiter.window_secs",
+            ),
+            (
+                self.pre_processors.fingerprint.enabled
+                    && self.pre_processors.fingerprint.top_frames == 0,
+                "pre_processors.fingerprint.top_frames",
+            ),
+            (
+                self.pre_processors.duplicate.enabled
+                    && self.pre_processors.duplicate.window_secs == 0,
+                "pre_processors.duplicate.window_secs",
+            ),
+            (
+                self.post_processors.log_rotator.enabled
+                    && self.post_processors.log_rotator.max_size_mb == 0,
+                "post_processors.log_rotator.max_size_mb",
+            ),
+            (self.watchdog.warmup_ms == 0, "watchdog.warmup_ms"),
+            (self.watchdog.threshold_ms == 0, "watchdog.threshold_ms"),
+            (
+                self.watchdog.check_interval_ms == 0,
+                "watchdog.check_interval_ms",
+            ),
+            (self.watchdog.cooldown_ms == 0, "watchdog.cooldown_ms"),
+        ] {
+            if invalid {
+                return Err(ConfigValidationError::InvalidNumericRange {
+                    field,
+                    requirement: "must be greater than zero when enabled",
+                });
+            }
+        }
         let trigger_category_enabled = self.triggers.enabled;
         let triggers = ValidatedTriggersConfig {
             crash: trigger_category_enabled && self.triggers.crash.enabled,
@@ -422,6 +471,7 @@ impl Default for CrashReporterConfig {
             report_dir: None,
             privacy: PrivacyConfig::default(),
             triggers: TriggersConfig::default(),
+            watchdog: WatchdogConfig::default(),
             filters: FilterConfig::default(),
             collectors: CollectorConfig::default(),
             pre_processors: PreProcessorConfig::default(),
@@ -453,7 +503,7 @@ impl Default for CrashReporterConfig {
 /// switch remains authoritative and has no implicit emergency-evidence
 /// exception.
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TriggersConfig {
     pub enabled: bool,
     pub crash: PluginToggle,
@@ -462,6 +512,30 @@ pub struct TriggersConfig {
     pub oom_detection: PluginToggle,
     pub anr: PluginToggle,
     pub snapshot: PluginToggle,
+}
+
+/// ANR watchdog timing configuration in milliseconds.
+///
+/// JSON is authoritative. Environment overrides are applied by the binary
+/// only when the operations/test override gate is explicitly enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WatchdogConfig {
+    pub warmup_ms: u64,
+    pub threshold_ms: u64,
+    pub check_interval_ms: u64,
+    pub cooldown_ms: u64,
+}
+
+impl Default for WatchdogConfig {
+    fn default() -> Self {
+        Self {
+            warmup_ms: 10_000,
+            threshold_ms: 5_000,
+            check_interval_ms: 2_000,
+            cooldown_ms: 60_000,
+        }
+    }
 }
 
 impl Default for TriggersConfig {
@@ -485,7 +559,7 @@ impl Default for TriggersConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FilterConfig {
     pub enabled: bool,
     pub disk_space: DiskSpaceConfig,
@@ -503,7 +577,7 @@ impl Default for FilterConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DiskSpaceConfig {
     pub enabled: bool,
     pub min_free_mb: u64,
@@ -519,7 +593,7 @@ impl Default for DiskSpaceConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RateLimiterConfig {
     pub enabled: bool,
     pub max_events: usize,
@@ -541,7 +615,7 @@ impl Default for RateLimiterConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CollectorConfig {
     pub enabled: bool,
     pub thread: ThreadCollectorConfig,
@@ -575,7 +649,7 @@ impl Default for CollectorConfig {
 /// Thread-state collection with a separate opt-in for raw stack bytes.
 /// Registers and backtraces remain the minimal diagnostic baseline.
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ThreadCollectorConfig {
     pub enabled: bool,
     pub stack_memory: bool,
@@ -595,7 +669,7 @@ impl Default for ThreadCollectorConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PreProcessorConfig {
     pub enabled: bool,
     pub session: PluginToggle,
@@ -621,7 +695,7 @@ impl Default for PreProcessorConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FingerprintConfig {
     pub enabled: bool,
     pub top_frames: usize,
@@ -637,7 +711,7 @@ impl Default for FingerprintConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DuplicateConfig {
     pub enabled: bool,
     pub window_secs: u64,
@@ -657,7 +731,7 @@ impl Default for DuplicateConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PostProcessorConfig {
     pub enabled: bool,
     pub raw_cleanup: PluginToggle,
@@ -687,7 +761,7 @@ impl Default for PostProcessorConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LogRotatorConfig {
     pub enabled: bool,
     pub max_size_mb: u64,
@@ -703,7 +777,7 @@ impl Default for LogRotatorConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetentionConfig {
     pub enabled: bool,
     pub max_reports: usize,
@@ -727,7 +801,7 @@ impl Default for RetentionConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct NotifierConfig {
     pub enabled: bool,
     pub console: PluginToggle,
@@ -746,7 +820,7 @@ impl Default for NotifierConfig {
 
 /// Only plugin disabled by default (`bool` defaults to `false`).
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SystemNotificationConfig {
     pub enabled: bool,
 }
@@ -756,7 +830,7 @@ pub struct SystemNotificationConfig {
 // ═══════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PluginToggle {
     pub enabled: bool,
 }
@@ -1297,7 +1371,8 @@ fn sensitive_collector_enabled(
     plugin_id: &str,
     toggle: bool,
 ) -> bool {
-    config.collectors.enabled && toggle && privacy_allows_collector(&config.privacy, plugin_id)
+    is_enabled(config.enabled, config.collectors.enabled, toggle)
+        && privacy_allows_collector(&config.privacy, plugin_id)
 }
 
 fn sensitive_collector_diagnostics(
@@ -1544,7 +1619,6 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
 
 /// Three-level AND check: global → category → plugin.
 #[must_use]
-#[allow(dead_code)] // retained as the public hierarchical-toggle helper
 pub fn is_enabled(global: bool, category: bool, plugin: bool) -> bool {
     global && category && plugin
 }
@@ -1573,6 +1647,14 @@ pub fn load_config() -> Result<CrashReporterConfig, ConfigLoadError> {
 /// unavailable required encryption, or an invalid plugin registry.
 pub fn load_validated_config() -> Result<ValidatedConfig, ConfigLoadError> {
     load_config()?.validate().map_err(ConfigLoadError::from)
+}
+
+/// Load and validate a specific file through the exact startup path.
+///
+/// # Errors
+/// Returns explicit safety, read, parse, or validation errors.
+pub fn load_validated_config_from_path(path: &Path) -> Result<ValidatedConfig, ConfigLoadError> {
+    load_config_from_path(path)?.validate().map_err(Into::into)
 }
 
 fn load_config_from_data_dir() -> Result<CrashReporterConfig, ConfigLoadError> {
