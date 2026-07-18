@@ -858,11 +858,11 @@
 
 ### P2-24. collector와 parser의 경계 테스트를 보강한다
 
-- [ ] attachment, breadcrumb, context, screenshot collector의 success, partial failure, bounds를 테스트한다.
-- [ ] Mach-O symbol parser에 thin/FAT, malformed command, truncated string/table, invalid range fixture를 추가한다.
-- [ ] `find_symbol`의 exact match, empty symbol array, 1MiB 거리 초과, underscore stripping 경계를 테스트한다.
-- [ ] same-second snapshot test는 `>=1`이 아니라 정확히 2개의 고유 report와 분리된 artifact를 단언한다.
-- [ ] screenshot tier/limit, attachment name/size/symlink, empty fingerprint를 포함한다.
+- [x] attachment, breadcrumb, context, screenshot collector의 success, partial failure, bounds를 테스트한다.
+- [x] Mach-O symbol parser에 thin/FAT, malformed command, truncated string/table, invalid range fixture를 추가한다.
+- [x] `find_symbol`의 exact match, empty symbol array, 1MiB 거리 초과, underscore stripping 경계를 테스트한다.
+- [x] same-second snapshot test는 `>=1`이 아니라 정확히 2개의 고유 report와 분리된 artifact를 단언한다.
+- [x] screenshot tier/limit, attachment name/size/symlink, empty fingerprint를 포함한다.
 
 범위: unit/integration collector and parser tests.
 
