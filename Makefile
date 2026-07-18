@@ -14,6 +14,7 @@
 # Without it the monitor cannot inspect a crashing child (and e2e self-skips).
 SIGN_IDENTITY ?= Apple Development
 ENTITLEMENTS  := crash_monitor.entitlements
+DIALOG_ENTITLEMENTS := crash_dialog.entitlements
 
 MONITOR_BIN        := target/release/crash_monitor
 MONITOR_DIALOG_BIN := target/release/crash_dialog_macos
@@ -38,14 +39,21 @@ LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
 #   platform/mod.rs  — FFI delegation wrappers
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
-.PHONY: build lint test unit-test integration-test e2e-test e2e-child shm-atomic-test \
+.PHONY: build e2e-build lint test unit-test integration-test e2e-test e2e-child shm-atomic-test \
         coverage unit-coverage integration-coverage e2e-coverage clean
 
 # ── Build (release + codesign) ────────────────────────────────
 build:
 	cargo build --release --workspace
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
-	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
+	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
+
+# E2E alone enables the mock-dialog environment override. Production `build`
+# never compiles that trust-boundary bypass.
+e2e-build:
+	cargo build --release --workspace --features test-support
+	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
+	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
 
 # ── Lint ──────────────────────────────────────────────────────
 lint:
@@ -74,7 +82,7 @@ integration-test:
 
 # e2e needs the codesigned release monitor (build), the child, and a debug build
 # (for the unsigned-fails-fast case). Tests self-skip if the entitlement is absent.
-e2e-test: build $(E2E_CHILD)
+e2e-test: e2e-build $(E2E_CHILD)
 	cargo build
 	cargo test --test e2e_tests
 

@@ -622,9 +622,9 @@
 
 ### P1-50. dialog 실행 경로를 신뢰 경계로 취급한다
 
-- [ ] `CRASH_MONITOR_DIALOG_BIN`은 존재 여부뿐 아니라 owner, regular-file 여부, 허용 경로, code signature를 검증한다.
-- [ ] production에서 임의 environment override를 금지하거나 test-only feature로 제한한다.
-- [ ] UI dialog helper는 monitor의 debugger entitlement를 공유하지 않고 최소 권한 파일로 별도 서명한다.
+- [x] `CRASH_MONITOR_DIALOG_BIN`은 존재 여부뿐 아니라 owner, regular-file 여부, 허용 경로, code signature를 검증한다.
+- [x] production에서 임의 environment override를 금지하거나 test-only feature로 제한한다.
+- [x] UI dialog helper는 monitor의 debugger entitlement를 공유하지 않고 최소 권한 파일로 별도 서명한다.
 
 범위: `src/pipeline/mod.rs`, `Makefile`, entitlement files.
 

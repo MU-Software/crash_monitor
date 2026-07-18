@@ -1633,20 +1633,25 @@ pub fn default_macos_pipeline_from_config_with_runtime(
         post_processors.push(Box::new(PNGConverter));
     }
 
-    // Feedback dialog: CRASH_MONITOR_DIALOG_BIN overrides the default path — used by
-    // E2E tests to substitute the mock dialog (no UI, fixed stdout output).
+    // Production accepts only the signed sibling helper. An arbitrary
+    // environment override exists solely in explicitly test-enabled builds.
     if on("FeedbackDialog") {
-        let dialog_bin = std::env::var_os("CRASH_MONITOR_DIALOG_BIN")
+        let sibling = || {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|dir| dir.join("crash_dialog_macos")))
+        };
+        #[cfg(feature = "test-support")]
+        let dialog = std::env::var_os("CRASH_MONITOR_DIALOG_BIN")
             .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("crash_dialog_macos")))
-            });
-        if let Some(bin) = dialog_bin
-            && bin.exists()
+            .map(FeedbackPostProcessor::for_test)
+            .or_else(|| sibling().map(FeedbackPostProcessor::new));
+        #[cfg(not(feature = "test-support"))]
+        let dialog = sibling().map(FeedbackPostProcessor::new);
+        if let Some(dialog) = dialog
+            && dialog.is_available()
         {
-            post_processors.push(Box::new(FeedbackPostProcessor::new(bin)));
+            post_processors.push(Box::new(dialog));
         }
     }
 

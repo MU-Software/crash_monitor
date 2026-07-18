@@ -82,6 +82,38 @@ fn test_not_available_when_missing() {
 }
 
 #[test]
+fn test_dialog_validation_rejects_symlink_unsafe_mode_and_outside_path() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = dir.path().join("allowed");
+    let outside = dir.path().join("outside");
+    fs::create_dir(&allowed).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let outside_binary = make_mock_script(&outside, "dialog", "exit 0");
+    assert!(validate_dialog_binary(&outside_binary, &allowed, false).is_err());
+
+    let link = allowed.join("dialog-link");
+    symlink(&outside_binary, &link).unwrap();
+    assert!(validate_dialog_binary(&link, &allowed, false).is_err());
+
+    let unsafe_binary = make_mock_script(&allowed, "unsafe-dialog", "exit 0");
+    fs::set_permissions(&unsafe_binary, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(validate_dialog_binary(&unsafe_binary, &allowed, false).is_err());
+}
+
+#[test]
+fn test_test_only_dialog_still_requires_owned_regular_executable() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = make_mock_script(dir.path(), "dialog", "exit 0");
+    assert!(FeedbackPostProcessor::for_test(script).is_available());
+
+    let directory = dir.path().join("not-a-file");
+    fs::create_dir(&directory).unwrap();
+    assert!(!FeedbackPostProcessor::for_test(directory).is_available());
+}
+
+#[test]
 fn test_plugin_dependency_metadata() {
     let pp = FeedbackPostProcessor::new(PathBuf::from("/nonexistent/crash_dialog_macos"));
     assert!(pp.hard_dependencies().is_empty());
@@ -98,7 +130,7 @@ fn test_submit_patches_report() {
     );
     let report_path = write_test_report(dir.path());
 
-    let pp = FeedbackPostProcessor::new(script);
+    let pp = FeedbackPostProcessor::for_test(script);
     let event = make_crash_event();
     let mut result = ReportResult {
         artifact_paths: Vec::new(),
@@ -127,7 +159,7 @@ fn test_skip_does_not_modify_report() {
     let report_path = write_test_report(dir.path());
     let original = fs::read_to_string(&report_path).unwrap();
 
-    let pp = FeedbackPostProcessor::new(script);
+    let pp = FeedbackPostProcessor::for_test(script);
     let event = make_crash_event();
     let mut result = ReportResult {
         artifact_paths: Vec::new(),
@@ -151,7 +183,7 @@ fn test_dialog_crash_is_reported_without_modifying_report() {
     let report_path = write_test_report(dir.path());
     let original = fs::read_to_string(&report_path).unwrap();
 
-    let pp = FeedbackPostProcessor::new(script);
+    let pp = FeedbackPostProcessor::for_test(script);
     let event = make_crash_event();
     let mut result = ReportResult {
         artifact_paths: Vec::new(),
@@ -282,7 +314,7 @@ fn test_no_report_path_skips_dialog() {
         "echo 'ERROR: should not have been called'; exit 99",
     );
 
-    let pp = FeedbackPostProcessor::new(script);
+    let pp = FeedbackPostProcessor::for_test(script);
     let event = make_crash_event();
     let mut result = ReportResult {
         artifact_paths: Vec::new(),

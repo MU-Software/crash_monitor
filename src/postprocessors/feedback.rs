@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
+use std::{fs, os::unix::fs::MetadataExt, os::unix::fs::PermissionsExt, path::Path};
 
 use crate::pipeline::report;
 use crate::pipeline::{
@@ -26,7 +27,25 @@ pub struct FeedbackPostProcessor {
 impl FeedbackPostProcessor {
     #[must_use]
     pub fn new(dialog_binary: PathBuf) -> Self {
-        let available = dialog_binary.is_file();
+        let allowed_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        let available = allowed_dir.is_some_and(|allowed_dir| {
+            validate_dialog_binary(&dialog_binary, &allowed_dir, true).is_ok()
+        });
+        Self {
+            dialog_binary,
+            timeout: DEFAULT_TIMEOUT,
+            available,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn for_test(dialog_binary: PathBuf) -> Self {
+        let available = dialog_binary.parent().is_some_and(|allowed_dir| {
+            validate_dialog_binary(&dialog_binary, allowed_dir, false).is_ok()
+        });
         Self {
             dialog_binary,
             timeout: DEFAULT_TIMEOUT,
@@ -37,13 +56,78 @@ impl FeedbackPostProcessor {
     #[cfg(test)]
     #[must_use]
     pub fn with_timeout(dialog_binary: PathBuf, timeout: Duration) -> Self {
-        let available = dialog_binary.is_file();
+        let available = dialog_binary.parent().is_some_and(|allowed_dir| {
+            validate_dialog_binary(&dialog_binary, allowed_dir, false).is_ok()
+        });
         Self {
             dialog_binary,
             timeout,
             available,
         }
     }
+}
+
+fn validate_dialog_binary(
+    path: &Path,
+    allowed_dir: &Path,
+    require_signature: bool,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "cannot inspect feedback dialog '{}': {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "feedback dialog is not a regular file: '{}'",
+            path.display()
+        ));
+    }
+    // SAFETY: `geteuid` has no preconditions and does not dereference memory.
+    let effective_uid = unsafe { nix::libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        return Err(format!(
+            "feedback dialog is not owned by the effective user: '{}'",
+            path.display()
+        ));
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 == 0 || mode & 0o022 != 0 {
+        return Err(format!(
+            "feedback dialog has unsafe mode {:04o}: '{}'",
+            mode & 0o7777,
+            path.display()
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve feedback dialog: {error}"))?;
+    let allowed = allowed_dir
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve feedback dialog directory: {error}"))?;
+    if canonical.parent() != Some(allowed.as_path()) {
+        return Err(format!(
+            "feedback dialog is outside the allowed directory: '{}'",
+            canonical.display()
+        ));
+    }
+    if require_signature {
+        let output = Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict", "--"])
+            .arg(&canonical)
+            .output()
+            .map_err(|error| format!("cannot verify feedback dialog signature: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "feedback dialog signature verification failed: {}",
+                crate::utils::terminal::escape_terminal(
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Plugin for FeedbackPostProcessor {
