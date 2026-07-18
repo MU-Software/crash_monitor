@@ -19,6 +19,7 @@ use crate::platform::{
     PlatformOps, SuspendFailurePolicy, TaskControlFailureSink, TaskSuspendGuard,
 };
 
+pub use crate::config::CollectionPolicy;
 pub use artifact::{
     ArtifactKind, ArtifactTransaction, CommittedReport, ReportContext, ReportId, ReportManifest,
     load_manifest, recover_prepared_reports,
@@ -105,6 +106,8 @@ pub struct Pipeline {
     pub enabled: bool,
     /// Explicit policy for each event source that can create a report.
     pub triggers: TriggerPolicy,
+    /// Immutable privacy decisions shared by capture and finalization.
+    pub collection_policy: CollectionPolicy,
     pub filters: Vec<Box<dyn Filter>>,
     pub collectors: Vec<Box<dyn Collector>>,
     pub pre_processors: Vec<Box<dyn PreProcessor>>,
@@ -272,10 +275,24 @@ impl Pipeline {
         &self,
         deadline: Option<Instant>,
     ) -> Result<Option<Arc<crate::shm::OwnedShmSnapshot>>, String> {
+        let has_collector = |name: &str| {
+            self.collectors
+                .iter()
+                .any(|collector| collector.name() == name)
+        };
+        let raw_shm = self.collection_policy.persist_raw_shm;
+        let snapshot_policy = crate::shm::ShmSnapshotPolicy {
+            breadcrumbs: raw_shm || has_collector("BreadcrumbCollector"),
+            context: raw_shm || has_collector("ContextCollector"),
+            attachments: self.collection_policy.capture_shm_attachments
+                && has_collector("AttachmentCollector"),
+            screenshots: self.collection_policy.capture_shm_screenshots
+                && has_collector("ScreenshotCollector"),
+        };
         self.shm
             .as_ref()
             .map(|shm| {
-                shm.snapshot_owned_until(deadline)
+                shm.snapshot_owned_until_with_policy(deadline, snapshot_policy)
                     .map(Arc::new)
                     .map_err(|error| format!("shared-memory snapshot failed: {error}"))
             })
@@ -447,14 +464,15 @@ impl Pipeline {
             diagnostics.record(c.name(), status, start.elapsed());
         }
 
-        let raw_shm = if cancelled.load(Ordering::Acquire) {
-            None
-        } else {
-            shm_snapshot.map(|snapshot| RawShmSnapshot {
-                breadcrumbs: snapshot.raw_breadcrumb_bytes_owned(),
-                context: snapshot.raw_context_bytes_owned(),
-            })
-        };
+        let raw_shm =
+            if cancelled.load(Ordering::Acquire) || !self.collection_policy.persist_raw_shm {
+                None
+            } else {
+                shm_snapshot.map(|snapshot| RawShmSnapshot {
+                    breadcrumbs: snapshot.raw_breadcrumb_bytes_owned(),
+                    context: snapshot.raw_context_bytes_owned(),
+                })
+            };
 
         // Thread rights cannot cross the immutable capture/finalize boundary.
         let thread_ports: Vec<u32> = data.raw.threads.iter().map(|t| t.thread_port).collect();
@@ -1244,9 +1262,9 @@ const fn should_register_attachment_copier(
 /// assembled runtime dependency graph is invalid.
 pub fn default_macos_pipeline(
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
-) -> Result<Pipeline, crate::config::ConfigValidationError> {
+) -> Result<Pipeline, crate::config::ConfigLoadError> {
     let config = crate::config::load_validated_config()?;
-    default_macos_pipeline_from_config(shm, &config)
+    default_macos_pipeline_from_config(shm, &config).map_err(crate::config::ConfigLoadError::from)
 }
 
 /// Build the default macOS pipeline from one already-loaded configuration.
@@ -1281,6 +1299,7 @@ pub fn default_macos_pipeline_from_config(
 
     let cfg = validated.config();
     let triggers = TriggerPolicy::from(validated.triggers);
+    let collection_policy = validated.collection_policy();
 
     // ── Early out: global kill switch ──
     if !validated.enabled {
@@ -1288,6 +1307,7 @@ pub fn default_macos_pipeline_from_config(
         return Ok(Pipeline {
             enabled: false,
             triggers,
+            collection_policy,
             filters: vec![],
             collectors: vec![],
             shm,
@@ -1323,7 +1343,10 @@ pub fn default_macos_pipeline_from_config(
     let mut attachment_copy_enabled = false;
 
     if on("ThreadCollector") {
-        collectors.push(Box::new(ThreadCollector::new(platform.clone())));
+        collectors.push(Box::new(ThreadCollector::new(
+            platform.clone(),
+            collection_policy.capture_stack_memory,
+        )));
     }
 
     if shm.is_some() {
@@ -1457,6 +1480,7 @@ pub fn default_macos_pipeline_from_config(
     let pipeline = Pipeline {
         enabled: true,
         triggers,
+        collection_policy,
         filters,
         collectors,
         shm,

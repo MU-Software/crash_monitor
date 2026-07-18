@@ -59,7 +59,7 @@ plugins and notifiers receive the committed descriptor.
 
 | Phase | Child state/capability | Typical work |
 |-------|------------------------|--------------|
-| **Critical capture** | suspended only for the bounded capture window | threads, memory + heap, dylibs, owned breadcrumbs/context/screenshots/attachment registration |
+| **Critical capture** | suspended only for the bounded capture window | thread registers/backtraces, dylibs, owned breadcrumbs/context, and policy-authorized stack bytes, memory + heap, screenshots, or attachment registration |
 | **Finalization worker** | no task/SHM argument; capture collectors are not invoked | filters, session, symbolication, fingerprint, raw/JSON/PNG writes, feedback, ZIP, move-to-sent, log rotation, retention, notifications |
 
 (The exact roster is what the default pipeline registers; treat the source as
@@ -215,8 +215,9 @@ outcome**, worse than a degraded report. The design rules:
    no task/SHM argument, and no finalization work runs between resume and reply.
 5. **Partial success is preserved** — one collector failing never discards what
    the others already gathered.
-6. **Stage-1 fail-safe** — a raw binary dump is written before JSON
-   serialization, so a report exists even if formatting later fails.
+6. **Stage-1 fail-safe** — raw thread metadata is written before JSON
+   serialization; privacy-authorized SHM wire dumps are written alongside it,
+   so permitted minimum evidence survives a later formatting failure.
 7. **Bounded background work** — snapshot/ANR submission never waits for queue
    space, and shutdown never waits more than two seconds for a hung worker.
 8. **No process-global plugin timers** — plugin deadlines never change signal
@@ -231,11 +232,13 @@ outcome**, worse than a degraded report. The design rules:
 ## Configuration
 
 Report triggers and non-sensitive plugins are enabled by default. An optional
-`crash_reporter.json` in the data directory can disable behavior, opt in to a
-sensitive collector, or adjust parameters (rate-limit window, retention limits,
-fingerprint frame count, …). Environment, memory, screenshot, and attachment
-collectors are resolved through the fail-closed profile and consent gates in
-[privacy.md](privacy.md) before plugin dependency closure.
+`crash_reporter.json` in the data directory can disable behavior, opt in to
+sensitive evidence, or adjust parameters (rate-limit window, retention limits,
+fingerprint frame count, …). Stack bytes, memory, environment, screenshots,
+attachments, and raw SHM persistence are resolved through the fail-closed
+profile and consent gates in [privacy.md](privacy.md) before plugin dependency
+closure. The resulting immutable policy controls both plugin registration and
+the lower-level task/SHM reads.
 
 The top-level `enabled: false` is an absolute report-generation kill switch.
 The monitor still supervises the child, replies to a Mach exception, and reaps
@@ -267,7 +270,9 @@ category. Both the configuration registry and the assembled runtime pipeline
 are validated before the child process is spawned. Duplicate IDs, missing
 dependency declarations, dependency cycles, and invalid registration order return a
 structured `Result<_, ConfigValidationError>` to startup rather than panicking.
-A missing or malformed configuration file falls back silently to the built-in
-minimal privacy defaults. Legacy sensitive collector toggles still parse but do
-not bypass a missing profile or consent assertion; normalization emits a startup
-diagnostic when such a collector was requested and denied.
+A genuinely missing configuration file selects the built-in minimal privacy
+defaults. An existing unreadable, malformed, non-regular, or symlinked file
+returns `ConfigLoadError` and stops startup before the child is spawned. Legacy
+sensitive collector toggles still parse but do not bypass a missing profile or
+consent assertion; normalization emits a startup diagnostic when such evidence
+was requested and denied.

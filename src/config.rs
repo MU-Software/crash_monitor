@@ -1,14 +1,16 @@
 //! Configuration system for crash reporter plugins.
 //!
 //! Report triggers and non-sensitive plugins are enabled by default. Collection
-//! of environment, memory, screenshot, and attachment data is fail-closed behind
-//! an explicit privacy profile and consent declaration. Missing files or parse
-//! errors silently fall back to the minimal profile.
+//! of raw stack bytes, memory diagnostics, environment data, screenshots,
+//! attachments, and raw shared-memory dumps is fail-closed behind an explicit
+//! privacy profile, consent declaration, and evidence-specific opt-in. A missing
+//! file selects the minimal profile; an existing unreadable, unsafe, or malformed
+//! file fails startup before the monitored child is spawned.
 
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
-use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use crate::pipeline::types::{DependencyKind, PluginCategory};
 use crate::utils::paths;
@@ -43,6 +45,9 @@ pub struct PrivacyConfig {
     pub level: PrivacyLevel,
     pub consent: ConsentState,
     pub encryption: EncryptionPolicy,
+    /// Persist fail-safe breadcrumb/context wire snapshots before formatting.
+    /// This raw evidence is full-profile only and remains independently opt-in.
+    pub raw_shm: bool,
 }
 
 impl Default for PrivacyConfig {
@@ -51,20 +56,53 @@ impl Default for PrivacyConfig {
             level: PrivacyLevel::Minimal,
             consent: ConsentState::NotGranted,
             encryption: EncryptionPolicy::None,
+            raw_shm: false,
         }
     }
+}
+
+/// Immutable sensitive-data decisions consumed by the capture pipeline.
+///
+/// Collector registration, live task reads, shared-memory copying, and raw
+/// persistence all derive from this one normalized value. Individual toggles
+/// can narrow a privacy profile but can never widen it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // one bit per independent evidence boundary
+pub struct CollectionPolicy {
+    pub capture_stack_memory: bool,
+    pub capture_shm_screenshots: bool,
+    pub capture_shm_attachments: bool,
+    pub persist_raw_shm: bool,
+}
+
+impl CollectionPolicy {
+    /// No optional memory or raw shared-memory evidence.
+    pub const MINIMAL: Self = Self {
+        capture_stack_memory: false,
+        capture_shm_screenshots: false,
+        capture_shm_attachments: false,
+        persist_raw_shm: false,
+    };
+
+    /// Historical all-on behavior for focused tests and explicit embedders.
+    pub const FULL: Self = Self {
+        capture_stack_memory: true,
+        capture_shm_screenshots: true,
+        capture_shm_attachments: true,
+        persist_raw_shm: true,
+    };
 }
 
 /// Maximum class of sensitive evidence that may be collected.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyLevel {
-    /// Do not collect environment, memory, screenshots, or attachments.
+    /// Do not collect any optional sensitive evidence.
     #[default]
     Minimal,
-    /// Permit memory diagnostics only, when consent is also granted.
+    /// Permit stack bytes and memory diagnostics, when consent is also granted.
     Diagnostic,
-    /// Permit all sensitive collectors, when consent is also granted.
+    /// Permit every sensitive evidence class, when consent is also granted.
     Full,
 }
 
@@ -105,6 +143,7 @@ pub struct ValidatedConfig {
     pub triggers: ValidatedTriggersConfig,
     diagnostics: Vec<ConfigValidationDiagnostic>,
     enabled_plugins: BTreeSet<&'static str>,
+    collection_policy: CollectionPolicy,
     config: CrashReporterConfig,
 }
 
@@ -127,6 +166,12 @@ impl ValidatedConfig {
     pub(crate) fn plugin_enabled(&self, plugin_id: &str) -> bool {
         self.enabled && self.enabled_plugins.contains(plugin_id)
     }
+
+    /// Effective immutable sensitive-data policy for capture and persistence.
+    #[must_use]
+    pub const fn collection_policy(&self) -> CollectionPolicy {
+        self.collection_policy
+    }
 }
 
 /// A non-fatal configuration decision worth surfacing at startup.
@@ -143,6 +188,13 @@ pub enum ConfigValidationDiagnostic {
     /// declaration did not authorize it.
     SensitiveCollectorDisabled {
         plugin_id: String,
+        level: PrivacyLevel,
+        consent: ConsentState,
+    },
+    /// Sensitive evidence outside a standalone collector was requested but
+    /// denied by the active privacy level or consent state.
+    SensitiveEvidenceDenied {
+        evidence: &'static str,
         level: PrivacyLevel,
         consent: ConsentState,
     },
@@ -166,6 +218,14 @@ impl std::fmt::Display for ConfigValidationDiagnostic {
             } => write!(
                 f,
                 "sensitive collector '{plugin_id}' disabled by privacy level {level:?} with consent {consent:?}"
+            ),
+            Self::SensitiveEvidenceDenied {
+                evidence,
+                level,
+                consent,
+            } => write!(
+                f,
+                "sensitive evidence '{evidence}' disabled by privacy level {level:?} with consent {consent:?}"
             ),
         }
     }
@@ -245,6 +305,54 @@ impl std::fmt::Display for ConfigValidationError {
 
 impl std::error::Error for ConfigValidationError {}
 
+/// Failure to resolve, read, parse, or validate the startup configuration.
+///
+/// A genuinely missing file is not an error and selects the private minimal
+/// defaults. Every other existing-file failure is explicit so an encryption
+/// requirement can never disappear through fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigLoadError {
+    DataDirectory(String),
+    Read { path: PathBuf, error: String },
+    UnsafeFile { path: PathBuf, reason: String },
+    Parse { path: PathBuf, error: String },
+    Validation(ConfigValidationError),
+}
+
+impl std::fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DataDirectory(error) => {
+                write!(f, "cannot resolve configuration directory: {error}")
+            }
+            Self::Read { path, error } => {
+                write!(f, "cannot read configuration '{}': {error}", path.display())
+            }
+            Self::UnsafeFile { path, reason } => write!(
+                f,
+                "unsafe configuration file '{}': {reason}",
+                path.display()
+            ),
+            Self::Parse { path, error } => {
+                write!(
+                    f,
+                    "cannot parse configuration '{}': {error}",
+                    path.display()
+                )
+            }
+            Self::Validation(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ConfigLoadError {}
+
+impl From<ConfigValidationError> for ConfigLoadError {
+    fn from(error: ConfigValidationError) -> Self {
+        Self::Validation(error)
+    }
+}
+
 /// Explicit enablement for each event that can produce a report.
 ///
 /// These values already include the `triggers.enabled` category switch, but
@@ -285,12 +393,15 @@ impl CrashReporterConfig {
             anr: trigger_category_enabled && self.triggers.anr.enabled,
             snapshot: trigger_category_enabled && self.triggers.snapshot.enabled,
         };
-        let (enabled_plugins, diagnostics) = resolve_plugin_enablement(&self)?;
+        let (enabled_plugins, mut diagnostics) = resolve_plugin_enablement(&self)?;
+        diagnostics.extend(sensitive_evidence_diagnostics(&self));
+        let collection_policy = resolve_collection_policy(&self, &enabled_plugins);
         Ok(ValidatedConfig {
             enabled: self.enabled,
             triggers,
             diagnostics,
             enabled_plugins,
+            collection_policy,
             config: self,
         })
     }
@@ -423,7 +534,7 @@ impl Default for RateLimiterConfig {
 #[serde(default)]
 pub struct CollectorConfig {
     pub enabled: bool,
-    pub thread: PluginToggle,
+    pub thread: ThreadCollectorConfig,
     pub breadcrumb: PluginToggle,
     pub context: PluginToggle,
     pub memory: PluginToggle,
@@ -437,7 +548,7 @@ impl Default for CollectorConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            thread: PluginToggle::default(),
+            thread: ThreadCollectorConfig::default(),
             breadcrumb: PluginToggle::default(),
             context: PluginToggle::default(),
             memory: PluginToggle::disabled(),
@@ -445,6 +556,24 @@ impl Default for CollectorConfig {
             screenshot: PluginToggle::disabled(),
             attachment: PluginToggle::disabled(),
             environment: PluginToggle::disabled(),
+        }
+    }
+}
+
+/// Thread-state collection with a separate opt-in for raw stack bytes.
+/// Registers and backtraces remain the minimal diagnostic baseline.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ThreadCollectorConfig {
+    pub enabled: bool,
+    pub stack_memory: bool,
+}
+
+impl Default for ThreadCollectorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stack_memory: false,
         }
     }
 }
@@ -1134,6 +1263,15 @@ fn privacy_allows_collector(privacy: &PrivacyConfig, plugin_id: &str) -> bool {
     }
 }
 
+fn privacy_allows_diagnostic_evidence(privacy: &PrivacyConfig) -> bool {
+    privacy.consent == ConsentState::Granted
+        && matches!(privacy.level, PrivacyLevel::Diagnostic | PrivacyLevel::Full)
+}
+
+fn privacy_allows_full_evidence(privacy: &PrivacyConfig) -> bool {
+    privacy.consent == ConsentState::Granted && privacy.level == PrivacyLevel::Full
+}
+
 fn sensitive_collector_enabled(
     config: &CrashReporterConfig,
     plugin_id: &str,
@@ -1162,6 +1300,52 @@ fn sensitive_collector_diagnostics(
             },
         )
         .collect()
+}
+
+fn sensitive_evidence_diagnostics(config: &CrashReporterConfig) -> Vec<ConfigValidationDiagnostic> {
+    if !config.enabled {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+    if config.collectors.enabled
+        && config.collectors.thread.enabled
+        && config.collectors.thread.stack_memory
+        && !privacy_allows_diagnostic_evidence(&config.privacy)
+    {
+        diagnostics.push(ConfigValidationDiagnostic::SensitiveEvidenceDenied {
+            evidence: "thread stack memory",
+            level: config.privacy.level,
+            consent: config.privacy.consent,
+        });
+    }
+    if config.privacy.raw_shm && !privacy_allows_full_evidence(&config.privacy) {
+        diagnostics.push(ConfigValidationDiagnostic::SensitiveEvidenceDenied {
+            evidence: "raw shared-memory breadcrumbs/context",
+            level: config.privacy.level,
+            consent: config.privacy.consent,
+        });
+    }
+    diagnostics
+}
+
+fn resolve_collection_policy(
+    config: &CrashReporterConfig,
+    enabled_plugins: &BTreeSet<&'static str>,
+) -> CollectionPolicy {
+    if !config.enabled {
+        return CollectionPolicy::MINIMAL;
+    }
+
+    CollectionPolicy {
+        capture_stack_memory: config.collectors.enabled
+            && config.collectors.thread.enabled
+            && config.collectors.thread.stack_memory
+            && privacy_allows_diagnostic_evidence(&config.privacy),
+        capture_shm_screenshots: enabled_plugins.contains("ScreenshotCollector"),
+        capture_shm_attachments: enabled_plugins.contains("AttachmentCollector"),
+        persist_raw_shm: config.privacy.raw_shm && privacy_allows_full_evidence(&config.privacy),
+    }
 }
 
 fn close_plugin_enablement(
@@ -1345,30 +1529,51 @@ const CONFIG_FILENAME: &str = "crash_reporter.json";
 
 /// Load config from `<data_dir>/crash_reporter.json`.
 ///
-/// Returns `Default::default()` on missing file, read error, or parse error.
-#[must_use]
-pub fn load_config() -> CrashReporterConfig {
-    load_config_from_data_dir().unwrap_or_default()
+/// A missing file selects [`CrashReporterConfig::default`]. Existing files
+/// must be readable and valid JSON.
+///
+/// # Errors
+/// Returns [`ConfigLoadError`] for data-directory, read, or parse failures.
+pub fn load_config() -> Result<CrashReporterConfig, ConfigLoadError> {
+    load_config_from_data_dir()
 }
 
 /// Load and normalize the runtime configuration exactly once.
 ///
 /// # Errors
-/// Returns [`ConfigValidationError`] if the plugin registry is not globally
-/// unique or contains an invalid dependency graph.
-pub fn load_validated_config() -> Result<ValidatedConfig, ConfigValidationError> {
-    load_config().validate()
+/// Returns [`ConfigLoadError`] for an existing unreadable/malformed file,
+/// unavailable required encryption, or an invalid plugin registry.
+pub fn load_validated_config() -> Result<ValidatedConfig, ConfigLoadError> {
+    load_config()?.validate().map_err(ConfigLoadError::from)
 }
 
-fn load_config_from_data_dir() -> Option<CrashReporterConfig> {
-    let data_dir = paths::data_dir().ok()?;
+fn load_config_from_data_dir() -> Result<CrashReporterConfig, ConfigLoadError> {
+    let data_dir = paths::data_dir().map_err(ConfigLoadError::DataDirectory)?;
     let path = data_dir.join(CONFIG_FILENAME);
     load_config_from_path(&path)
 }
 
-fn load_config_from_path(path: &Path) -> Option<CrashReporterConfig> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+fn load_config_from_path(path: &Path) -> Result<CrashReporterConfig, ConfigLoadError> {
+    let mut file = match paths::open_private_file_optional(path) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(CrashReporterConfig::default()),
+        Err(reason) => {
+            return Err(ConfigLoadError::UnsafeFile {
+                path: path.to_path_buf(),
+                reason,
+            });
+        }
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| ConfigLoadError::Read {
+            path: path.to_path_buf(),
+            error: error.to_string(),
+        })?;
+    serde_json::from_slice(&bytes).map_err(|error| ConfigLoadError::Parse {
+        path: path.to_path_buf(),
+        error: error.to_string(),
+    })
 }
 
 #[cfg(test)]

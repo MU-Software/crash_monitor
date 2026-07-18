@@ -7,6 +7,7 @@ fn test_default_config_enables_only_non_sensitive_plugins() {
     assert_eq!(config.privacy.level, PrivacyLevel::Minimal);
     assert_eq!(config.privacy.consent, ConsentState::NotGranted);
     assert_eq!(config.privacy.encryption, EncryptionPolicy::None);
+    assert!(!config.privacy.raw_shm);
     assert!(config.triggers.enabled);
     assert!(config.triggers.crash.enabled);
     assert!(config.triggers.exit_failure.enabled);
@@ -19,6 +20,7 @@ fn test_default_config_enables_only_non_sensitive_plugins() {
     assert!(config.filters.rate_limiter.enabled);
     assert!(config.collectors.enabled);
     assert!(config.collectors.thread.enabled);
+    assert!(!config.collectors.thread.stack_memory);
     assert!(!config.collectors.memory.enabled);
     assert!(!config.collectors.screenshot.enabled);
     assert!(!config.collectors.attachment.enabled);
@@ -54,7 +56,109 @@ fn test_default_validation_collects_no_sensitive_data() {
     ] {
         assert!(!validated.plugin_enabled(plugin_id));
     }
+    assert_eq!(validated.collection_policy(), CollectionPolicy::MINIMAL);
     assert!(validated.diagnostics().is_empty());
+}
+
+#[test]
+fn property_stack_memory_requires_profile_consent_and_explicit_opt_in() {
+    for (level, consent, expected) in [
+        ("minimal", "not_granted", false),
+        ("minimal", "granted", false),
+        ("diagnostic", "not_granted", false),
+        ("diagnostic", "granted", true),
+        ("full", "not_granted", false),
+        ("full", "granted", true),
+    ] {
+        let json = format!(
+            r#"{{
+                "privacy": {{ "level": "{level}", "consent": "{consent}" }},
+                "collectors": {{ "thread": {{ "enabled": true, "stack_memory": true }} }}
+            }}"#
+        );
+        let validated = serde_json::from_str::<CrashReporterConfig>(&json)
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert_eq!(
+            validated.collection_policy().capture_stack_memory,
+            expected,
+            "level={level}, consent={consent}"
+        );
+        assert_eq!(
+            validated.diagnostics().iter().any(|diagnostic| matches!(
+                diagnostic,
+                ConfigValidationDiagnostic::SensitiveEvidenceDenied {
+                    evidence: "thread stack memory",
+                    ..
+                }
+            )),
+            !expected,
+            "level={level}, consent={consent}"
+        );
+    }
+
+    let profile_without_toggle = serde_json::from_str::<CrashReporterConfig>(
+        r#"{ "privacy": { "level": "diagnostic", "consent": "granted" } }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    assert!(
+        !profile_without_toggle
+            .collection_policy()
+            .capture_stack_memory
+    );
+}
+
+#[test]
+fn property_raw_shm_requires_full_consent_and_explicit_opt_in() {
+    for (level, consent, expected) in [
+        ("minimal", "not_granted", false),
+        ("minimal", "granted", false),
+        ("diagnostic", "not_granted", false),
+        ("diagnostic", "granted", false),
+        ("full", "not_granted", false),
+        ("full", "granted", true),
+    ] {
+        let json = format!(
+            r#"{{
+                "privacy": {{
+                    "level": "{level}",
+                    "consent": "{consent}",
+                    "raw_shm": true
+                }}
+            }}"#
+        );
+        let validated = serde_json::from_str::<CrashReporterConfig>(&json)
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert_eq!(
+            validated.collection_policy().persist_raw_shm,
+            expected,
+            "level={level}, consent={consent}"
+        );
+        assert_eq!(
+            validated.diagnostics().iter().any(|diagnostic| matches!(
+                diagnostic,
+                ConfigValidationDiagnostic::SensitiveEvidenceDenied {
+                    evidence: "raw shared-memory breadcrumbs/context",
+                    ..
+                }
+            )),
+            !expected,
+            "level={level}, consent={consent}"
+        );
+    }
+
+    let profile_without_toggle = serde_json::from_str::<CrashReporterConfig>(
+        r#"{ "privacy": { "level": "full", "consent": "granted" } }"#,
+    )
+    .unwrap()
+    .validate()
+    .unwrap();
+    assert!(!profile_without_toggle.collection_policy().persist_raw_shm);
 }
 
 #[test]
@@ -140,6 +244,14 @@ fn property_privacy_profile_and_consent_gate_sensitive_collectors() {
                 "level={level}, consent={consent}, plugin={plugin_id}"
             );
         }
+        assert_eq!(
+            validated.collection_policy().capture_shm_screenshots,
+            expected.contains(&"ScreenshotCollector")
+        );
+        assert_eq!(
+            validated.collection_policy().capture_shm_attachments,
+            expected.contains(&"AttachmentCollector")
+        );
         assert_eq!(validated.diagnostics().len(), 4 - expected.len());
     }
 }
@@ -208,6 +320,7 @@ fn test_global_kill_switch_makes_encryption_requirement_vacuous() {
 
     assert!(!validated.enabled);
     assert!(validated.enabled_plugins.is_empty());
+    assert_eq!(validated.collection_policy(), CollectionPolicy::MINIMAL);
 }
 
 #[test]
@@ -224,9 +337,16 @@ fn test_default_parameter_values() {
     assert_eq!(config.post_processors.retention.max_age_days, 7);
 }
 
+fn private_config_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    crate::utils::paths::ensure_private_directory(dir.path()).unwrap();
+    dir
+}
+
 #[test]
 fn test_load_missing_file_returns_default() {
-    let config = load_config();
+    let dir = private_config_tempdir();
+    let config = super::load_config_from_path(&dir.path().join("missing.json")).unwrap();
     assert!(config.enabled);
     assert!(config.filters.enabled);
     assert!(config.collectors.enabled);
@@ -371,14 +491,113 @@ fn test_legacy_partial_trigger_config_defaults_new_triggers_on() {
 }
 
 #[test]
-fn test_malformed_json_returns_default() {
-    let dir = tempfile::tempdir().unwrap();
+fn test_malformed_json_fails_closed() {
+    let dir = private_config_tempdir();
     let path = dir.path().join("crash_reporter.json");
     std::fs::write(&path, "{ not valid json }}}").unwrap();
 
-    // load_config_from_path returns None on parse error
     let result = super::load_config_from_path(&path);
-    assert!(result.is_none());
+    assert!(matches!(result, Err(ConfigLoadError::Parse { .. })));
+}
+
+#[test]
+fn test_existing_non_regular_config_fails_closed() {
+    let dir = private_config_tempdir();
+    let result = super::load_config_from_path(dir.path());
+    assert!(matches!(result, Err(ConfigLoadError::UnsafeFile { .. })));
+}
+
+#[test]
+fn test_existing_unreadable_config_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Root can read mode-000 files, so this permission test has no meaningful
+    // unreadable state under a root test runner.
+    // SAFETY: `geteuid` has no arguments or memory-safety preconditions.
+    if unsafe { nix::libc::geteuid() } == 0 {
+        return;
+    }
+
+    let dir = private_config_tempdir();
+    let path = dir.path().join("crash_reporter.json");
+    std::fs::write(&path, r#"{ "enabled": false }"#).unwrap();
+    let original = std::fs::metadata(&path).unwrap().permissions();
+    let mut unreadable = original.clone();
+    unreadable.set_mode(0o000);
+    std::fs::set_permissions(&path, unreadable).unwrap();
+
+    let result = super::load_config_from_path(&path);
+    std::fs::set_permissions(&path, original).unwrap();
+    assert!(matches!(
+        result,
+        Err(ConfigLoadError::Read { .. } | ConfigLoadError::UnsafeFile { .. })
+    ));
+}
+
+#[test]
+fn test_config_symlink_is_rejected_without_following() {
+    let dir = private_config_tempdir();
+    let target = dir.path().join("target.json");
+    let link = dir.path().join("crash_reporter.json");
+    std::fs::write(&target, r#"{ "enabled": false }"#).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let result = super::load_config_from_path(&link);
+    assert!(matches!(result, Err(ConfigLoadError::UnsafeFile { .. })));
+}
+
+#[test]
+fn test_broken_config_symlink_is_not_mistaken_for_missing_file() {
+    let dir = private_config_tempdir();
+    let link = dir.path().join("crash_reporter.json");
+    std::os::unix::fs::symlink(dir.path().join("absent-target.json"), &link).unwrap();
+
+    let result = super::load_config_from_path(&link);
+    assert!(matches!(result, Err(ConfigLoadError::UnsafeFile { .. })));
+}
+
+#[test]
+fn test_config_parent_symlink_is_rejected_without_following() {
+    let dir = private_config_tempdir();
+    let target = dir.path().join("target");
+    let link = dir.path().join("config-link");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(
+        target.join("crash_reporter.json"),
+        r#"{ "enabled": false }"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let result = super::load_config_from_path(&link.join("crash_reporter.json"));
+    assert!(matches!(result, Err(ConfigLoadError::UnsafeFile { .. })));
+}
+
+#[test]
+fn test_required_encryption_cannot_disappear_through_unrelated_parse_error() {
+    let dir = private_config_tempdir();
+    let path = dir.path().join("crash_reporter.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "privacy": { "encryption": "required" },
+            "filters": { "disk_space": { "min_free_mb": "invalid" } }
+        }"#,
+    )
+    .unwrap();
+
+    let result = super::load_config_from_path(&path);
+    assert!(matches!(result, Err(ConfigLoadError::Parse { .. })));
+}
+
+#[test]
+fn test_legacy_thread_toggle_shape_remains_compatible() {
+    let config = serde_json::from_str::<CrashReporterConfig>(
+        r#"{ "collectors": { "thread": { "enabled": false } } }"#,
+    )
+    .unwrap();
+    assert!(!config.collectors.thread.enabled);
+    assert!(!config.collectors.thread.stack_memory);
 }
 
 #[test]

@@ -1,35 +1,43 @@
 # Privacy policy
 
 Crash reports can contain application state and user data. The built-in policy
-therefore treats environment variables, the process memory map and heap
-summary, screenshots, and registered attachments as sensitive, opt-in evidence.
-Policy is normalized once at startup; a legacy collector toggle cannot bypass
-the privacy gates.
+therefore treats stack bytes, the process memory map and heap summary,
+environment variables, screenshots, registered attachments, and raw
+shared-memory dumps as sensitive, opt-in evidence. Policy is normalized once
+at startup; a legacy collector toggle cannot bypass the privacy gates, and the
+same immutable decision controls collector registration, task-memory reads,
+SHM copying, and Stage-1 persistence.
 
 ## Sensitive collection gates
 
-Each sensitive collector runs only when all three conditions are true:
+Each sensitive evidence class is captured only when all three conditions are
+true:
 
 1. `privacy.level` permits its evidence class;
 2. `privacy.consent` is `granted`;
-3. its `collectors.<name>.enabled` toggle is explicitly `true`.
+3. its individual toggle is explicitly `true`.
 
-| Privacy level | Memory map / heap summary | Environment | Screenshots | Attachments |
-| --- | --- | --- | --- | --- |
-| `minimal` (default) | off | off | off | off |
-| `diagnostic` | allowed with consent + toggle | off | off | off |
-| `full` | allowed with consent + toggle | allowed with consent + toggle | allowed with consent + toggle | allowed with consent + toggle |
+| Privacy level | Stack bytes | Memory map / heap | Environment | Screenshots | Attachments | Raw SHM |
+| --- | --- | --- | --- | --- | --- | --- |
+| `minimal` (default) | off | off | off | off | off | off |
+| `diagnostic` | consent + toggle | consent + toggle | off | off | off | off |
+| `full` | consent + toggle | consent + toggle | consent + toggle | consent + toggle | consent + toggle | consent + toggle |
 
-The four collector toggles also default to `false`. A full opt-in is deliberate:
+Every sensitive toggle defaults to `false`. Stack bytes use
+`collectors.thread.stack_memory`; raw breadcrumb/context wire dumps use
+`privacy.raw_shm`; the other four use their collector toggle. A full opt-in is
+deliberate:
 
 ```json
 {
   "privacy": {
     "level": "full",
     "consent": "granted",
-    "encryption": "none"
+    "encryption": "none",
+    "raw_shm": true
   },
   "collectors": {
+    "thread": { "enabled": true, "stack_memory": true },
     "memory": { "enabled": true },
     "environment": { "enabled": true },
     "screenshot": { "enabled": true },
@@ -44,31 +52,46 @@ notice or consent flow required by the application or applicable law. Revoking
 consent requires changing the config and restarting the monitor; it does not
 retroactively erase already committed reports.
 
-The `minimal` profile is scoped to the four evidence classes above. A normal
-crash report can still contain process identifiers, thread registers,
-backtraces and bounded stack bytes, loaded-image metadata, breadcrumbs, and
-application-defined context. Disable those collector toggles as well, or use
-top-level `enabled: false`, when that evidence is not acceptable.
+The `minimal` profile still contains process identifiers, thread registers and
+backtraces, loaded-image metadata, and—when their ordinary collectors remain
+enabled—formatted breadcrumbs and application-defined context. It does not
+read or serialize stack bytes. Disable the breadcrumb, context, thread, or
+image collector too, or use top-level `enabled: false`, when that baseline is
+not acceptable.
 
-There is an additional current raw-capture boundary: when shared memory is
-available, Stage 1 writes owned `breadcrumbs.bin` and `context.bin` snapshots
-even if the formatted Breadcrumb and Context collector toggles are disabled.
-Those raw files can be the only committed evidence when later finalization
-fails, and ZIP archival can include them. The configured encryption policy
-applies to them (so they are plaintext under the default `none` policy).
-Retention counts them only when their transaction reaches the committed sent
-store; a raw-only or staging transaction outside that scan has no sent-store
-age guarantee. The `minimal` profile does not suppress them. Use top-level
-`enabled: false` when capturing application-provided SHM data is unacceptable.
+The event snapshot copies only SHM sections required by an effectively enabled
+collector or by the explicit raw opt-in. In particular, denied screenshot
+pixels and attachment paths are not copied from the live mapping. When
+`privacy.raw_shm` is authorized, Stage 1 additionally writes owned
+`breadcrumbs.bin` and `context.bin`; these can be the only committed evidence
+when later formatting fails, and ZIP archival can include them. They are
+plaintext under the default `encryption: "none"` policy. Retention counts them
+only after their transaction reaches the committed sent store; an incomplete
+staging transaction remains subject to startup recovery rather than the sent
+store's age scan.
 
 ## Compatibility
 
-Configuration files written for the former opt-out behavior still parse, but
-their effective behavior is intentionally safer. For example,
+Regular JSON configuration files written for the former opt-out behavior still
+parse, but their effective behavior is intentionally safer. For example,
 `collectors.memory.enabled: true` without a `privacy` block is disabled during
-normalization and produces a startup diagnostic. Migrating an installation
-that genuinely needs the data requires adding the profile and consent fields;
-an individual collector explicitly set to `false` always remains off.
+normalization and produces a startup diagnostic. The legacy
+`collectors.thread.enabled` shape remains valid, while its newly separated
+`stack_memory` field defaults off. Migrating an installation that needs the
+data requires adding the profile, consent, and individual opt-in fields; an
+explicit `false` always remains off.
+
+Only a genuinely missing `crash_reporter.json` selects defaults. An existing
+unreadable or malformed file, a regular-file type mismatch, and both normal and
+broken configuration symlinks fail startup before the child is spawned. This
+prevents a requested encryption or consent policy from disappearing through a
+parse/read fallback.
+
+The privacy release also tightened retention defaults from 64 reports / 256
+MiB / 15 days to 16 reports / 64 MiB / 7 days. A legacy partial retention
+object inherits the new values for fields it omits and may therefore delete
+older reports sooner. Pin every retention field explicitly before upgrading if
+the former operational limits must be preserved.
 
 ## Retention
 

@@ -18,10 +18,10 @@ crash_monitor (parent)  ──fork+exec──▶  target app (child)
 ```
 
 On a crash, hang, or snapshot the monitor suspends the child, walks every thread
-(registers, stack, backtrace), reads loaded images, merges shared-memory
-breadcrumbs and context, and writes a report. Memory maps, environment data,
-screenshots, and attachments are sensitive opt-ins controlled by the privacy
-policy.
+(registers and backtrace), reads loaded images, merges enabled shared-memory
+breadcrumbs and context, and writes a report. Raw stack bytes, memory maps,
+environment data, screenshots, attachments, and raw SHM dumps are sensitive
+opt-ins controlled by the privacy policy.
 
 ## Build
 
@@ -53,7 +53,7 @@ incomplete staging directories remain hidden. Override the base directory with
 
 ```bash
 crash_monitor analyze <report-dir>/report.zip                    # human-readable summary
-crash_monitor stack <report-dir>/report.zip --thread <N>         # stack memory hex dump
+crash_monitor stack <report-dir>/report.zip --thread <N>         # opt-in stack memory hex dump
 crash_monitor symbolicate <report-dir>/report.zip --dsym <path>  # DWARF source resolution
 ```
 

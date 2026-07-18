@@ -1,7 +1,8 @@
-//! Collector: all threads (registers + backtrace) + stack memory captures.
+//! Collector: all threads (registers + backtrace) with optional stack bytes.
 //!
 //! Self-contained — absorbs all logic from `thread_inspector` and `memory_reader::read_u64`.
-//! Stack capture is included here because SP comes from thread registers.
+//! Policy-authorized stack capture is included here because SP comes from
+//! thread registers.
 
 use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
@@ -43,11 +44,15 @@ pub struct RawStackCapture {
 
 pub struct ThreadCollector {
     platform: Arc<dyn PlatformOps>,
+    capture_stack_memory: bool,
 }
 
 impl ThreadCollector {
-    pub fn new(platform: Arc<dyn PlatformOps>) -> Self {
-        Self { platform }
+    pub fn new(platform: Arc<dyn PlatformOps>, capture_stack_memory: bool) -> Self {
+        Self {
+            platform,
+            capture_stack_memory,
+        }
     }
 }
 
@@ -72,8 +77,13 @@ impl Collector for ThreadCollector {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        data.raw.threads =
-            inspect_all_threads(self.platform.as_ref(), task, event.crashed_thread, context);
+        data.raw.threads = inspect_all_threads(
+            self.platform.as_ref(),
+            task,
+            event.crashed_thread,
+            self.capture_stack_memory,
+            context,
+        );
         context.checkpoint()?;
         Ok(())
     }
@@ -89,6 +99,7 @@ fn inspect_all_threads(
     plat: &dyn PlatformOps,
     task: mach_port_t,
     crashed_thread: Option<mach_port_t>,
+    capture_stack_memory: bool,
     context: &PluginContext,
 ) -> Vec<RawThreadData> {
     let mut threads = match plat.get_task_threads(task) {
@@ -148,10 +159,14 @@ fn inspect_all_threads(
 
         match result {
             Ok((registers, backtrace)) => {
-                let stack_capture = registers
-                    .get("sp")
-                    .copied()
-                    .and_then(|sp| read_stack_memory(plat, task, sp, context).ok());
+                let stack_capture = if capture_stack_memory {
+                    registers
+                        .get("sp")
+                        .copied()
+                        .and_then(|sp| read_stack_memory(plat, task, sp, context).ok())
+                } else {
+                    None
+                };
 
                 inspected.push(RawThreadData {
                     thread_port: thread,

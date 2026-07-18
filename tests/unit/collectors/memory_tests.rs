@@ -80,6 +80,7 @@ fn test_partial_memory_quality_is_exposed_in_pipeline_diagnostics() {
     let pipeline = crate::pipeline::Pipeline {
         enabled: true,
         triggers: crate::pipeline::TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(MemoryCollector::new(platform.clone()))],
         pre_processors: vec![],

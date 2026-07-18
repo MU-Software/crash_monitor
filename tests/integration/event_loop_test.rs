@@ -90,6 +90,7 @@ fn make_test_pipeline_with_triggers(
     Arc::new(Pipeline {
         enabled: true,
         triggers,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -421,6 +422,7 @@ fn disabled_pipeline(
     let pipeline = Arc::new(Pipeline {
         enabled: false,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::MINIMAL,
         filters: vec![],
         collectors: vec![Box::new(CountingCollector {
             calls: collector_calls.clone(),
@@ -580,6 +582,7 @@ fn assert_blocking_finalizer_does_not_delay_reply(
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -672,6 +675,7 @@ fn assert_pipeline_rejects_without_work(
     let pipeline = Pipeline {
         enabled,
         triggers,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(CountingCollector {
             calls: collector_calls.clone(),
@@ -750,6 +754,7 @@ fn test_disabled_crash_trigger_replies_without_worker_capture_or_artifacts() {
             crash: false,
             ..TriggerPolicy::ALL_ENABLED
         },
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(CountingCollector {
             calls: collector_calls.clone(),
@@ -992,6 +997,7 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(BlockingCollector { gate })],
         pre_processors: vec![],
@@ -1066,6 +1072,7 @@ fn test_fatal_zip_is_created_with_termination_before_archiving() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1147,6 +1154,7 @@ fn test_unclaimed_shm_never_arms_anr_watchdog() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1193,6 +1201,7 @@ fn test_ready_stale_heartbeat_triggers_anr_capture() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1244,6 +1253,7 @@ fn test_slow_anr_capture_time_does_not_trigger_a_second_anr() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(SlowCaptureCollector {
             delay: Duration::from_millis(350),
@@ -1307,6 +1317,7 @@ fn test_slow_snapshot_monitor_time_does_not_trigger_false_anr() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(SlowCaptureCollector {
             delay: Duration::from_millis(175),
@@ -1369,6 +1380,7 @@ fn test_snapshot_preserves_real_stale_time_around_excluded_monitor_work() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(SlowCaptureCollector {
             delay: Duration::from_millis(350),
@@ -1448,6 +1460,7 @@ fn test_resume_and_terminate_failure_becomes_monitor_failure() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1492,6 +1505,7 @@ fn test_bounded_resume_failure_and_task_termination_stops_monitoring() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1535,6 +1549,7 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1837,6 +1852,7 @@ fn test_child_termination_finalization_runs_off_event_loop_thread() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1874,6 +1890,7 @@ fn test_termination_report_never_touches_dead_task_port() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],

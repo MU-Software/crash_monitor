@@ -191,6 +191,7 @@ impl CaptureWorker {
                     report_context,
                     "absolute capture deadline elapsed during shm snapshot",
                     shm_snapshot.as_deref(),
+                    self.pipeline.collection_policy.persist_raw_shm,
                 ),
                 suspend_error,
                 snapshot_error,
@@ -223,6 +224,7 @@ impl CaptureWorker {
                     job.report_context,
                     "capture worker is unavailable",
                     fallback_shm_snapshot.as_deref(),
+                    self.pipeline.collection_policy.persist_raw_shm,
                 ),
                 suspend_error,
                 snapshot_error,
@@ -244,6 +246,7 @@ impl CaptureWorker {
                     report_context,
                     "capture worker queue unavailable",
                     fallback_shm_snapshot.as_deref(),
+                    self.pipeline.collection_policy.persist_raw_shm,
                 ),
                 suspend_error,
                 snapshot_error,
@@ -273,6 +276,7 @@ impl CaptureWorker {
                     report_context_for_result,
                     "capture worker exceeded absolute deadline",
                     fallback_shm_snapshot.as_deref(),
+                    self.pipeline.collection_policy.persist_raw_shm,
                 )
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -282,6 +286,7 @@ impl CaptureWorker {
                     report_context_for_result,
                     "capture worker disconnected",
                     fallback_shm_snapshot.as_deref(),
+                    self.pipeline.collection_policy.persist_raw_shm,
                 )
             }
         };
@@ -343,13 +348,14 @@ fn timed_out_capture_with_snapshot(
     report_context: Arc<super::ReportContext>,
     reason: &str,
     snapshot: Option<&crate::shm::OwnedShmSnapshot>,
+    persist_raw_shm: bool,
 ) -> CaptureOutcome {
     minimal_capture(
         event,
         report_context,
         reason,
         PluginStatus::TimedOut,
-        raw_shm_from_snapshot(snapshot),
+        raw_shm_from_snapshot(snapshot, persist_raw_shm),
     )
 }
 
@@ -372,19 +378,24 @@ fn failed_capture_with_snapshot(
     report_context: Arc<super::ReportContext>,
     reason: &str,
     snapshot: Option<&crate::shm::OwnedShmSnapshot>,
+    persist_raw_shm: bool,
 ) -> CaptureOutcome {
     minimal_capture(
         event,
         report_context,
         reason,
         PluginStatus::Error(reason.to_string()),
-        raw_shm_from_snapshot(snapshot),
+        raw_shm_from_snapshot(snapshot, persist_raw_shm),
     )
 }
 
 fn raw_shm_from_snapshot(
     snapshot: Option<&crate::shm::OwnedShmSnapshot>,
+    persist_raw_shm: bool,
 ) -> Option<super::RawShmSnapshot> {
+    if !persist_raw_shm {
+        return None;
+    }
     snapshot.map(|snapshot| super::RawShmSnapshot {
         breadcrumbs: snapshot.raw_breadcrumb_bytes_owned(),
         context: snapshot.raw_context_bytes_owned(),
@@ -862,6 +873,7 @@ mod tests {
         let pipeline = Arc::new(Pipeline {
             enabled,
             triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
             filters: vec![],
             collectors: vec![],
             pre_processors: vec![],
@@ -952,6 +964,7 @@ mod tests {
         let pipeline = Arc::new(Pipeline {
             enabled: false,
             triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
             filters: vec![],
             collectors: vec![],
             pre_processors: vec![],
@@ -991,6 +1004,7 @@ mod tests {
         let pipeline = Arc::new(Pipeline {
             enabled: true,
             triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
             filters: vec![],
             collectors: vec![],
             pre_processors: vec![],
@@ -1050,6 +1064,7 @@ mod tests {
         let pipeline = Arc::new(Pipeline {
             enabled: true,
             triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
             filters: vec![],
             collectors: vec![Box::new(PostResumeSnapshotCollector {
                 entered_tx,
@@ -1134,6 +1149,7 @@ mod tests {
         let pipeline = Arc::new(Pipeline {
             enabled: true,
             triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
             filters: vec![],
             collectors: vec![],
             pre_processors: vec![],
@@ -1164,6 +1180,53 @@ mod tests {
                 .map(|entry| &entry.status),
             Some(PluginStatus::Error(error)) if error == "capture worker is unavailable"
         ));
+        assert_eq!(platform.suspend_count(), 1);
+        assert_eq!(platform.resume_count(), 1);
+
+        worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn unavailable_sender_never_restores_raw_shm_when_policy_denies_persistence() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let shm = Arc::new(
+            crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"),
+        );
+        write_shm_app_version(&shm, "private-marker");
+        write_shm_breadcrumb_marker(&shm, 0xC3);
+
+        let platform = Arc::new(MockPlatform::default());
+        let pipeline = Arc::new(Pipeline {
+            enabled: true,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::MINIMAL,
+            filters: vec![],
+            collectors: vec![
+                Box::new(crate::collectors::BreadcrumbCollector::new()),
+                Box::new(crate::collectors::ContextCollector::new()),
+            ],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: Some(shm),
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+        let mut worker = CaptureWorker::start(pipeline);
+        worker.sender.take();
+
+        let outcome = worker.capture(
+            captured(46).event,
+            9,
+            Instant::now() + Duration::from_secs(2),
+        );
+        let CaptureOutcome::Captured(captured) = outcome else {
+            panic!("an unavailable sender should return a minimum capture");
+        };
+        assert!(
+            captured.raw_shm.is_none(),
+            "the failure fallback must not bypass the raw SHM policy"
+        );
         assert_eq!(platform.suspend_count(), 1);
         assert_eq!(platform.resume_count(), 1);
 

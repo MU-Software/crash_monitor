@@ -121,11 +121,14 @@ sanitization for torn generations is a separate publication-integrity rule.
 ## Capture ownership boundary
 
 The live mapping is not exposed as ordinary Rust references or borrowed byte
-slices. After the monitor successfully suspends the child, it copies the entire
-schema-sized mapping through bounded raw-pointer chunks into an immutable owned
-snapshot. Breadcrumb, context, settings, attachment, screenshot, and Stage 1
-raw-dump readers consume only that snapshot. The task may therefore resume even
-if a capture worker is still parsing payload bytes.
+slices. After the monitor successfully suspends the child, it allocates one
+zero-filled schema-sized destination and copies only privacy-authorized sections
+through bounded raw-pointer chunks. Header/footer validation metadata is always
+copied; breadcrumb/context, attachment, and screenshot payloads are selected by
+the immutable collection policy. Their parsers and explicitly enabled Stage-1
+raw persistence consume only that owned snapshot. The task may therefore resume
+even if a capture worker is still parsing payload bytes. Denied screenshot
+pixels and attachment paths are never copied from the live mapping.
 
 Suspension prevents bytes from changing during the copy, while generations
 detect a producer that was suspended partway through a multi-field update. An
@@ -237,9 +240,10 @@ operations:
 
 - C uses the acquire/release and seqlock helpers in `crash_shm_atomic.h`.
 - Rust uses aligned `AtomicU32`/`AtomicU64` acquire and release operations.
-- The Rust whole-mapping copy is split around every atomic word; ordinary raw
+- The Rust policy-selected copy is split around every atomic word; ordinary raw
   copy instructions never read a generation, readiness, `ring_count`, or
-  heartbeat word.
+  heartbeat word. Atomics belonging only to a denied payload section are not
+  loaded either.
 - The ABI is accepted only when atomic size and alignment match the underlying
   integer and the target reports the operations as always lock-free.
 
@@ -250,9 +254,9 @@ neither makes a cross-process data race safe nor detects torn multi-field data.
 
 A producer reads `CRASH_MONITOR_SHM`, opens and maps that name, checks the
 mapping size plus header magic/version, and follows the publication sequence for
-every unit it writes. Nothing is mandatory: the monitor can still capture
-threads, memory, and images for a child that writes no SHM payload. ANR remains
-dormant for such a child. A producer opts into ANR only through the ordered first
+every unit it writes. Nothing is mandatory: the monitor can still capture its
+configured thread/image diagnostics for a child that writes no SHM payload.
+ANR remains dormant for such a child. A producer opts into ANR only through the ordered first
 heartbeat plus `producer_ready` handshake above. Breadcrumbs and context remain
 independently optional. The standalone example is
 [`tests/e2e/fixtures/crash_app.c`](../tests/e2e/fixtures/crash_app.c).

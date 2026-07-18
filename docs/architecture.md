@@ -63,13 +63,14 @@ in-process with a synthetic source — no real child or Mach ports required.
 On a crash/snapshot/ANR event:
 
 1. **Suspend** the child task (frozen while inspected).
-2. **Collect** per-thread state (registers, stack memory, backtrace), loaded
-   images + ASLR slides, VM regions + heap summary, and the shared-memory
-   breadcrumbs / context / screenshots.
+2. **Collect** the minimal per-thread state (registers and backtrace), loaded
+   images + ASLR slides, and privacy-authorized optional evidence such as stack
+   bytes, VM/heap summaries, or selected shared-memory sections.
 3. **Resume** the child (for snapshots and ANRs it keeps running; for a fatal
    crash the exception reply lets it proceed to termination).
 4. **Pre-process** the collected data (sessions, symbol names, fingerprint, …).
-5. **Write** the report in stages (raw fail-safe dump → JSON).
+5. **Write** the report in stages (fail-safe metadata and authorized raw dumps
+   → JSON).
 6. **Post-process** (archive, prune, notify).
 
 Steps 2 and 4–6 run through the [plugin pipeline](pipeline.md). The shared-memory

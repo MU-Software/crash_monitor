@@ -9,8 +9,10 @@ use nix::libc;
 
 /// Unique PID per test to avoid shm name collisions.
 fn unique_pid() -> u32 {
-    static COUNTER: AtomicU32 = AtomicU32::new(700_000);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    std::process::id()
+        .wrapping_mul(1_000_003)
+        .wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Helper: write a C-style NUL-terminated string into a fixed-size byte array via raw pointer.
@@ -43,20 +45,29 @@ struct ForkChild {
 }
 
 impl ForkChild {
+    fn try_wait(&mut self) -> Option<libc::c_int> {
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(self.pid, &raw mut status, libc::WNOHANG) };
+        assert!(
+            result >= 0,
+            "waitpid failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if result == self.pid {
+            self.pid = 0;
+            Some(status)
+        } else {
+            None
+        }
+    }
+
     fn wait_until(&mut self, deadline: Instant) -> libc::c_int {
         loop {
-            let mut status = 0;
-            let result = unsafe { libc::waitpid(self.pid, &raw mut status, libc::WNOHANG) };
-            if result == self.pid {
-                self.pid = 0;
+            if let Some(status) = self.try_wait() {
                 return status;
             }
-            assert!(
-                result >= 0,
-                "waitpid failed: {}",
-                std::io::Error::last_os_error()
-            );
             if Instant::now() >= deadline {
+                let mut status = 0;
                 unsafe {
                     libc::kill(self.pid, libc::SIGKILL);
                     libc::waitpid(self.pid, &raw mut status, 0);
@@ -110,16 +121,11 @@ unsafe fn run_forked_context_producer(base: *mut u8, offsets: ContextPublication
         write_val::<u64>(base, offsets.session_start, 1);
         heartbeat.store(1, Ordering::Release);
 
-        let mut released = false;
-        for _ in 0..1_000_000 {
-            if heartbeat.load(Ordering::Acquire) == 2 {
-                released = true;
-                break;
-            }
+        // The parent has its own three-second wait deadline and this process
+        // has the alarm above. An iteration cap would turn snapshot speed and
+        // scheduler behavior into an unrelated source of test failures.
+        while heartbeat.load(Ordering::Acquire) != 2 {
             libc::sched_yield();
-        }
-        if !released {
-            libc::_exit(3);
         }
 
         write_val::<u32>(base, offsets.build_number, 1);
@@ -159,8 +165,23 @@ unsafe fn run_forked_context_producer(base: *mut u8, offsets: ContextPublication
     }
 }
 
-fn wait_for_live_heartbeat(shm: &SharedMemory, expected: u64, deadline: Instant) {
+fn wait_for_live_heartbeat(
+    shm: &SharedMemory,
+    child: &mut ForkChild,
+    expected: u64,
+    deadline: Instant,
+) {
     while shm.read_live_heartbeat() != expected {
+        if let Some(status) = child.try_wait() {
+            let ending = if libc::WIFEXITED(status) {
+                format!("exited with code {}", libc::WEXITSTATUS(status))
+            } else if libc::WIFSIGNALED(status) {
+                format!("was signaled with {}", libc::WTERMSIG(status))
+            } else {
+                format!("ended with status {status}")
+            };
+            panic!("forked producer {ending} before heartbeat {expected}");
+        }
         assert!(
             Instant::now() < deadline,
             "forked producer did not publish readiness"
@@ -366,7 +387,7 @@ fn test_forked_context_producer_never_exposes_torn_fields() {
     }
 
     let mut child = ForkChild { pid };
-    wait_for_live_heartbeat(&shm, 1, Instant::now() + Duration::from_secs(3));
+    wait_for_live_heartbeat(&shm, &mut child, 1, Instant::now() + Duration::from_secs(3));
 
     let odd_snapshot = shm
         .snapshot_owned_until(Some(Instant::now() + Duration::from_secs(3)))
@@ -383,7 +404,7 @@ fn test_forked_context_producer_never_exposes_torn_fields() {
     unsafe {
         store_u64_release(base, offsets.heartbeat, 2);
     }
-    wait_for_live_heartbeat(&shm, 4, Instant::now() + Duration::from_secs(3));
+    wait_for_live_heartbeat(&shm, &mut child, 4, Instant::now() + Duration::from_secs(3));
 
     let mut saw_changed_generation = false;
     for _ in 0..12 {

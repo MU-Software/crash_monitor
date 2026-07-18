@@ -343,7 +343,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     let validated_config = match config::load_validated_config() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("[monitor] Invalid plugin configuration: {error}");
+            eprintln!("[monitor] Invalid crash monitor configuration: {error}");
             return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };

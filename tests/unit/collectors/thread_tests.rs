@@ -31,7 +31,13 @@ fn test_inspect_all_threads_success() {
         },
     ];
 
-    let result = inspect_all_threads(&plat, 0, Some(100), &PluginContext::without_deadline());
+    let result = inspect_all_threads(
+        &plat,
+        0,
+        Some(100),
+        false,
+        &PluginContext::without_deadline(),
+    );
     assert_eq!(result.len(), 2);
 
     assert_eq!(result[0].thread_port, 100);
@@ -43,6 +49,47 @@ fn test_inspect_all_threads_success() {
     assert!(!result[1].crashed);
     assert!(result[1].registers.is_some());
     assert_eq!(result[1].name, None);
+}
+
+#[test]
+fn test_stack_bytes_are_read_only_when_collection_policy_allows_them() {
+    fn platform_with_stack(marker: u8) -> MockPlatform {
+        let mut platform = MockPlatform::default();
+        platform.threads = vec![MockThread {
+            port: 100,
+            name: Some("main".into()),
+            state: make_state(&[(31, 0x1000, 0), (32, 0x2000, 0)]),
+        }];
+        platform
+            .memory
+            .insert(0x1000, vec![marker; MAX_STACK_BYTES]);
+        platform
+    }
+
+    let minimal = platform_with_stack(0x5a);
+    let threads = inspect_all_threads(
+        &minimal,
+        0,
+        Some(100),
+        false,
+        &PluginContext::without_deadline(),
+    );
+    assert!(threads[0].stack_capture.is_none());
+
+    let consented = platform_with_stack(0x5a);
+    let threads = inspect_all_threads(
+        &consented,
+        0,
+        Some(100),
+        true,
+        &PluginContext::without_deadline(),
+    );
+    let stack = threads[0]
+        .stack_capture
+        .as_ref()
+        .expect("explicitly authorized stack bytes");
+    assert_eq!(stack.bytes.len(), MAX_STACK_BYTES);
+    assert!(stack.bytes.iter().all(|byte| *byte == 0x5a));
 }
 
 #[test]
@@ -61,6 +108,7 @@ fn test_thread_cap_preserves_crashed_thread_and_releases_surplus_ports() {
         &plat,
         0,
         Some(crashed_port),
+        false,
         &PluginContext::without_deadline(),
     );
 

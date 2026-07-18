@@ -331,6 +331,7 @@ fn make_pipeline_with_collector(
     Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![collector],
         pre_processors: vec![],
@@ -350,6 +351,7 @@ fn make_pipeline_with_filter(
     Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![filter],
         collectors: vec![collector],
         pre_processors: vec![],
@@ -400,6 +402,44 @@ fn test_expired_capture_deadline_is_diagnosed_as_timeout() {
 }
 
 #[test]
+fn test_minimal_policy_never_persists_stage1_shm_raw() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let shm =
+        Arc::new(crate::shm::SharedMemory::create(unique_shm_pid()).expect("create shared memory"));
+    publish_shm_app_version(&shm, "private-secret");
+    let platform = Arc::new(MockPlatform::default());
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::MINIMAL,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![],
+        notifiers: vec![],
+        shm: Some(shm),
+        platform,
+        output_dir: Some(tempdir.path().to_path_buf()),
+    };
+
+    let CaptureOutcome::Captured(captured) = pipeline.capture_event(&make_event(), 7) else {
+        panic!("capture should succeed");
+    };
+    assert!(captured.raw_shm.is_none());
+    let _ = pipeline.finalize_captured(*captured);
+
+    assert!(committed_artifact(tempdir.path(), "context.bin").is_none());
+    assert!(committed_artifact(tempdir.path(), "breadcrumbs.bin").is_none());
+    let report = committed_artifact(tempdir.path(), "report.json").expect("minimal report");
+    let report_bytes = std::fs::read(report).unwrap();
+    assert!(
+        !report_bytes
+            .windows("private-secret".len())
+            .any(|window| window == b"private-secret")
+    );
+}
+
+#[test]
 fn test_stage1_shm_dump_uses_pre_resume_owned_bytes() {
     let tempdir = tempfile::tempdir().unwrap();
     let shm =
@@ -409,6 +449,7 @@ fn test_stage1_shm_dump_uses_pre_resume_owned_bytes() {
     let pipeline = Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -466,6 +507,7 @@ fn test_torn_context_snapshot_is_diagnosed_and_sanitized_without_live_reaccess()
     let mut pipeline = Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![Box::new(crate::collectors::ContextCollector::new())],
         pre_processors: vec![],
@@ -563,6 +605,7 @@ fn test_best_effort_suspend_failure_never_snapshots_live_shm() {
     let pipeline = Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -828,6 +871,7 @@ fn make_pipeline_with_tempdir(
     Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors,
         pre_processors: vec![],
@@ -934,6 +978,7 @@ fn every_pipeline_phase_shares_one_immutable_report_context() {
     let pipeline = Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![Box::new(probe(
             "ContextFilter",
             PostProcessorPhase::BeforeCommit,
@@ -1097,6 +1142,7 @@ fn concurrent_retention_never_removes_a_report_from_a_live_notifier() {
     let pipeline = Arc::new(Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -1387,6 +1433,60 @@ fn test_stage1_raw_file_contents() {
         contents.contains("---backtrace---"),
         "Should contain backtrace header"
     );
+}
+
+#[test]
+fn test_stack_sentinel_is_absent_from_minimal_report_and_present_after_opt_in() {
+    for capture_stack_memory in [false, true] {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut state = vec![0_u32; 68];
+        state[31 * 2] = 0x1000;
+        state[32 * 2] = 0x2000;
+        let mut mock = MockPlatform::default();
+        mock.threads = vec![crate::platform::mock::MockThread {
+            port: 42,
+            name: Some("private-thread".into()),
+            state,
+        }];
+        mock.memory.insert(0x1000, vec![0x5a; 64 * 1024]);
+        let platform = Arc::new(mock);
+        let mut pipeline = make_pipeline_with_tempdir(
+            vec![Box::new(crate::collectors::ThreadCollector::new(
+                platform.clone(),
+                capture_stack_memory,
+            ))],
+            platform,
+            tempdir.path(),
+        );
+        pipeline.collection_policy = if capture_stack_memory {
+            crate::config::CollectionPolicy::FULL
+        } else {
+            crate::config::CollectionPolicy::MINIMAL
+        };
+
+        let _ = pipeline.handle_event(&make_crash_event(), 7);
+        let report_path =
+            committed_artifact(tempdir.path(), "report.json").expect("committed report");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+        let stack = &report["threads"][0]["stack_memory"];
+        if capture_stack_memory {
+            assert_eq!(stack["size"], 64 * 1024);
+            assert!(
+                stack["hex_dump"]
+                    .as_str()
+                    .is_some_and(|encoded| encoded.starts_with("WlpaWlp"))
+            );
+        } else {
+            assert!(stack.is_null());
+            let bytes = serde_json::to_vec(&report).unwrap();
+            assert!(
+                !bytes
+                    .windows(16)
+                    .any(|window| window == b"WlpaWlpaWlpaWlpa")
+            );
+        }
+    }
 }
 
 #[test]
@@ -1758,6 +1858,7 @@ fn make_full_pipeline(
     Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters,
         collectors,
         pre_processors,
@@ -2598,6 +2699,7 @@ fn test_global_disable_skips_every_report_type_without_side_effects() {
     let pipeline = Pipeline {
         enabled: false,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::MINIMAL,
         filters: vec![Box::new(MockFilter { allow: true })],
         collectors: vec![Box::new(CfgCollector {
             name: "DisabledCollector",
@@ -2683,6 +2785,7 @@ fn disabled_pipeline_recovery_is_a_filesystem_noop() {
     let pipeline = Pipeline {
         enabled: false,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::MINIMAL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -2765,6 +2868,10 @@ fn test_default_macos_pipeline_builds_and_validates() {
     // startup panic.
     let pipeline = default_macos_pipeline(None).unwrap();
     pipeline.validate_dependencies().unwrap();
+    assert_eq!(
+        pipeline.collection_policy,
+        crate::config::CollectionPolicy::MINIMAL
+    );
 
     // Default config enables every category.
     assert!(!pipeline.collectors.is_empty(), "no collectors registered");
@@ -2784,10 +2891,17 @@ fn test_default_macos_pipeline_builds_and_validates() {
 fn test_macos_factory_registers_explicitly_consented_sensitive_collectors() {
     let validated = serde_json::from_str::<crate::config::CrashReporterConfig>(
         r#"{
-            "privacy": { "level": "full", "consent": "granted" },
+            "privacy": {
+                "level": "full",
+                "consent": "granted",
+                "raw_shm": true
+            },
             "collectors": {
+                "thread": { "enabled": true, "stack_memory": true },
                 "memory": { "enabled": true },
-                "environment": { "enabled": true }
+                "environment": { "enabled": true },
+                "screenshot": { "enabled": true },
+                "attachment": { "enabled": true }
             }
         }"#,
     )
@@ -2803,6 +2917,10 @@ fn test_macos_factory_registers_explicitly_consented_sensitive_collectors() {
 
     assert!(collector_ids.contains("MemoryCollector"));
     assert!(collector_ids.contains("EnvironmentCollector"));
+    assert!(pipeline.collection_policy.capture_stack_memory);
+    assert!(pipeline.collection_policy.capture_shm_screenshots);
+    assert!(pipeline.collection_policy.capture_shm_attachments);
+    assert!(pipeline.collection_policy.persist_raw_shm);
 }
 
 #[test]
@@ -3102,6 +3220,7 @@ fn commit_failure_runs_no_after_commit_side_effects() {
     let pipeline = Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -3135,6 +3254,7 @@ fn after_commit_stage_cannot_mutate_the_sealed_transaction() {
     let pipeline = Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],
@@ -3162,6 +3282,7 @@ fn post_publish_sync_failure_keeps_report_notifier_and_diagnostic() {
     let pipeline = Pipeline {
         enabled: true,
         triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
         filters: vec![],
         collectors: vec![],
         pre_processors: vec![],

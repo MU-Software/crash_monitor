@@ -84,7 +84,7 @@ shape is:
       "index", "id", "name", "crashed",
       "registers":    { "<reg>": "0x…", … },
       "backtrace":    [ { "address", "image", "offset", "symbol", "file"?, "line"?, "column"? } ],
-      "stack_memory": { "sp", "size", "hex_dump" }
+      "stack_memory": { "sp", "size", "hex_dump" } | null // explicit privacy opt-in
     }
   ],
   "loaded_images": [ { "path", "base", "slide" } ],

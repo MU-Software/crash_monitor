@@ -7,10 +7,12 @@ child:
 crash_monitor run <path-to-app> [args…]
 ```
 
-No source changes are required to get thread/memory/image capture. To also get
-breadcrumbs, context, screenshots, and ANR detection, the app links a small
-in-process reporter that writes to the shared-memory region. This page covers
-both the runtime contract and the configuration knobs.
+No source changes are required to get thread registers, backtraces, and
+loaded-image metadata. Raw stack bytes, memory maps, and screenshots remain
+explicit privacy opt-ins. To also get breadcrumbs, context, screenshots, and
+ANR detection, the app links a small in-process reporter that writes to the
+shared-memory region. This page covers both the runtime contract and the
+configuration knobs.
 
 ## Codesigning
 
@@ -115,11 +117,14 @@ excluded.
 
 An optional `crash_reporter.json` in the data directory disables report
 triggers or specific plugins and tunes parameters. Report triggers and
-non-sensitive plugins are on by default. Environment, memory, screenshot, and
-attachment collection requires an explicit privacy profile, consent assertion,
-and per-collector opt-in; see [privacy.md](privacy.md).
+non-sensitive plugins are on by default. Raw stack bytes, memory diagnostics,
+environment data, screenshots, attachments, and raw SHM persistence require an
+explicit privacy profile, consent assertion, and evidence-specific opt-in; see
+[privacy.md](privacy.md).
 Top-level `"enabled": false` is a report-generation kill switch: child
 supervision and Mach replies continue, but capture, plugins, and artifact
 writes do not run. Per-trigger controls live under `triggers`; see
 [pipeline.md](pipeline.md#configuration) for their precedence and exact
-semantics. A missing or invalid file falls back to the minimal privacy profile.
+semantics. A missing file selects the minimal privacy profile. An existing
+unreadable, malformed, non-regular, or symlinked file fails startup before the
+child is spawned.

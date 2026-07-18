@@ -109,6 +109,77 @@ fn test_shm_create_snapshot_drop() {
 }
 
 #[test]
+fn test_snapshot_policy_omits_sensitive_sections_and_full_policy_preserves_them() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let attachment_label = b"private-log\0";
+    let attachment_path = b"/private/user/secret.log\0";
+    let screenshot_marker = [0x11, 0x22, 0x33, 0x44];
+    unsafe {
+        let base = shm.base_ptr();
+        store_u32_release(base, ATTACHMENTS_GENERATION_OFFSET, 2);
+        write_val::<u32>(
+            base,
+            ATTACHMENT_OFFSET + std::mem::offset_of!(ShmAttachmentSection, count),
+            1,
+        );
+        let first_attachment =
+            ATTACHMENT_OFFSET + std::mem::offset_of!(ShmAttachmentSection, slots);
+        write_bytes(
+            base,
+            first_attachment + std::mem::offset_of!(ShmAttachmentSlot, label),
+            attachment_label,
+        );
+        write_bytes(
+            base,
+            first_attachment + std::mem::offset_of!(ShmAttachmentSlot, path),
+            attachment_path,
+        );
+
+        store_u32_release(base, SCREENSHOT_GENERATIONS_OFFSET, 2);
+        write_val::<u64>(base, SCREENSHOT_TIMESTAMPS_OFFSET, 99);
+        write_bytes(base, SCREENSHOT_DATA_OFFSET, &screenshot_marker);
+    }
+
+    let minimal = shm
+        .snapshot_owned_until_with_policy(
+            None,
+            ShmSnapshotPolicy {
+                breadcrumbs: true,
+                context: true,
+                attachments: false,
+                screenshots: false,
+            },
+        )
+        .expect("minimal snapshot");
+    assert!(minimal.read_attachments().is_empty());
+    assert!(minimal.read_screenshots().is_empty());
+    assert!(
+        minimal.bytes[ATTACHMENT_OFFSET..SECTION4_OFFSET]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+    assert!(
+        minimal.bytes[SECTION4_OFFSET..FOOTER_OFFSET]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+
+    let full = shm
+        .snapshot_owned_until_with_policy(None, ShmSnapshotPolicy::ALL)
+        .expect("full snapshot");
+    let attachments = full.read_attachments();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].label, "private-log");
+    assert_eq!(attachments[0].path, "/private/user/secret.log");
+    let screenshots = full.read_screenshots();
+    assert_eq!(screenshots.len(), 1);
+    assert_eq!(
+        &screenshots[0].rgba[..screenshot_marker.len()],
+        &screenshot_marker
+    );
+}
+
+#[test]
 fn test_section_offsets_are_consistent() {
     // Ensure sections don't overlap and footer is at the end (compile-time checks)
     const { assert!(SECTION2_OFFSET > SECTION1_OFFSET) };
