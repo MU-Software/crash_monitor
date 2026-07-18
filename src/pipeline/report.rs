@@ -797,14 +797,18 @@ pub fn build_report(
         let exception_type = event.exception_type.unwrap_or(0);
         let policy = platform::exception_policy(exception_type);
         let decoded = platform::decode_exception(exception_type, &event.exception_codes);
-        let code_value = format!("{:#x}", event.exception_code.unwrap_or(0));
+        // The MIG code array is the single authoritative exception payload.
+        // Legacy scalar projections may be absent or inconsistent and are not
+        // allowed to contradict the preserved raw values in one report.
+        let code_value = format!("{:#x}", event.exception_codes.first().copied().unwrap_or(0));
+        let subcode = format!("{:#x}", event.exception_codes.get(1).copied().unwrap_or(0));
         Some(ExceptionReport {
             exc_type: platform::exception_type_name(exception_type).into(),
             type_code: exception_type,
             code: decoded.code_name.unwrap_or(&code_value).into(),
             code_name: decoded.code_name.map(str::to_string),
             code_value,
-            subcode: format!("{:#x}", event.exception_subcode.unwrap_or(0)),
+            subcode,
             raw_codes: event
                 .exception_codes
                 .iter()

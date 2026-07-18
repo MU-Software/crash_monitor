@@ -177,6 +177,35 @@ fn build_report_preserves_the_exact_mach_code_array() {
 }
 
 #[test]
+fn raw_mach_codes_override_inconsistent_legacy_scalar_projections() {
+    let event = CrashEvent {
+        report_id: crate::pipeline::ReportId::default(),
+        report_type: ReportType::Crash,
+        termination: None,
+        exception_type: Some(1),
+        // These legacy projections deliberately disagree with the MIG array.
+        exception_code: Some(2),
+        exception_subcode: Some(0xdead),
+        exception_codes: vec![1, 0xbeef],
+        crashed_thread: Some(42),
+        bail_on_suspend_failure: false,
+        pid: 1234,
+        process_name: "test_app".into(),
+        hang_duration_ms: None,
+    };
+
+    let report = build_report(&event, &CollectedData::default(), &Diagnostics::new());
+    let exception = report.exception.expect("Mach crash exception");
+
+    assert_eq!(exception.raw_codes, vec!["0x1", "0xbeef"]);
+    assert_eq!(exception.code_value, "0x1");
+    assert_eq!(exception.code_name.as_deref(), Some("KERN_INVALID_ADDRESS"));
+    assert_eq!(exception.subcode, "0xbeef");
+    assert_eq!(exception.fault_address.as_deref(), Some("0xbeef"));
+    assert_eq!(exception.signal, "SIGSEGV");
+}
+
+#[test]
 fn report_deserializes_signal_termination() {
     let mut value: serde_json::Value = serde_json::from_str(&sample_report_json()).unwrap();
     value["header"]["type"] = serde_json::json!("signal_failure");
