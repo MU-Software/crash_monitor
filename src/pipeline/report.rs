@@ -140,7 +140,13 @@ impl ReportHeader {
 pub struct ExceptionReport {
     #[serde(rename = "type")]
     pub exc_type: String,
+    #[serde(default)]
+    pub type_code: u32,
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_name: Option<String>,
+    #[serde(default)]
+    pub code_value: String,
     pub subcode: String,
     /// Raw MIG exception code array, preserving its original element count.
     #[serde(default)]
@@ -148,7 +154,10 @@ pub struct ExceptionReport {
     #[serde(default)]
     pub severity: crate::platform::ExceptionSeverity,
     pub signal: String,
-    pub fault_address: String,
+    #[serde(default)]
+    pub signal_is_approximate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_address: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -656,10 +665,16 @@ pub fn build_report(
     let header = ReportHeader::new(event);
 
     let exception = if event.is_crash() {
-        let policy = platform::exception_policy(event.exception_type.unwrap_or(0));
+        let exception_type = event.exception_type.unwrap_or(0);
+        let policy = platform::exception_policy(exception_type);
+        let decoded = platform::decode_exception(exception_type, &event.exception_codes);
+        let code_value = format!("{:#x}", event.exception_code.unwrap_or(0));
         Some(ExceptionReport {
-            exc_type: platform::exception_type_name(event.exception_type.unwrap_or(0)).into(),
-            code: platform::kern_return_name(event.exception_code.unwrap_or(0)).into(),
+            exc_type: platform::exception_type_name(exception_type).into(),
+            type_code: exception_type,
+            code: decoded.code_name.unwrap_or(&code_value).into(),
+            code_name: decoded.code_name.map(str::to_string),
+            code_value,
             subcode: format!("{:#x}", event.exception_subcode.unwrap_or(0)),
             raw_codes: event
                 .exception_codes
@@ -669,8 +684,9 @@ pub fn build_report(
             severity: policy
                 .severity
                 .unwrap_or(platform::ExceptionSeverity::Fatal),
-            signal: platform::exception_to_signal(event.exception_type.unwrap_or(0)).into(),
-            fault_address: format!("{:#x}", event.exception_subcode.unwrap_or(0)),
+            signal: decoded.signal.into(),
+            signal_is_approximate: decoded.signal_is_approximate,
+            fault_address: decoded.fault_address.map(|address| format!("{address:#x}")),
         })
     } else {
         None

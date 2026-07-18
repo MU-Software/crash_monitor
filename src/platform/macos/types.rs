@@ -215,9 +215,63 @@ pub fn exception_type_name(exc_type: u32) -> &'static str {
 #[must_use]
 pub fn kern_return_name(code: u64) -> &'static str {
     match code {
+        0 => "KERN_SUCCESS",
         1 => "KERN_INVALID_ADDRESS",
         2 => "KERN_PROTECTION_FAILURE",
+        3 => "KERN_NO_SPACE",
+        4 => "KERN_INVALID_ARGUMENT",
+        5 => "KERN_FAILURE",
+        6 => "KERN_RESOURCE_SHORTAGE",
+        7 => "KERN_NOT_RECEIVER",
+        8 => "KERN_NO_ACCESS",
+        9 => "KERN_MEMORY_FAILURE",
+        10 => "KERN_MEMORY_ERROR",
+        14 => "KERN_ABORTED",
+        15 => "KERN_INVALID_NAME",
+        16 => "KERN_INVALID_TASK",
+        17 => "KERN_INVALID_RIGHT",
+        18 => "KERN_INVALID_VALUE",
+        20 => "KERN_INVALID_CAPABILITY",
         _ => "KERN_UNKNOWN",
+    }
+}
+
+/// Type-aware presentation of a Mach exception code array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedException {
+    pub code_name: Option<&'static str>,
+    pub signal: &'static str,
+    pub signal_is_approximate: bool,
+    pub fault_address: Option<u64>,
+}
+
+/// Decode only meanings defined for the specific exception class. Numeric raw
+/// values remain authoritative in the report regardless of this projection.
+#[must_use]
+pub fn decode_exception(exc_type: u32, raw_codes: &[u64]) -> DecodedException {
+    let code = raw_codes.first().copied().unwrap_or(0);
+    let subcode = raw_codes.get(1).copied();
+    match exc_type {
+        1 => DecodedException {
+            code_name: Some(kern_return_name(code)),
+            signal: if code == 2 { "SIGBUS" } else { "SIGSEGV" },
+            signal_is_approximate: false,
+            fault_address: subcode,
+        },
+        10 => DecodedException {
+            code_name: None,
+            // EXC_CRASH encodings vary by producer/kernel and this monitor
+            // does not yet have an authoritative signal subfield decoder.
+            signal: "SIGABRT",
+            signal_is_approximate: true,
+            fault_address: None,
+        },
+        _ => DecodedException {
+            code_name: None,
+            signal: exception_to_signal(exc_type),
+            signal_is_approximate: false,
+            fault_address: None,
+        },
     }
 }
 

@@ -167,6 +167,12 @@ fn build_report_preserves_the_exact_mach_code_array() {
         exception.raw_codes,
         vec!["0xfedcba9876543210", "0x123456789abcdef"]
     );
+    assert_eq!(exception.type_code, 1);
+    assert_eq!(exception.code_value, "0xfedcba9876543210");
+    assert_eq!(
+        exception.fault_address.as_deref(),
+        Some("0x123456789abcdef")
+    );
     assert_eq!(event.exception_codes, raw_codes);
 }
 

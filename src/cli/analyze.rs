@@ -80,7 +80,8 @@ fn header_summary(report: &CrashReport) -> String {
             let fault = report
                 .exception
                 .as_ref()
-                .map_or("unknown".into(), |e| e.fault_address.clone());
+                .and_then(|e| e.fault_address.clone())
+                .unwrap_or_else(|| "not applicable".into());
             format!(
                 "Crash Report: {signal} at {fault}  (PID {}, {})",
                 h.pid, h.process
@@ -162,7 +163,12 @@ fn print_exception(report: &CrashReport) {
     println!("  Code:          {}", exc.code);
     println!("  Subcode:       {}", exc.subcode);
     println!("  Signal:        {}", exc.signal);
-    println!("  Fault address: {}", exc.fault_address);
+    if let Some(fault_address) = &exc.fault_address {
+        println!("  Fault address: {fault_address}");
+    }
+    if exc.signal_is_approximate {
+        println!("  Signal mapping: approximate");
+    }
     println!();
 }
 

@@ -502,12 +502,12 @@
 
 ### P1-38. exception type별로 raw code와 signal을 정확히 해석한다
 
-- [ ] 모든 exception의 code를 무조건 `kern_return_t`, subcode를 fault address로 해석하지 않는다.
-- [ ] raw code array와 numeric unknown value는 항상 보존하고 display name은 별도 field로 둔다.
-- [ ] 주요 `kern_return` 이름 매핑을 확장한다.
-- [ ] `EXC_BAD_ACCESS`에서 SIGSEGV와 SIGBUS를 구분한다.
-- [ ] `EXC_CRASH` code에서 원 signal을 해독하거나 근사임을 명시한다.
-- [ ] 구독하지 않는 exception type의 가상 영향은 문서에 사실처럼 적지 않는다.
+- [x] 모든 exception의 code를 무조건 `kern_return_t`, subcode를 fault address로 해석하지 않는다.
+- [x] raw code array와 numeric unknown value는 항상 보존하고 display name은 별도 field로 둔다.
+- [x] 주요 `kern_return` 이름 매핑을 확장한다.
+- [x] `EXC_BAD_ACCESS`에서 SIGSEGV와 SIGBUS를 구분한다.
+- [x] `EXC_CRASH` code에서 원 signal을 해독하거나 근사임을 명시한다.
+- [x] 구독하지 않는 exception type의 가상 영향은 문서에 사실처럼 적지 않는다.
 
 범위: `src/platform/macos/types.rs`, `src/pipeline/report.rs`.
 

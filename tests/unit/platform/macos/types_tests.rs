@@ -55,9 +55,32 @@ fn test_exception_type_name_all() {
 fn test_kern_return_name_all() {
     assert_eq!(kern_return_name(1), "KERN_INVALID_ADDRESS");
     assert_eq!(kern_return_name(2), "KERN_PROTECTION_FAILURE");
-    assert_eq!(kern_return_name(0), "KERN_UNKNOWN");
-    assert_eq!(kern_return_name(3), "KERN_UNKNOWN");
+    assert_eq!(kern_return_name(0), "KERN_SUCCESS");
+    assert_eq!(kern_return_name(3), "KERN_NO_SPACE");
     assert_eq!(kern_return_name(999), "KERN_UNKNOWN");
+}
+
+#[test]
+fn exception_decoder_is_type_aware_and_preserves_signal_uncertainty() {
+    let segv = decode_exception(1, &[1, 0x1234]);
+    assert_eq!(segv.code_name, Some("KERN_INVALID_ADDRESS"));
+    assert_eq!(segv.signal, "SIGSEGV");
+    assert_eq!(segv.fault_address, Some(0x1234));
+    assert!(!segv.signal_is_approximate);
+
+    let bus = decode_exception(1, &[2, 0x5678]);
+    assert_eq!(bus.signal, "SIGBUS");
+    assert_eq!(bus.fault_address, Some(0x5678));
+
+    let crash = decode_exception(10, &[0xDEAD, 0xBEEF]);
+    assert_eq!(crash.code_name, None);
+    assert_eq!(crash.signal, "SIGABRT");
+    assert!(crash.signal_is_approximate);
+    assert_eq!(crash.fault_address, None);
+
+    let breakpoint = decode_exception(6, &[1, 2]);
+    assert_eq!(breakpoint.code_name, None);
+    assert_eq!(breakpoint.fault_address, None);
 }
 
 #[test]

@@ -129,8 +129,13 @@ present rather than patched afterward.
 
 For subscribed Mach crashes, `exception.raw_codes` preserves the complete MIG
 `mach_exception_data_t` array as hexadecimal bit patterns and therefore also
-preserves its original element count. `code` and `subcode` remain the
-human-readable first- and second-element projections used by existing tools.
+preserves its original element count. `type_code`, `code_value`, and `subcode`
+retain numeric values independently from the optional `code_name` display
+label. Only `EXC_BAD_ACCESS` treats the second code as `fault_address`, and its
+kernel return distinguishes `SIGSEGV` from `SIGBUS`. Other exception classes do
+not pretend that every code is a `kern_return_t` or every subcode is an address.
+The current `EXC_CRASH` signal mapping is explicitly marked approximate because
+the monitor does not yet authoritatively decode every kernel encoding.
 `exception.severity` is `fatal`. `EXC_BREAKPOINT` is subscribed as a fatal
 `crash` mapped to `SIGTRAP`, and `EXC_GUARD` as a fatal `crash` mapped to
 `SIGKILL`; both retain every raw code. `EXC_RESOURCE` is deliberately not
