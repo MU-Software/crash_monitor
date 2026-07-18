@@ -14,8 +14,9 @@ fn dialog_bin() -> std::path::PathBuf {
     DIALOG_BIN
         .get_or_init(|| {
             let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let workspace = manifest.join("../..");
             let target = std::env::var_os("CARGO_TARGET_DIR")
-                .map_or_else(|| manifest.join("target"), std::path::PathBuf::from);
+                .map_or_else(|| workspace.join("target"), std::path::PathBuf::from);
             let path = target.join("debug/crash_dialog_macos");
             if !path.exists() {
                 let status = Command::new(env!("CARGO"))
@@ -26,7 +27,7 @@ fn dialog_bin() -> std::path::PathBuf {
                         "--bin",
                         "crash_dialog_macos",
                     ])
-                    .current_dir(&manifest)
+                    .current_dir(&workspace)
                     .status()
                     .expect("start crash_dialog_macos build");
                 assert!(status.success(), "build crash_dialog_macos helper");
