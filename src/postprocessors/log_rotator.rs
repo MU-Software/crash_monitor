@@ -47,11 +47,17 @@ impl LogRotator {
         }
     }
 
-    fn log_path(&self) -> Result<PathBuf, String> {
+    fn log_path(&self, context: &PluginContext) -> Result<PathBuf, String> {
         if let Some(p) = &self.log_path_override {
             return Ok(p.clone());
         }
-        let dir = crate::utils::paths::data_dir().map_err(|e| format!("data_dir: {e}"))?;
+        let dir = context
+            .artifact_transaction()
+            .map(|transaction| transaction.report_context().output_root().to_path_buf())
+            .map_or_else(
+                || crate::utils::paths::data_dir().map_err(|e| format!("data_dir: {e}")),
+                Ok,
+            )?;
         Ok(dir.join("sessions.jsonl"))
     }
 }
@@ -83,7 +89,7 @@ impl PostProcessor for LogRotator {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        let log_path = self.log_path()?;
+        let log_path = self.log_path(context)?;
         let log_dir = log_path
             .parent()
             .ok_or_else(|| format!("sessions.jsonl has no parent: '{}'", log_path.display()))?;

@@ -1447,6 +1447,7 @@ pub fn default_macos_pipeline_from_config_with_runtime(
     use std::time::Duration;
 
     let cfg = validated.config();
+    let output_dir = cfg.report_dir.as_ref().map(PathBuf::from);
     let triggers = TriggerPolicy::from(validated.triggers);
     let collection_policy = validated.collection_policy();
 
@@ -1646,7 +1647,7 @@ pub fn default_macos_pipeline_from_config_with_runtime(
         pre_processors,
         post_processors,
         notifiers,
-        output_dir: None,
+        output_dir,
     };
     pipeline.validate_dependencies()?;
     Ok(pipeline)

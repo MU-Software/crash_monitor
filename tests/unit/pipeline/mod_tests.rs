@@ -2881,6 +2881,21 @@ fn test_macos_factory_preserves_validated_global_and_trigger_policy() {
 }
 
 #[test]
+fn test_macos_factory_injects_configured_report_root() {
+    let root = tempfile::tempdir().unwrap();
+    let configured = root.path().join("configured-reports");
+    let config = crate::config::CrashReporterConfig {
+        report_dir: Some(configured.to_string_lossy().into_owned()),
+        ..crate::config::CrashReporterConfig::default()
+    };
+    let validated = config.validate().unwrap();
+
+    let pipeline = default_macos_pipeline_from_config(None, &validated).unwrap();
+
+    assert_eq!(pipeline.output_dir.as_deref(), Some(configured.as_path()));
+}
+
+#[test]
 fn test_default_macos_pipeline_builds_and_validates() {
     // Exercises the full plugin-registration factory with private-by-default
     // config. Structured validation catches registration drift without a

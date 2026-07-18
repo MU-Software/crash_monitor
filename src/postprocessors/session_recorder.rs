@@ -147,7 +147,11 @@ fn record_crash(
     context: &PluginContext,
 ) -> Result<(), String> {
     context.checkpoint()?;
-    let dir = match session_data_dir() {
+    let dir = match context
+        .artifact_transaction()
+        .map(|transaction| transaction.report_context().output_root().to_path_buf())
+        .map_or_else(session_data_dir, Ok)
+    {
         Ok(d) => d,
         Err(e) => {
             eprintln!("[monitor] Failed to get data dir: {e}");

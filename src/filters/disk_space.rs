@@ -31,8 +31,10 @@ impl Plugin for DiskSpaceFilter {
 impl Filter for DiskSpaceFilter {
     fn should_process(&self, _event: &CrashEvent, context: &PluginContext) -> Result<bool, String> {
         context.checkpoint()?;
-        // Check pending dir first, fall back to root
-        let path = crate::utils::paths::pending_dir().unwrap_or_else(|_| "/".into());
+        let path = context.artifact_transaction().map_or_else(
+            || crate::utils::paths::pending_dir().unwrap_or_else(|_| "/".into()),
+            |transaction| transaction.report_context().output_root().to_path_buf(),
+        );
         let result = match statvfs(&*path) {
             Ok(stat) => {
                 let available = u64::from(stat.blocks_available()) * stat.fragment_size();

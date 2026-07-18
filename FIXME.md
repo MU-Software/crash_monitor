@@ -425,9 +425,9 @@
 
 ### P1-30. 하나의 resolved output root를 모든 component에 주입한다
 
-- [ ] `report_dir` 설정을 실제 저장 경로에 연결하거나 옵션을 제거한다.
-- [ ] pipeline override, disk-space filter, attachment collector, raw writer, move-to-sent, retention, session recorder가 같은 root를 사용한다.
-- [ ] 테스트 override와 production factory가 서로 다른 경로를 조용히 사용하지 않게 한다.
+- [x] `report_dir` 설정을 실제 저장 경로에 연결하거나 옵션을 제거한다.
+- [x] pipeline override, disk-space filter, attachment collector, raw writer, move-to-sent, retention, session recorder가 같은 root를 사용한다.
+- [x] 테스트 override와 production factory가 서로 다른 경로를 조용히 사용하지 않게 한다.
 
 범위: `src/config.rs`, pipeline factory, filters/collectors/postprocessors.
 
