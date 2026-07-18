@@ -151,31 +151,133 @@ where
     Ok(environment)
 }
 
-/// Check whether a binary at `path` has the `com.apple.security.cs.debugger` entitlement.
-/// Returns `Ok(())` if entitled, `Err(message)` otherwise.
-fn check_debugger_entitlement(path: &std::path::Path) -> Result<(), String> {
+const DEBUGGER_ENTITLEMENT: &str = "com.apple.security.cs.debugger";
+
+#[derive(Debug, PartialEq, Eq)]
+enum EntitlementCheckError {
+    CurrentExecutableUnavailable(String),
+    CodesignUnavailable(String),
+    UnsignedBinary,
+    MalformedSignature(String),
+    EntitlementExtractionFailed(String),
+    MalformedEntitlementPlist(String),
+    MissingDebuggerEntitlement,
+    DebuggerEntitlementFalse,
+    DebuggerEntitlementNotBoolean,
+}
+
+impl std::fmt::Display for EntitlementCheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CurrentExecutableUnavailable(error) => {
+                write!(f, "cannot determine own executable path: {error}")
+            }
+            Self::CodesignUnavailable(error) => write!(f, "failed to run codesign: {error}"),
+            Self::UnsignedBinary => f.write_str("binary is unsigned"),
+            Self::MalformedSignature(error) => {
+                write!(f, "binary has an invalid or malformed signature: {error}")
+            }
+            Self::EntitlementExtractionFailed(error) => {
+                write!(f, "cannot extract signed entitlements: {error}")
+            }
+            Self::MalformedEntitlementPlist(error) => {
+                write!(f, "signed entitlement plist is malformed: {error}")
+            }
+            Self::MissingDebuggerEntitlement => {
+                write!(
+                    f,
+                    "signed entitlements do not contain {DEBUGGER_ENTITLEMENT}"
+                )
+            }
+            Self::DebuggerEntitlementFalse => {
+                write!(f, "signed entitlement {DEBUGGER_ENTITLEMENT} is false")
+            }
+            Self::DebuggerEntitlementNotBoolean => write!(
+                f,
+                "signed entitlement {DEBUGGER_ENTITLEMENT} is not a boolean"
+            ),
+        }
+    }
+}
+
+fn codesign_error_text(output: &[u8]) -> String {
+    let message = String::from_utf8_lossy(output).trim().to_string();
+    if message.is_empty() {
+        "codesign returned a failure status without diagnostics".to_string()
+    } else {
+        message
+    }
+}
+
+fn classify_signature_failure(stderr: &[u8]) -> EntitlementCheckError {
+    let message = codesign_error_text(stderr);
+    if message
+        .to_ascii_lowercase()
+        .contains("code object is not signed at all")
+    {
+        EntitlementCheckError::UnsignedBinary
+    } else {
+        EntitlementCheckError::MalformedSignature(message)
+    }
+}
+
+fn parse_debugger_entitlement(plist_bytes: &[u8]) -> Result<(), EntitlementCheckError> {
+    // `codesign` emits no plist bytes for a validly signed binary that has no
+    // entitlement blob at all. That is a missing key, not malformed data.
+    if plist_bytes.iter().all(u8::is_ascii_whitespace) {
+        return Err(EntitlementCheckError::MissingDebuggerEntitlement);
+    }
+    let value = plist::Value::from_reader(std::io::Cursor::new(plist_bytes))
+        .map_err(|error| EntitlementCheckError::MalformedEntitlementPlist(error.to_string()))?;
+    let dictionary = value.as_dictionary().ok_or_else(|| {
+        EntitlementCheckError::MalformedEntitlementPlist(
+            "top-level plist value is not a dictionary".to_string(),
+        )
+    })?;
+
+    match dictionary.get(DEBUGGER_ENTITLEMENT) {
+        Some(plist::Value::Boolean(true)) => Ok(()),
+        Some(plist::Value::Boolean(false)) => Err(EntitlementCheckError::DebuggerEntitlementFalse),
+        Some(_) => Err(EntitlementCheckError::DebuggerEntitlementNotBoolean),
+        None => Err(EntitlementCheckError::MissingDebuggerEntitlement),
+    }
+}
+
+/// Check whether a binary has a valid signature whose signed entitlement plist
+/// grants the debugger entitlement with an actual boolean `true` value.
+fn check_debugger_entitlement(path: &std::path::Path) -> Result<(), EntitlementCheckError> {
+    // Strict verification distinguishes an unsigned code object from a signed
+    // object whose signature or sealed resources are malformed before trusting
+    // the entitlement payload printed by the platform codesign tool.
+    let verification = std::process::Command::new("codesign")
+        .args(["--verify", "--strict"])
+        .arg(path)
+        .output()
+        .map_err(|error| EntitlementCheckError::CodesignUnavailable(error.to_string()))?;
+    if !verification.status.success() {
+        return Err(classify_signature_failure(&verification.stderr));
+    }
+
     let output = std::process::Command::new("codesign")
         .args(["-d", "--entitlements", "-", "--xml"])
         .arg(path)
         .output()
-        .map_err(|e| format!("failed to run codesign: {e}"))?;
+        .map_err(|error| EntitlementCheckError::CodesignUnavailable(error.to_string()))?;
 
     if !output.status.success() {
-        return Err("binary is not codesigned".to_string());
+        return Err(EntitlementCheckError::EntitlementExtractionFailed(
+            codesign_error_text(&output.stderr),
+        ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.contains("com.apple.security.cs.debugger") {
-        Ok(())
-    } else {
-        Err("binary is codesigned but lacks com.apple.security.cs.debugger entitlement".to_string())
-    }
+    parse_debugger_entitlement(&output.stdout)
 }
 
 /// Verify that this monitor binary has the debugger entitlement required for `task_for_pid()`.
 /// Returns `Ok(())` on success, `Err(message)` if the check fails.
-fn verify_self_entitlement() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot determine own path: {e}"))?;
+fn verify_self_entitlement() -> Result<(), EntitlementCheckError> {
+    let exe = std::env::current_exe()
+        .map_err(|error| EntitlementCheckError::CurrentExecutableUnavailable(error.to_string()))?;
     check_debugger_entitlement(&exe)
 }
 
@@ -747,6 +849,67 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     const TEST_REAP_DEADLINE: Duration = Duration::from_millis(10);
+
+    fn entitlement_plist(value: &str) -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>{DEBUGGER_ENTITLEMENT}</key>{value}</dict></plist>"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn debugger_entitlement_requires_boolean_true() {
+        assert_eq!(
+            parse_debugger_entitlement(&entitlement_plist("<true/>")),
+            Ok(())
+        );
+        assert_eq!(
+            parse_debugger_entitlement(&entitlement_plist("<false/>")),
+            Err(EntitlementCheckError::DebuggerEntitlementFalse)
+        );
+        assert_eq!(
+            parse_debugger_entitlement(&entitlement_plist("<string>true</string>")),
+            Err(EntitlementCheckError::DebuggerEntitlementNotBoolean)
+        );
+    }
+
+    #[test]
+    fn debugger_entitlement_distinguishes_missing_and_malformed_plists() {
+        assert_eq!(
+            parse_debugger_entitlement(b""),
+            Err(EntitlementCheckError::MissingDebuggerEntitlement)
+        );
+        let missing = br#"<?xml version="1.0"?><plist version="1.0"><dict/></plist>"#;
+        assert_eq!(
+            parse_debugger_entitlement(missing),
+            Err(EntitlementCheckError::MissingDebuggerEntitlement)
+        );
+        assert!(matches!(
+            parse_debugger_entitlement(b"not a plist"),
+            Err(EntitlementCheckError::MalformedEntitlementPlist(_))
+        ));
+        let array = br#"<?xml version="1.0"?><plist version="1.0"><array/></plist>"#;
+        assert!(matches!(
+            parse_debugger_entitlement(array),
+            Err(EntitlementCheckError::MalformedEntitlementPlist(_))
+        ));
+    }
+
+    #[test]
+    fn signature_failures_distinguish_unsigned_from_malformed() {
+        assert_eq!(
+            classify_signature_failure(b"bundle: code object is not signed at all"),
+            EntitlementCheckError::UnsignedBinary
+        );
+        assert_eq!(
+            classify_signature_failure(b"bundle: invalid signature (code or signature modified)"),
+            EntitlementCheckError::MalformedSignature(
+                "bundle: invalid signature (code or signature modified)".to_string()
+            )
+        );
+    }
 
     fn exited_reason() -> pipeline::TerminationReason {
         pipeline::TerminationReason::Exited {

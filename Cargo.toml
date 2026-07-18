@@ -43,6 +43,7 @@ uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 png = "0.17"
+plist = "1"
 sha2 = "0.10"
 addr2line = { version = "0.24", default-features = false, features = ["std", "loader"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -233,9 +233,9 @@
 
 ### P1-09. entitlement 검사를 실제 값으로 수행한다
 
-- [ ] 파일 문자열 `contains` 검사를 제거하고 signed entitlement plist의 boolean `true`를 파싱한다.
-- [ ] 가능하면 Security.framework 기반 검증을 사용한다.
-- [ ] key 없음, `false`, malformed signature, unsigned binary를 구분해 안내한다.
+- [x] 파일 문자열 `contains` 검사를 제거하고 signed entitlement plist의 boolean `true`를 파싱한다.
+- [x] 가능하면 Security.framework 기반 검증을 사용한다.
+- [x] key 없음, `false`, malformed signature, unsigned binary를 구분해 안내한다.
 
 범위: `src/main.rs`, signing checks.
 

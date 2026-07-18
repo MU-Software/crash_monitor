@@ -19,9 +19,12 @@ configuration knobs.
 The monitor calls `task_for_pid()` on the child, which requires the
 `com.apple.security.cs.debugger` entitlement. `make build` codesigns the binary
 with [`crash_monitor.entitlements`](../crash_monitor.entitlements). Override the
-signer with `make build SIGN_IDENTITY="Developer ID Application: …"`. Without a
-valid signature the monitor detects the missing entitlement at startup and exits
-with a clear message rather than hanging.
+signer with `make build SIGN_IDENTITY="Developer ID Application: …"`. At startup
+the monitor first runs the platform's strict code-signature verification, then
+parses the signed entitlement plist and accepts only a boolean `true`. Unsigned
+code, an invalid/malformed signature, a malformed plist, a missing key, boolean
+`false`, and a non-boolean value produce distinct diagnostics before any child
+is launched.
 
 ## Producer contract (the child)
 
