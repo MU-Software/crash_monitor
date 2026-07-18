@@ -7,7 +7,7 @@ pub const EXIT_SUBMITTED: u8 = 0;
 pub const EXIT_SKIPPED: u8 = 1;
 pub const EXIT_ERROR: u8 = 2;
 
-/// Arguments accepted by both the AppKit helper and its headless test double.
+/// Arguments accepted by both the `AppKit` helper and its headless test double.
 #[derive(Debug, Clone, Parser, PartialEq, Eq)]
 pub struct DialogArgs {
     /// Report type, for example `crash`, `snapshot`, or `anr`.
@@ -49,6 +49,7 @@ impl DialogOutcome {
     }
 
     /// Emit the stable helper protocol and return its documented exit status.
+    #[must_use]
     pub fn emit(self) -> ExitCode {
         match self {
             Self::Submitted(text) => {

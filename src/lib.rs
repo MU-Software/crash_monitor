@@ -1,4 +1,4 @@
-//! `crash_monitor` library crate — exposes public modules for integration tests.
+//! macOS capture engine used by the thin `crash_monitor` binary.
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("crash_monitor requires macOS (Mach kernel APIs)");
@@ -17,12 +17,30 @@ mod collectors;
 pub mod config;
 pub mod event_loop;
 pub mod event_source;
-pub mod filters;
-pub mod notifiers;
+mod filters;
+mod notifiers;
 pub mod pipeline;
 pub mod platform;
-pub mod postprocessors;
+mod postprocessors;
 mod preprocessors;
 pub mod shm;
 mod utils;
 mod watchdog;
+
+pub use collectors::ChildEnvironmentSnapshot;
+
+/// Feature-gated fixtures for external integration tests.
+///
+/// These APIs are not a supported capture surface and are absent from normal
+/// production builds.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    pub use crate::platform::mock::MockPlatform;
+    pub use crate::postprocessors::{FeedbackPostProcessor, ZIPArchiver};
+
+    pub mod capture {
+        pub use crate::platform::macos::ffi::capture_spawn::spawn_capture_helper;
+        pub use crate::platform::macos::ffi::types::OwnedThreadPort;
+    }
+}

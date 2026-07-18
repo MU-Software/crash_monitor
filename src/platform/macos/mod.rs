@@ -15,7 +15,7 @@
 
 mod child_output;
 mod exceptions;
-pub mod ffi;
+pub(crate) mod ffi;
 mod memory;
 mod thread;
 pub mod types;
@@ -35,12 +35,28 @@ pub use memory::VmRegionEnumerationQuality;
 pub(crate) use memory::{MAX_VM_REGIONS, VmEnumAction, VmEnumerationState};
 #[allow(unused_imports)]
 pub(crate) use thread::extract_thread_name;
-pub use types::*;
+pub use types::{
+    ARM_THREAD_STATE64, ARM_THREAD_STATE64_COUNT, ARM64_GPR_NAMES, CRASH_EXCEPTION_MASK,
+    DecodedException, EXCEPTION_STATE_IDENTITY, ExceptionInfo, ExceptionListenerEvent,
+    ExceptionPolicy, ExceptionReportKind, ExceptionSeverity, MACH_EXCEPTION_CODES_FLAG, MachError,
+    TaskVmSummary, VmRegionInfo, decode_exception, exception_policy, exception_to_signal,
+    exception_type_name, kern_return_name,
+};
 
-// Re-export FFI functions so callers' paths don't change
-pub use ffi::exceptions::*;
-pub use ffi::memory::*;
-pub use ffi::spawn::*;
-pub use ffi::task::*;
-pub use ffi::thread::*;
-pub use ffi::types::*;
+// Deliberately curated boundary over the private FFI modules.
+pub use ffi::exceptions::{
+    ReceivedMachMessage, create_exception_port, send_deferred_reply, start_listener,
+};
+pub use ffi::memory::{
+    enumerate_vm_regions, get_task_info_words, get_task_vm_info, vm_read, vm_region_query,
+};
+pub use ffi::spawn::{
+    ParentDeathGuard, SpawnError, SpawnStage, allocate_receive_port, insert_send_right,
+    spawn_with_exception_port, spawn_with_exception_port_and_output,
+};
+pub use ffi::task::{
+    deallocate_task_port, deallocate_thread_port, get_task_for_pid, get_task_threads, resume_task,
+    retain_task_port, suspend_task, terminate_task,
+};
+pub use ffi::thread::{get_thread_identifier, get_thread_name, get_thread_state};
+pub use ffi::types::{OwnedExceptionPort, OwnedTaskPort};

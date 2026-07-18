@@ -1,0 +1,21 @@
+[package]
+name = "crash-monitor-cli"
+version.workspace = true
+edition.workspace = true
+description = "Platform-neutral command-line crash report inspection"
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+clap.workspace = true
+crash-report-core = { path = "../crash-report-core" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "crash-report"
+path = "src/main.rs"

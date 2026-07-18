@@ -22,12 +22,12 @@ use crash_monitor::pipeline::{
     TriggerPolicy,
 };
 use crash_monitor::platform::ReceivedMachMessage;
-use crash_monitor::platform::mock::MockPlatform;
 use crash_monitor::platform::{PlatformOps, RESUME_ATTEMPT_LIMIT};
-use crash_monitor::postprocessors::ZIPArchiver;
 use crash_monitor::shm::{
     CONTEXT_OFFSET, SECTION1_OFFSET, SHM_PRODUCER_READY, SharedMemory, ShmHeader, SutCrashContext,
 };
+use crash_monitor::test_support::MockPlatform;
+use crash_monitor::test_support::ZIPArchiver;
 
 type ReleaseGate = Arc<(Mutex<bool>, Condvar)>;
 

@@ -1,6 +1,6 @@
 //! macOS native feedback dialog for crash/snapshot/ANR reports.
 //!
-//! Launched by `crash_monitor` as a separate process. Displays an NSAlert with
+//! Launched by `crash_monitor` as a separate process. Displays an `NSAlert` with
 //! a text field for the tester to describe what they were doing. The feedback
 //! text is written to **stdout** (nothing else). All logs go to stderr.
 //!

@@ -5,7 +5,7 @@ pub mod macos;
 pub use macos::*;
 
 #[cfg(any(test, feature = "test-support"))]
-pub mod mock;
+pub(crate) mod mock;
 
 mod task_control;
 

@@ -298,31 +298,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crash_dialog_contract"
-version = "0.1.0"
-dependencies = [
- "clap",
-]
-
-[[package]]
-name = "crash_dialog_macos"
-version = "0.1.0"
-dependencies = [
- "crash_dialog_contract",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
-]
-
-[[package]]
-name = "crash_dialog_mock"
-version = "0.1.0"
-dependencies = [
- "crash_dialog_contract",
-]
-
-[[package]]
-name = "crash_monitor"
+name = "crash-capture-macos"
 version = "0.1.0"
 dependencies = [
  "addr2line",
@@ -331,7 +307,7 @@ dependencies = [
  "bindgen",
  "chrono",
  "clap",
- "crash_monitor",
+ "crash-capture-macos",
  "filetime",
  "mach2",
  "nix",
@@ -343,6 +319,53 @@ dependencies = [
  "tempfile",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "crash-monitor-cli"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "clap",
+ "crash-report-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "crash-report-core"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
+name = "crash_dialog_contract"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
+name = "crash_dialog_macos"
+version = "0.1.0"
+dependencies = [
+ "crash-capture-macos",
+ "crash_dialog_contract",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "crash_dialog_mock"
+version = "0.1.0"
+dependencies = [
+ "crash_dialog_contract",
 ]
 
 [[package]]

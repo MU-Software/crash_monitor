@@ -9,15 +9,7 @@ use std::process::Command;
 
 /// Path to the built binary (debug profile, same workspace target dir).
 fn dialog_bin() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("crash_dialog_macos");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_crash_dialog_macos"))
 }
 
 fn base_cmd() -> Command {
@@ -163,7 +155,7 @@ fn test_feedback_post_processor_with_real_binary() {
     )
     .unwrap();
 
-    let pp = crash_monitor::postprocessors::FeedbackPostProcessor::for_test(wrapper_path);
+    let pp = crash_monitor::test_support::FeedbackPostProcessor::for_test(wrapper_path);
     let event = CrashEvent {
         report_id: crash_monitor::pipeline::ReportId::default(),
         report_type: ReportType::Crash,
