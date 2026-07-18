@@ -225,22 +225,37 @@ pub(crate) fn create_private_file(path: &Path) -> Result<File, String> {
 /// directory descriptors. Every ancestor and the final component use
 /// `O_NOFOLLOW`.
 pub(crate) fn open_private_file(path: &Path) -> Result<File, String> {
+    open_private_file_optional(path)?.ok_or_else(|| {
+        format!(
+            "cannot safely open private file '{}': not found",
+            path.display()
+        )
+    })
+}
+
+/// Open a private regular file while preserving the distinction between a
+/// missing final component and an unsafe path. Parent traversal and an
+/// existing file are validated exactly like [`open_private_file`].
+pub(crate) fn open_private_file_optional(path: &Path) -> Result<Option<File>, String> {
     let (parent, component, _) = secure_parent(path)?;
-    let descriptor = openat(
+    let descriptor = match openat(
         &parent,
         component.as_os_str(),
         OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
         Mode::empty(),
-    )
-    .map_err(|error| {
-        format!(
-            "cannot safely open private file '{}': {error}",
-            path.display()
-        )
-    })?;
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot safely open private file '{}': {error}",
+                path.display()
+            ));
+        }
+    };
     let file = File::from(descriptor);
-    validate_private_handle(&file, path, PrivateNodeKind::File, true)?;
-    Ok(file)
+    validate_private_file(&file, path)?;
+    Ok(Some(file))
 }
 
 /// Atomically publish a new private file or directory without replacing an

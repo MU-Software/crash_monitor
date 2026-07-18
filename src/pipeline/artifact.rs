@@ -8,9 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -21,7 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::utils::paths::{
     create_private_directory, create_private_file, ensure_private_directory,
-    open_private_directory, open_private_file, publish_private_path, validate_private_file,
+    open_private_directory, open_private_file, open_private_file_optional, publish_private_path,
 };
 
 use super::{CrashEvent, ReportType};
@@ -491,13 +490,14 @@ impl ArtifactTransaction {
         after_manifest_sync: impl FnOnce() -> Result<(), String>,
         after_directory_publish: impl FnOnce(),
     ) -> Result<CommittedReport, String> {
-        self.commit_with_all_hooks(|| {}, after_manifest_sync, after_directory_publish)
+        self.commit_with_all_hooks(|| {}, after_manifest_sync, || {}, after_directory_publish)
     }
 
     fn commit_with_all_hooks(
         &self,
         after_begin_commit: impl FnOnce(),
         after_manifest_sync: impl FnOnce() -> Result<(), String>,
+        before_directory_publish: impl FnOnce(),
         after_directory_publish: impl FnOnce(),
     ) -> Result<CommittedReport, String> {
         let (registered, destination_root) = self.begin_commit()?;
@@ -549,6 +549,7 @@ impl ArtifactTransaction {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("cannot inspect report destination: {error}")),
         }
+        before_directory_publish();
         publish_private_path(self.staging_dir(), &report_dir).map_err(|error| {
             format!(
                 "cannot publish report directory '{}' as '{}': {error}",
@@ -774,6 +775,16 @@ fn recover_prepared_entry(
     deadline: Instant,
     limits: RecoveryLimits,
 ) -> Result<bool, String> {
+    recover_prepared_entry_with_hook(output_root, entry, deadline, limits, |_| {})
+}
+
+fn recover_prepared_entry_with_hook(
+    output_root: &Path,
+    entry: &fs::DirEntry,
+    deadline: Instant,
+    limits: RecoveryLimits,
+    before_directory_publish: impl FnOnce(&Path),
+) -> Result<bool, String> {
     if Instant::now() >= deadline {
         return Ok(false);
     }
@@ -833,6 +844,7 @@ fn recover_prepared_entry(
         Err(error) => return Err(format!("cannot inspect report destination: {error}")),
     }
     ensure_before_deadline(Some(deadline))?;
+    before_directory_publish(&destination);
     publish_private_path(&entry.path(), &destination).map_err(|error| {
         format!(
             "cannot publish prepared directory as '{}': {error}",
@@ -1020,22 +1032,14 @@ fn validate_exact_directory_bounded(
             .into_string()
             .map_err(|_| "report directory contains a non-UTF-8 name".to_string())?;
         if manifest_expected && name == MANIFEST_FILE_NAME {
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("cannot inspect report manifest: {error}"))?;
-            if !file_type.is_file() {
-                return Err("prepared manifest is not a regular file".to_string());
-            }
+            open_private_file(&entry.path())
+                .map_err(|error| format!("cannot safely inspect report manifest: {error}"))?;
             saw_manifest = true;
             continue;
         }
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("cannot inspect report artifact {name:?}: {error}"))?;
-        if !file_type.is_file() {
-            return Err(format!("unexpected non-file report entry: {name:?}"));
-        }
-        let metadata = entry
+        let file = open_private_file(&entry.path())
+            .map_err(|error| format!("cannot safely inspect report artifact {name:?}: {error}"))?;
+        let metadata = file
             .metadata()
             .map_err(|error| format!("cannot inspect report artifact {name:?}: {error}"))?;
         actual.insert(name, metadata.len());
@@ -1089,18 +1093,11 @@ enum ManifestReadError {
 }
 
 fn read_manifest_file(path: &Path) -> Result<Vec<u8>, ManifestReadError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
-        .open(path)
+    let file = open_private_file_optional(path)
         .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ManifestReadError::NotFound
-            } else {
-                ManifestReadError::Unsafe(format!("manifest cannot be opened safely: {error}"))
-            }
-        })?;
-    validate_private_file(&file, path).map_err(ManifestReadError::Unsafe)?;
+            ManifestReadError::Unsafe(format!("manifest cannot be opened safely: {error}"))
+        })?
+        .ok_or(ManifestReadError::NotFound)?;
     let metadata = file
         .metadata()
         .map_err(|error| ManifestReadError::Unsafe(format!("cannot inspect manifest: {error}")))?;
@@ -1284,6 +1281,7 @@ mod tests {
     #[test]
     fn load_manifest_rejects_symlinks_and_oversized_files() {
         let root = tempfile::tempdir().unwrap();
+        ensure_private_directory(root.path()).unwrap();
         let target = root.path().join("target.json");
         std::fs::write(&target, b"{}").unwrap();
         let symlink = root.path().join("manifest-symlink.json");
@@ -1330,6 +1328,51 @@ mod tests {
         assert!(report_dir.join(MANIFEST_FILE_NAME).exists());
         assert!(report_dir.join("report.json").exists());
         assert_eq!(recover_prepared_reports(&pending).unwrap(), 0);
+    }
+
+    #[test]
+    fn recovery_publish_race_never_replaces_a_competing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = root.path().join("pending");
+        let sent = root.path().join("sent");
+        std::fs::create_dir(&pending).unwrap();
+        let event = event();
+        let report_id = event.report_id.clone();
+        let transaction = ArtifactTransaction::begin(ReportContext::new(&event, &pending)).unwrap();
+        transaction.set_destination_root(&sent).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        transaction
+            .commit_with_hook(|| Err("pause after prepare".into()))
+            .unwrap_err();
+        let staging = transaction.staging_dir().to_path_buf();
+        drop(transaction);
+
+        let entry = std::fs::read_dir(&pending)
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.path() == staging)
+            .unwrap();
+        let error = recover_prepared_entry_with_hook(
+            &pending,
+            &entry,
+            Instant::now() + Duration::from_secs(1),
+            RecoveryLimits::default(),
+            |destination| {
+                std::fs::create_dir(destination).unwrap();
+                std::fs::write(destination.join("sentinel"), b"preserve").unwrap();
+            },
+        )
+        .unwrap_err();
+
+        let destination = sent.join(report_id.as_str());
+        assert!(error.contains("exclusively publish"), "{error}");
+        assert_eq!(
+            std::fs::read(destination.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        assert!(staging.join(MANIFEST_FILE_NAME).is_file());
     }
 
     #[test]
@@ -1687,6 +1730,7 @@ mod tests {
                 },
                 || Ok(()),
                 || {},
+                || {},
             )
         });
         entered_rx
@@ -1724,6 +1768,37 @@ mod tests {
             std::fs::read(existing.join("sentinel")).unwrap(),
             b"preserve"
         );
+    }
+
+    #[test]
+    fn commit_publish_race_never_replaces_a_competing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let transaction =
+            ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+        transaction
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let destination = root.path().join(event.report_id.as_str());
+
+        let error = transaction
+            .commit_with_all_hooks(
+                || {},
+                || Ok(()),
+                || {
+                    std::fs::create_dir(&destination).unwrap();
+                    std::fs::write(destination.join("sentinel"), b"preserve").unwrap();
+                },
+                || {},
+            )
+            .unwrap_err();
+
+        assert!(error.contains("exclusively publish"), "{error}");
+        assert_eq!(
+            std::fs::read(destination.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        assert!(transaction.staging_dir().join(MANIFEST_FILE_NAME).is_file());
     }
 
     #[test]
