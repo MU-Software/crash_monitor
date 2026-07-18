@@ -140,7 +140,8 @@ paths outside it.
 Top-level `"enabled": false` is a report-generation kill switch: child
 supervision and Mach replies continue, but capture, plugins, and artifact
 writes do not run. Per-trigger controls live under `triggers`; see
-[pipeline.md](pipeline.md#configuration) for their precedence and exact
-semantics. A missing file selects the minimal privacy profile. An existing
+[configuration.md](configuration.md) for the complete JSON document, defaults,
+ranges, override precedence, and exact trigger semantics. A missing file selects
+the minimal privacy profile. An existing
 unreadable, malformed, non-regular, or symlinked file fails startup before the
 child is spawned.

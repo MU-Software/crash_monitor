@@ -79,4 +79,5 @@ make coverage    # HTML coverage report
 - [docs/pipeline.md](docs/pipeline.md) — plugin pipeline and stability invariants
 - [docs/reports.md](docs/reports.md) — report JSON format and CLI analysis tools
 - [docs/integration.md](docs/integration.md) — integrating a host application as the child
+- [docs/configuration.md](docs/configuration.md) — complete JSON defaults, ranges, and plugin policy
 - [docs/privacy.md](docs/privacy.md) — consent gates, retention, and encryption limitations

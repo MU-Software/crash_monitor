@@ -998,10 +998,10 @@
 
 ### P2-40. config reference를 실행 가능한 수준으로 완성한다
 
-- [ ] 실제 JSON example과 모든 default를 제공한다.
-- [ ] value range, 0/sentinel 의미, plugin dependency, trigger별 enabled semantics를 적는다.
-- [ ] global disable과 emergency evidence 정책을 명확히 구분한다.
-- [ ] OOM/ANR opt-in, environment override 우선순위, invalid config 처리 방식을 설명한다.
+- [x] 실제 JSON example과 모든 default를 제공한다.
+- [x] value range, 0/sentinel 의미, plugin dependency, trigger별 enabled semantics를 적는다.
+- [x] global disable과 emergency evidence 정책을 명확히 구분한다.
+- [x] OOM/ANR opt-in, environment override 우선순위, invalid config 처리 방식을 설명한다.
 
 범위: README/config documentation.
 
