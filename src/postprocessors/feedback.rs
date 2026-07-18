@@ -151,12 +151,8 @@ impl Plugin for FeedbackPostProcessor {
         self.available
     }
 
-    fn timeout_secs(&self) -> u32 {
-        let rounded = self
-            .timeout
-            .as_secs()
-            .saturating_add(u64::from(self.timeout.subsec_nanos() != 0));
-        u32::try_from(rounded).unwrap_or(u32::MAX - 1)
+    fn timeout(&self) -> crate::pipeline::PluginTimeout {
+        crate::pipeline::PluginTimeout::Override(self.timeout)
     }
 }
 

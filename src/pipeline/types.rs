@@ -166,6 +166,29 @@ pub enum Priority {
     Low,
 }
 
+/// Explicit timeout policy for a plugin invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginTimeout {
+    /// Inherit the bounded timeout configured for the plugin category.
+    CategoryDefault,
+    /// Run without a deadline. This is intentionally distinct from a zero
+    /// duration, which would expire immediately.
+    Disabled,
+    /// Use this plugin-specific deadline.
+    Override(Duration),
+}
+
+impl PluginTimeout {
+    #[must_use]
+    pub fn resolve(self, category_default: Duration) -> Option<Duration> {
+        match self {
+            Self::CategoryDefault => Some(category_default),
+            Self::Disabled => None,
+            Self::Override(timeout) => Some(timeout),
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════
 //  Diagnostics
 // ═══════════════════════════════════════════════════

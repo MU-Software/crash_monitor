@@ -4,7 +4,7 @@ use mach2::port::mach_port_t;
 use std::path::Path;
 
 use super::safety::PluginContext;
-use super::types::{CollectedData, CrashEvent, Priority, ReportResult};
+use super::types::{CollectedData, CrashEvent, PluginTimeout, Priority, ReportResult};
 
 /// Capability boundary used by live-task capture isolation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,6 @@ pub enum PostProcessorPhase {
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &'static str;
     fn execution(&self) -> PluginExecution;
-    #[allow(dead_code)] // Phase 4+: used for plugin ordering
     fn priority(&self) -> Priority;
     /// Required data dependencies within the same category.
     ///
@@ -73,10 +72,9 @@ pub trait Plugin: Send + Sync {
     fn is_available(&self) -> bool {
         true
     }
-    /// Per-plugin timeout override (seconds).
-    /// `u32::MAX` = use category default, `0` = no timeout.
-    fn timeout_secs(&self) -> u32 {
-        u32::MAX
+    /// Per-plugin deadline policy.
+    fn timeout(&self) -> PluginTimeout {
+        PluginTimeout::CategoryDefault
     }
 }
 

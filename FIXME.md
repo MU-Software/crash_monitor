@@ -472,11 +472,11 @@
 
 ### P1-35. plugin framework의 죽은·모호한 API를 정리한다
 
-- [ ] `priority()`를 실제 안정 정렬에 사용하거나 API에서 제거한다.
-- [ ] timeout 없음은 `u32::MAX` sentinel 대신 `Option<Duration>` 또는 typed enum으로 표현한다.
-- [ ] plugin 이름/ID의 전역 유일성을 builder에서 강제한다.
-- [ ] soft order validator는 실제 warning을 내거나 `Result` 기반 hard validation으로 바꾼다.
-- [ ] `ReportResult` 이중 binding 같은 불필요한 mutable shadowing을 제거한다.
+- [x] `priority()`를 실제 안정 정렬에 사용하거나 API에서 제거한다.
+- [x] timeout 없음은 `u32::MAX` sentinel 대신 `Option<Duration>` 또는 typed enum으로 표현한다.
+- [x] plugin 이름/ID의 전역 유일성을 builder에서 강제한다.
+- [x] soft order validator는 실제 warning을 내거나 `Result` 기반 hard validation으로 바꾼다.
+- [x] `ReportResult` 이중 binding 같은 불필요한 mutable shadowing을 제거한다.
 
 범위: `src/pipeline/traits.rs`, `src/pipeline/types.rs`, `src/pipeline/mod.rs`.
 

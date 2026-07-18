@@ -22,7 +22,7 @@ const CAPTURE_WIRE_VERSION: u32 = 1;
 const MAX_CAPTURE_WIRE_BYTES: u64 = 64 * 1024 * 1024;
 const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const HELPER_REAP_GRACE: Duration = Duration::from_secs(2);
-const DEFAULT_COLLECTOR_TIMEOUT_SECS: u32 = 5;
+const DEFAULT_COLLECTOR_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 type TestOutcomeProvider = Box<dyn FnOnce() -> IsolatedCaptureOutcome>;
@@ -43,7 +43,7 @@ enum TaskCollectorKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TaskCollectorSpec {
     kind: TaskCollectorKind,
-    timeout_secs: u32,
+    timeout: Option<Duration>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -120,11 +120,8 @@ impl TaskCaptureRequest {
                     ));
                 }
             };
-            let timeout_secs = match collector.timeout_secs() {
-                u32::MAX => DEFAULT_COLLECTOR_TIMEOUT_SECS,
-                timeout => timeout,
-            };
-            collectors.push(TaskCollectorSpec { kind, timeout_secs });
+            let timeout = collector.timeout().resolve(DEFAULT_COLLECTOR_TIMEOUT);
+            collectors.push(TaskCollectorSpec { kind, timeout });
         }
         if collectors.is_empty() {
             return Ok(None);
@@ -183,9 +180,7 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
                 Box::new(crate::collectors::DylibCollector::new(platform.clone()))
             }
         };
-        let timeout =
-            (spec.timeout_secs != 0).then(|| Duration::from_secs(spec.timeout_secs.into()));
-        let context = super::PluginContext::from_timeout(timeout);
+        let context = super::PluginContext::from_timeout(spec.timeout);
         let started = Instant::now();
         let outcome = super::run_plugin_cooperative(collector.name(), &context, |context| {
             collector.collect(&event, task.raw(), &mut data, context)

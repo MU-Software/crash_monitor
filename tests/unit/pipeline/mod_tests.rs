@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 // ═══════════════════════════════════════════════════
 //  Mock Collector
@@ -270,7 +271,9 @@ fn publish_shm_app_version(shm: &crate::shm::SharedMemory, value: &str) {
 
 #[test]
 fn subprocess_execution_requires_supervisor_boundary() {
-    let result = run_stage("BoundaryBypass", PluginExecution::Subprocess, 0, |_| Ok(()));
+    let result = run_stage("BoundaryBypass", PluginExecution::Subprocess, None, |_| {
+        Ok(())
+    });
 
     assert!(matches!(
         result,
@@ -280,10 +283,15 @@ fn subprocess_execution_requires_supervisor_boundary() {
 
 #[test]
 fn subprocess_execution_allows_explicit_noop() {
-    let result = run_stage("BoundaryNoop", PluginExecution::Subprocess, 0, |context| {
-        context.mark_subprocess_not_required();
-        Ok(())
-    });
+    let result = run_stage(
+        "BoundaryNoop",
+        PluginExecution::Subprocess,
+        None,
+        |context| {
+            context.mark_subprocess_not_required();
+            Ok(())
+        },
+    );
 
     assert!(matches!(result, PluginRunResult::Completed(())));
 }
@@ -293,7 +301,7 @@ fn subprocess_adapter_cancellation_maps_to_pipeline_timeout_status() {
     let result = run_stage(
         "CancelledSubprocessAdapter",
         PluginExecution::Subprocess,
-        0,
+        None,
         |context| {
             let cancellation = context.cancellation_token();
             let canceller = std::thread::spawn(move || {
@@ -1856,6 +1864,42 @@ fn dependency_behavior(
     }
 }
 
+struct PriorityCollector {
+    name: &'static str,
+    priority: Priority,
+    hard: &'static [&'static str],
+}
+
+impl Plugin for PriorityCollector {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn execution(&self) -> PluginExecution {
+        PluginExecution::Cooperative
+    }
+
+    fn priority(&self) -> Priority {
+        self.priority
+    }
+
+    fn hard_dependencies(&self) -> &'static [&'static str] {
+        self.hard
+    }
+}
+
+impl Collector for PriorityCollector {
+    fn collect(
+        &self,
+        _event: &CrashEvent,
+        _task: mach_port_t,
+        _data: &mut CollectedData,
+        _context: &PluginContext,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_full_pipeline(
     filters: Vec<Box<dyn Filter>>,
@@ -3166,13 +3210,72 @@ fn test_runtime_registry_rejects_duplicate_ids_across_categories() {
     );
 
     assert!(matches!(
-        pipeline.validate_dependencies(),
+        pipeline.finish_registration(),
         Err(crate::config::ConfigValidationError::DuplicatePluginId {
             ref plugin_id,
             first_category: PluginCategory::Filter,
             second_category: PluginCategory::Collector,
         }) if plugin_id == "GlobalDuplicate"
     ));
+}
+
+#[test]
+fn registration_stably_orders_priority_without_crossing_dependencies() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_full_pipeline(
+        vec![],
+        vec![
+            Box::new(PriorityCollector {
+                name: "medium-a",
+                priority: Priority::Medium,
+                hard: &[],
+            }),
+            Box::new(PriorityCollector {
+                name: "provider",
+                priority: Priority::Low,
+                hard: &[],
+            }),
+            Box::new(PriorityCollector {
+                name: "medium-b",
+                priority: Priority::Medium,
+                hard: &[],
+            }),
+            Box::new(PriorityCollector {
+                name: "dependent",
+                priority: Priority::Critical,
+                hard: &["provider"],
+            }),
+        ],
+        vec![],
+        vec![],
+        vec![],
+        tempdir.path(),
+    )
+    .finish_registration()
+    .unwrap();
+
+    let names = pipeline
+        .collectors
+        .iter()
+        .map(|plugin| plugin.name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["medium-a", "medium-b", "provider", "dependent"]);
+}
+
+#[test]
+fn plugin_timeout_policy_distinguishes_default_disabled_and_override() {
+    assert_eq!(
+        PluginTimeout::CategoryDefault.resolve(Duration::from_secs(5)),
+        Some(Duration::from_secs(5))
+    );
+    assert_eq!(
+        PluginTimeout::Disabled.resolve(Duration::from_secs(5)),
+        None
+    );
+    assert_eq!(
+        PluginTimeout::Override(Duration::from_millis(25)).resolve(Duration::from_secs(5)),
+        Some(Duration::from_millis(25))
+    );
 }
 
 struct CommitBreaker;

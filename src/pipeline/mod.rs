@@ -35,8 +35,8 @@ pub use traits::{
 };
 pub use types::{
     CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, DependencyKind,
-    Diagnostics, PluginCategory, PluginDiagnostic, PluginStatus, Priority, RawShmSnapshot,
-    ReportResult, ReportType, TerminationReason,
+    Diagnostics, PluginCategory, PluginDiagnostic, PluginStatus, PluginTimeout, Priority,
+    RawShmSnapshot, ReportResult, ReportType, TerminationReason,
 };
 
 /// Immutable per-trigger report policy installed in a [`Pipeline`].
@@ -124,22 +124,21 @@ pub struct Pipeline {
     pub output_dir: Option<PathBuf>,
 }
 
-// Category-specific cooperative deadlines (seconds).
-const FILTER_TIMEOUT: u32 = 1;
-const COLLECTOR_TIMEOUT: u32 = 5;
-const PREPROC_TIMEOUT: u32 = 2;
-const POSTPROC_TIMEOUT: u32 = 30;
-const NOTIFIER_TIMEOUT: u32 = 5;
-const STAGE_TIMEOUT: u32 = 5;
+// Category-specific cooperative deadlines.
+const FILTER_TIMEOUT: Duration = Duration::from_secs(1);
+const COLLECTOR_TIMEOUT: Duration = Duration::from_secs(5);
+const PREPROC_TIMEOUT: Duration = Duration::from_secs(2);
+const POSTPROC_TIMEOUT: Duration = Duration::from_secs(30);
+const NOTIFIER_TIMEOUT: Duration = Duration::from_secs(5);
+const STAGE_TIMEOUT: Option<Duration> = Some(Duration::from_secs(5));
 
 #[cfg(test)]
 fn run_stage<T>(
     name: &str,
     execution: PluginExecution,
-    timeout_secs: u32,
+    timeout: Option<Duration>,
     f: impl FnOnce(&PluginContext) -> Result<T, String>,
 ) -> PluginRunResult<T> {
-    let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
     let context = PluginContext::from_timeout(timeout);
     enforce_execution_boundary(
         name,
@@ -153,10 +152,9 @@ fn run_transaction_stage<T>(
     transaction: &Arc<ArtifactTransaction>,
     name: &str,
     execution: PluginExecution,
-    timeout_secs: u32,
+    timeout: Option<Duration>,
     f: impl FnOnce(&PluginContext) -> Result<T, String>,
 ) -> PluginRunResult<T> {
-    let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
     let context =
         PluginContext::from_timeout(timeout).with_artifact_transaction(transaction.clone());
     enforce_execution_boundary(
@@ -170,13 +168,12 @@ fn run_transaction_stage<T>(
 fn run_cancellable_stage<T>(
     name: &str,
     execution: PluginExecution,
-    timeout_secs: u32,
+    timeout: Option<Duration>,
     cancellation: CancellationToken,
     shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
     report_context: Arc<ReportContext>,
     f: impl FnOnce(&PluginContext) -> Result<T, String>,
 ) -> PluginRunResult<T> {
-    let timeout = (timeout_secs != 0).then(|| Duration::from_secs(u64::from(timeout_secs)));
     let context = PluginContext::from_timeout_and_cancellation(timeout, cancellation)
         .with_shm_snapshot(shm_snapshot)
         .with_report_context(report_context);
@@ -231,6 +228,27 @@ fn suspend_failure_policy(event: &CrashEvent) -> SuspendFailurePolicy {
 }
 
 impl Pipeline {
+    /// Finalize plugin registration by applying deterministic execution order
+    /// and rejecting an ambiguous runtime registry.
+    ///
+    /// Priority is used only among plugins whose registered dependencies have
+    /// already been scheduled. Equal-priority plugins retain insertion order.
+    ///
+    /// # Errors
+    /// Returns a structured validation error for duplicate IDs or an invalid
+    /// dependency graph.
+    pub fn finish_registration(mut self) -> Result<Self, crate::config::ConfigValidationError> {
+        stable_plugin_order(&mut self.filters, |_| 0);
+        stable_plugin_order(&mut self.collectors, |_| 0);
+        stable_plugin_order(&mut self.pre_processors, |_| 0);
+        stable_plugin_order(&mut self.post_processors, |plugin| {
+            post_processor_phase_rank(plugin.phase())
+        });
+        stable_plugin_order(&mut self.notifiers, |_| 0);
+        self.validate_dependencies()?;
+        Ok(self)
+    }
+
     fn resolved_output_root(&self) -> Result<PathBuf, String> {
         self.output_dir
             .clone()
@@ -487,7 +505,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(c.timeout_secs(), COLLECTOR_TIMEOUT);
+            let timeout = c.timeout().resolve(COLLECTOR_TIMEOUT);
             let cancellation = CancellationToken::from_atomic(cancelled.clone());
             let outcome = run_cancellable_stage(
                 c.name(),
@@ -640,7 +658,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
+            let timeout = filter.timeout().resolve(FILTER_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 filter.name(),
@@ -680,7 +698,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(pp.timeout_secs(), PREPROC_TIMEOUT);
+            let timeout = pp.timeout().resolve(PREPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 pp.name(),
@@ -704,7 +722,7 @@ impl Pipeline {
             .filter(|processor| processor.name() == "AttachmentCopier")
         {
             let start = Instant::now();
-            let timeout = plugin_timeout(pp.timeout_secs(), PREPROC_TIMEOUT);
+            let timeout = pp.timeout().resolve(PREPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 pp.name(),
@@ -729,7 +747,7 @@ impl Pipeline {
         )
         .into_option();
 
-        let result = ReportResult {
+        let mut result = ReportResult {
             artifact_paths: transaction.artifact_paths(),
             raw_path,
             json_path,
@@ -737,7 +755,6 @@ impl Pipeline {
         };
 
         // ── Post-processors ──
-        let mut result = result;
         for pp in &self.post_processors {
             if pp.phase() != PostProcessorPhase::BeforeCommit {
                 continue;
@@ -755,7 +772,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = pp.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 pp.name(),
@@ -809,7 +826,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = pp.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 pp.name(),
@@ -836,7 +853,7 @@ impl Pipeline {
                     continue;
                 }
                 let start = Instant::now();
-                let timeout = plugin_timeout(n.timeout_secs(), NOTIFIER_TIMEOUT);
+                let timeout = n.timeout().resolve(NOTIFIER_TIMEOUT);
                 let outcome = run_transaction_stage(
                     &transaction,
                     n.name(),
@@ -873,7 +890,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = pp.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 pp.name(),
@@ -901,7 +918,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(pp.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = pp.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 pp.name(),
@@ -978,7 +995,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(filter.timeout_secs(), FILTER_TIMEOUT);
+            let timeout = filter.timeout().resolve(FILTER_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 filter.name(),
@@ -1045,7 +1062,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = post_processor.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 post_processor.name(),
@@ -1101,7 +1118,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = post_processor.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 post_processor.name(),
@@ -1133,7 +1150,7 @@ impl Pipeline {
                     continue;
                 }
                 let start = Instant::now();
-                let timeout = plugin_timeout(notifier.timeout_secs(), NOTIFIER_TIMEOUT);
+                let timeout = notifier.timeout().resolve(NOTIFIER_TIMEOUT);
                 let outcome = run_transaction_stage(
                     &transaction,
                     notifier.name(),
@@ -1165,7 +1182,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = post_processor.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 post_processor.name(),
@@ -1199,7 +1216,7 @@ impl Pipeline {
                 continue;
             }
             let start = Instant::now();
-            let timeout = plugin_timeout(post_processor.timeout_secs(), POSTPROC_TIMEOUT);
+            let timeout = post_processor.timeout().resolve(POSTPROC_TIMEOUT);
             let outcome = run_transaction_stage(
                 &transaction,
                 post_processor.name(),
@@ -1330,12 +1347,45 @@ const fn post_processor_phase_rank(phase: PostProcessorPhase) -> u8 {
     }
 }
 
-/// Resolve per-plugin timeout: `u32::MAX` → category default, otherwise plugin override.
-fn plugin_timeout(plugin_override: u32, category_default: u32) -> u32 {
-    if plugin_override == u32::MAX {
-        category_default
-    } else {
-        plugin_override
+/// Stable dependency-aware priority order. A dependency always wins over the
+/// dependent's priority; otherwise lower enum values run first.
+fn stable_plugin_order<T: Plugin + ?Sized>(
+    plugins: &mut Vec<Box<T>>,
+    phase_rank: impl Fn(&T) -> u8,
+) {
+    let mut remaining: Vec<(usize, Box<T>)> =
+        std::mem::take(plugins).into_iter().enumerate().collect();
+
+    while !remaining.is_empty() {
+        let candidate = remaining
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, plugin))| {
+                plugin
+                    .hard_dependencies()
+                    .iter()
+                    .chain(plugin.order_after())
+                    .all(|dependency| {
+                        !remaining
+                            .iter()
+                            .any(|(_, pending)| pending.name() == *dependency)
+                    })
+            })
+            .min_by_key(|(_, (insertion_index, plugin))| {
+                (
+                    phase_rank(plugin.as_ref()),
+                    plugin.priority(),
+                    *insertion_index,
+                )
+            })
+            .map(|(index, _)| index);
+
+        let Some(candidate) = candidate else {
+            // Validation below reports cycles and duplicate IDs precisely.
+            plugins.extend(remaining.into_iter().map(|(_, plugin)| plugin));
+            break;
+        };
+        plugins.push(remaining.remove(candidate).1);
     }
 }
 
@@ -1685,7 +1735,7 @@ pub fn default_macos_pipeline_from_config_with_runtime(
         notifiers.push(Box::new(SystemNotification::new(true)));
     }
 
-    let pipeline = Pipeline {
+    Pipeline {
         enabled: true,
         triggers,
         collection_policy,
@@ -1697,9 +1747,8 @@ pub fn default_macos_pipeline_from_config_with_runtime(
         post_processors,
         notifiers,
         output_dir,
-    };
-    pipeline.validate_dependencies()?;
-    Ok(pipeline)
+    }
+    .finish_registration()
 }
 
 #[cfg(test)]
