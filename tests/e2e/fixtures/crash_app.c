@@ -57,6 +57,18 @@ static int sleep_ms(uint64_t duration_ms) {
     return 0;
 }
 
+static void publish_fixture_state(void) {
+    const char* path = getenv("CRASH_APP_STATE_FILE");
+    if (!path || path[0] == '\0') return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) _Exit(124);
+    const char* shm_name = getenv("CRASH_MONITOR_SHM");
+    if (!shm_name) shm_name = "";
+    if (dprintf(fd, "%ld\n%s\n", (long)getpid(), shm_name) < 0 || close(fd) != 0) {
+        _Exit(124);
+    }
+}
+
 /* Map the monitor-created region and populate a breadcrumb + context so the
  * report carries real producer-written data (exercising the C->Rust shm path).
  * Best-effort: on any failure we still run the scenario — the monitor catches
@@ -157,6 +169,7 @@ int main(int argc, char* argv[]) {
     if (strcmp(scenario, "uninstrumented") != 0) {
         populate_shm(scenario);
     }
+    publish_fixture_state();
 
     if (strcmp(scenario, "sigsegv") == 0) {
         volatile int* np = NULL;

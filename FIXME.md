@@ -815,10 +815,10 @@
 
 ### P2-19. ANR 테스트를 deadline polling과 명시적 cleanup으로 바꾼다
 
-- [ ] 고정 3초 sleep 대신 report/manifest 완성을 bounded deadline polling으로 기다린다.
-- [ ] monitor와 child PID/process group을 test teardown에서 직접 정리하고 잔존 process/SHM이 없는지 확인한다.
-- [ ] graceful SIGTERM cleanup 구현 전에는 monitor에 SIGTERM만 보내면 child도 정리된다고 가정하지 않는다.
-- [ ] fixture 자체 deadline을 두어 실패한 테스트도 무기한 orphan을 남기지 않게 한다.
+- [x] 고정 3초 sleep 대신 report/manifest 완성을 bounded deadline polling으로 기다린다.
+- [x] monitor와 child PID/process group을 test teardown에서 직접 정리하고 잔존 process/SHM이 없는지 확인한다.
+- [x] graceful SIGTERM cleanup 구현 전에는 monitor에 SIGTERM만 보내면 child도 정리된다고 가정하지 않는다.
+- [x] fixture 자체 deadline을 두어 실패한 테스트도 무기한 orphan을 남기지 않게 한다.
 
 범위: `tests/e2e/e2e_tests.rs`, fixture lifecycle.
 

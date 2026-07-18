@@ -15,13 +15,14 @@
 //! tests can run in parallel without interfering with each other.
 
 use crash_monitor::shm::{SHM_TOTAL_SIZE, SHM_VERSION, SharedMemory, ShmHeader};
+use nix::libc;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::mem::{offset_of, size_of};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -430,6 +431,89 @@ fn wait_for_report(dir: &Path, report_type: &str, deadline: Instant) -> Vec<Path
             dir.display()
         );
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+struct FixtureProcessGuard {
+    monitor: Child,
+    child_pid: nix::unistd::Pid,
+    shm_name: String,
+}
+
+impl FixtureProcessGuard {
+    fn terminate(&mut self) {
+        let monitor_pid =
+            nix::unistd::Pid::from_raw(i32::try_from(self.monitor.id()).expect("pid fits i32"));
+        let _ = nix::sys::signal::kill(monitor_pid, nix::sys::signal::Signal::SIGTERM);
+        let graceful_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < graceful_deadline {
+            if self.monitor.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        // Independently clean the fixture group; the test does not assume that
+        // forwarding SIGTERM was sufficient to reap the child.
+        let _ = nix::sys::signal::killpg(self.child_pid, nix::sys::signal::Signal::SIGKILL);
+        if self.monitor.try_wait().ok().flatten().is_none() {
+            let _ = self.monitor.kill();
+            let _ = self.monitor.wait();
+        }
+    }
+
+    fn assert_cleaned(&self) {
+        let process_deadline = Instant::now() + Duration::from_secs(2);
+        while nix::sys::signal::kill(self.child_pid, None) != Err(nix::errno::Errno::ESRCH) {
+            assert!(
+                Instant::now() < process_deadline,
+                "fixture child/process group still exists"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let name = std::ffi::CString::new(self.shm_name.clone()).expect("valid SHM name");
+        // SAFETY: `name` is a live NUL-terminated string; this is a read-only
+        // existence check and any unexpectedly opened descriptor is closed.
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+        if fd >= 0 {
+            // SAFETY: `fd` was returned by shm_open above.
+            unsafe { libc::close(fd) };
+            panic!("stale shared memory remains: {}", self.shm_name);
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOENT)
+        );
+    }
+}
+
+impl Drop for FixtureProcessGuard {
+    fn drop(&mut self) {
+        self.terminate();
+        if let Ok(name) = std::ffi::CString::new(self.shm_name.clone()) {
+            // SAFETY: best-effort cleanup for a failed test; `name` is valid.
+            unsafe { libc::shm_unlink(name.as_ptr()) };
+        }
+    }
+}
+
+fn read_fixture_state(path: &Path, deadline: Instant) -> (nix::unistd::Pid, String) {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            let mut lines = contents.lines();
+            let pid = lines
+                .next()
+                .expect("fixture PID")
+                .parse::<i32>()
+                .expect("numeric fixture PID");
+            let shm_name = lines.next().expect("fixture SHM name").to_string();
+            return (nix::unistd::Pid::from_raw(pid), shm_name);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture did not publish process state"
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -1045,7 +1129,9 @@ fn test_e2e_anr() {
     // ANR: the child loops forever. Monitor should detect ANR after warmup + threshold,
     // generate a report, and the child keeps running. We kill the monitor after timeout.
     // Override ANR timings via env vars to keep the test fast.
-    let mut child = monitor_cmd(data_dir.path())
+    let state_file = data_dir.path().join("fixture-state");
+    let monitor = monitor_cmd(data_dir.path())
+        .env("CRASH_APP_STATE_FILE", &state_file)
         .env("CRASH_MONITOR_ANR_WARMUP_MS", "500")
         .env("CRASH_MONITOR_ANR_THRESHOLD_MS", "500")
         .env("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", "250")
@@ -1054,6 +1140,13 @@ fn test_e2e_anr() {
         .arg("anr")
         .spawn()
         .expect("failed to spawn crash_monitor");
+    let (child_pid, shm_name) =
+        read_fixture_state(&state_file, Instant::now() + Duration::from_secs(5));
+    let mut processes = FixtureProcessGuard {
+        monitor,
+        child_pid,
+        shm_name,
+    };
 
     // Poll for the committed report instead of sleeping for a fixed interval:
     // slower CI hosts may cross a three-second boundary after ANR detection
@@ -1064,23 +1157,20 @@ fn test_e2e_anr() {
         if !reports.is_empty() {
             break reports;
         }
-        if let Some(status) = child.try_wait().expect("poll crash_monitor") {
+        if let Some(status) = processes.monitor.try_wait().expect("poll crash_monitor") {
             panic!("crash_monitor exited before publishing an ANR report: {status}");
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
             panic!("timed out waiting for an ANR report in {archive:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    // Kill the monitor (which also kills the child)
-    let _ = child.kill();
-    let _ = child.wait();
+    processes.terminate();
+    processes.assert_cleaned();
 
     let json = read_report_json(&reports[0]);
-    assert_eq!(json["header"]["type"], "anr");
+    assert_report_identity(&reports[0], &json, "anr");
 }
 
 /// The debug build binary lacks the debugger entitlement (only `make e2e-build`
