@@ -27,7 +27,7 @@ fn sample_report_json() -> String {
             "crashed": true,
             "registers": {},
             "backtrace": [
-                {"address": "0x0000000100a3b1a8", "symbol": "vxc_face_drag_step"}
+                {"address": "0x0000000100a3b1a8", "symbol": "render_frame"}
             ],
             "stack_memory": {
                 "sp": "0x16d4fe000",
@@ -78,8 +78,8 @@ fn test_analyze_reads_report_from_zip() {
         .expect("run analyze ZIP CLI");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("voxelcore_desktop"), "{stdout}");
-    assert!(stdout.contains("vxc_face_drag_step"), "{stdout}");
+    assert!(stdout.contains("sample_app"), "{stdout}");
+    assert!(stdout.contains("render_frame"), "{stdout}");
 }
 
 #[test]

@@ -29,7 +29,7 @@ fn test_analyze_valid_report() {
             "crashed": true,
             "registers": {},
             "backtrace": [
-                {"address": "0x0000000100a3b1a8", "symbol": "vxc_face_drag_step"}
+                {"address": "0x0000000100a3b1a8", "symbol": "render_frame"}
             ]
         }],
         "loaded_images": [],
@@ -49,8 +49,8 @@ fn test_analyze_valid_report() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Crash Report: SIGSEGV at 0x8"), "{stdout}");
-    assert!(stdout.contains("voxelcore_desktop"), "{stdout}");
-    assert!(stdout.contains("vxc_face_drag_step"), "{stdout}");
+    assert!(stdout.contains("sample_app"), "{stdout}");
+    assert!(stdout.contains("render_frame"), "{stdout}");
 }
 
 #[test]

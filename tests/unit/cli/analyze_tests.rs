@@ -39,7 +39,7 @@ fn full_crash_report_json() -> String {
         },
         "crash_context": {
             "annotations": {
-                "active_tool": "face_pull_drag",
+                "active_tool": "selection_tool",
                 "frame_number": 2847,
                 "region_count": 42,
                 "flags": ["safe", true]
@@ -64,8 +64,8 @@ fn full_crash_report_json() -> String {
         },
         "fingerprint": "a1b2c3d4e5f67890",
         "breadcrumbs": [
-            {"time_ns": 1000, "thread": 1, "cat": "crumb", "sev": "info", "file": "tool.c", "line": 42, "msg": "face_drag step dx=3"},
-            {"time_ns": 2000, "thread": 1, "cat": "crumb", "sev": "info", "file": "tool.c", "line": 43, "msg": "set_voxel (1,2,3)=5"}
+            {"time_ns": 1000, "thread": 1, "cat": "crumb", "sev": "info", "file": "tool.c", "line": 42, "msg": "selection moved dx=3"},
+            {"time_ns": 2000, "thread": 1, "cat": "crumb", "sev": "info", "file": "tool.c", "line": 43, "msg": "document item updated"}
         ],
         "loaded_images": [],
         "memory_map": [],
@@ -163,7 +163,7 @@ fn test_parse_full_crash_report() {
     assert_eq!(report.threads[0].backtrace.len(), 3);
     assert_eq!(
         report.threads[0].backtrace[0].symbol.as_deref(),
-        Some("vxc_face_drag_step")
+        Some("render_frame")
     );
     assert_eq!(report.fingerprint.as_deref(), Some("a1b2c3d4e5f67890"));
     assert!(report.session.is_some());
@@ -308,7 +308,7 @@ fn test_breadcrumb_field_layout() {
     // Field names: time_ns, cat, sev, file, line, msg
     assert_eq!(first.time_ns, 1000);
     assert_eq!(first.cat, "crumb");
-    assert_eq!(first.msg, "face_drag step dx=3");
+    assert_eq!(first.msg, "selection moved dx=3");
 }
 
 #[test]
