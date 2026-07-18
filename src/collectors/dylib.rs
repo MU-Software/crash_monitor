@@ -24,6 +24,14 @@ pub struct RawImageData {
     pub path: String,
     pub base_address: u64,
     pub slide: Option<u64>,
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub architecture: Option<String>,
+    #[serde(default)]
+    pub text_start: Option<u64>,
+    #[serde(default)]
+    pub text_end: Option<u64>,
 }
 
 // ═══════════════════════════════════════════════════
@@ -158,6 +166,10 @@ fn enumerate_loaded_images(
             path,
             base_address: load_addr,
             slide: None, // computed post-enumeration by compute_all_slides()
+            uuid: None,
+            architecture: None,
+            text_start: None,
+            text_end: None,
         });
     }
 
@@ -220,6 +232,7 @@ fn parse_image_info(bytes: &[u8], offset: usize) -> Result<(u64, u64), String> {
 // Mach-O constants for ASLR slide computation
 const MH_MAGIC_64: u32 = 0xFEED_FACF;
 const LC_SEGMENT_64: u32 = 0x19;
+const LC_UUID: u32 = 0x1b;
 
 /// Compute ASLR slides for all images. Call this post-resume — it does
 /// 2 `vm_read` calls per image and doesn't need the child to be suspended
@@ -232,7 +245,7 @@ fn compute_all_slides(
 ) -> Result<(), String> {
     for img in images {
         context.checkpoint()?;
-        img.slide = compute_slide(platform, task, img.base_address, context);
+        compute_image_metadata(platform, task, img, context);
         context.checkpoint()?;
     }
     Ok(())
@@ -240,64 +253,129 @@ fn compute_all_slides(
 
 /// Compute the ASLR slide for an image by reading its Mach-O header.
 /// `slide` = `base_address` - `__TEXT` segment `vmaddr`.
-fn compute_slide(
+fn compute_image_metadata(
     platform: &dyn PlatformOps,
     task: mach_port_t,
-    base_address: u64,
+    image: &mut RawImageData,
     context: &PluginContext,
-) -> Option<u64> {
-    context.checkpoint().ok()?;
+) {
+    if context.checkpoint().is_err() {
+        return;
+    }
+    let base_address = image.base_address;
     // Read mach_header_64: magic(4) + cputype(4) + cpusubtype(4) + filetype(4) +
     //                      ncmds(4) + sizeofcmds(4) + flags(4) + reserved(4) = 32 bytes
-    let header = platform.vm_read(task, base_address, 32).ok()?;
-    context.checkpoint().ok()?;
-    let magic = read_u32_le(&header, 0)?;
-    if magic != MH_MAGIC_64 {
-        return None;
+    let Ok(header) = platform.vm_read(task, base_address, 32) else {
+        return;
+    };
+    if context.checkpoint().is_err() {
+        return;
     }
+    let Some(magic) = read_u32_le(&header, 0) else {
+        return;
+    };
+    if magic != MH_MAGIC_64 {
+        return;
+    }
+    image.architecture = read_u32_le(&header, 4).map(|cpu| match cpu {
+        0x0100_000c => "arm64".to_string(),
+        0x0100_0007 => "x86_64".to_string(),
+        other => format!("cpu_{other:#x}"),
+    });
 
-    let ncmds = read_u32_le(&header, 16)? as usize;
-    let sizeofcmds = read_u32_le(&header, 20)? as usize;
+    let Some(ncmds) = read_u32_le(&header, 16).map(|value| value as usize) else {
+        return;
+    };
+    let Some(sizeofcmds) = read_u32_le(&header, 20).map(|value| value as usize) else {
+        return;
+    };
 
     // Safety cap: refuse to read more than 1MB of load commands from remote memory.
     // A normal binary has ~50-200 load commands totaling ~10-50KB.
     if sizeofcmds > 1024 * 1024 {
-        return None;
+        return;
     }
 
     // Read all load commands (start at offset 32, right after the header)
-    let cmds = platform.vm_read(task, base_address + 32, sizeofcmds).ok()?;
-    context.checkpoint().ok()?;
+    let Some(commands_address) = base_address.checked_add(32) else {
+        return;
+    };
+    let Ok(cmds) = platform.vm_read(task, commands_address, sizeofcmds) else {
+        return;
+    };
+    if context.checkpoint().is_err() {
+        return;
+    }
 
     let mut offset = 0;
     for _ in 0..ncmds {
-        context.checkpoint().ok()?;
+        if context.checkpoint().is_err() {
+            return;
+        }
         if offset + 8 > cmds.len() {
             break;
         }
-        let cmd = read_u32_le(&cmds, offset)?;
-        let cmdsize = read_u32_le(&cmds, offset + 4)? as usize;
+        let Some(cmd) = read_u32_le(&cmds, offset) else {
+            break;
+        };
+        let Some(cmdsize) = read_u32_le(&cmds, offset + 4).map(|value| value as usize) else {
+            break;
+        };
 
         if cmd == LC_SEGMENT_64 && cmdsize >= 72 {
             // segment_command_64: cmd(4) + cmdsize(4) + segname(16) + vmaddr(8) + ...
             // segname at offset+8, vmaddr at offset+24
-            let segname_bytes = cmds.get(offset + 8..offset + 24)?;
+            let Some(segname_bytes) = cmds.get(offset + 8..offset + 24) else {
+                break;
+            };
             let segname_end = segname_bytes.iter().position(|&b| b == 0).unwrap_or(16);
-            let segname = std::str::from_utf8(&segname_bytes[..segname_end]).ok()?;
+            let Ok(segname) = std::str::from_utf8(&segname_bytes[..segname_end]) else {
+                break;
+            };
 
             if segname == "__TEXT" {
-                let vmaddr = read_u64_le(&cmds, offset + 24)?;
-                return Some(base_address.wrapping_sub(vmaddr));
+                let Some(vmaddr) = read_u64_le(&cmds, offset + 24) else {
+                    break;
+                };
+                let Some(vmsize) = read_u64_le(&cmds, offset + 32) else {
+                    break;
+                };
+                image.slide = base_address.checked_sub(vmaddr);
+                image.text_start = Some(base_address);
+                image.text_end = base_address.checked_add(vmsize);
+            }
+        } else if cmd == LC_UUID && cmdsize >= 24 {
+            if let Some(uuid) = cmds.get(offset + 8..offset + 24) {
+                image.uuid = Some(format_uuid(uuid));
             }
         }
 
         if cmdsize == 0 {
             break;
         }
-        offset += cmdsize;
+        let Some(next) = offset.checked_add(cmdsize) else {
+            break;
+        };
+        if next > cmds.len() {
+            break;
+        }
+        offset = next;
     }
+}
 
-    None
+fn format_uuid(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            let separator = if matches!(index, 4 | 6 | 8 | 10) {
+                "-"
+            } else {
+                ""
+            };
+            format!("{separator}{byte:02x}")
+        })
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════
@@ -306,12 +384,15 @@ fn compute_slide(
 
 /// Resolve a backtrace address to an image name + offset.
 pub fn resolve_address(images: &[RawImageData], address: u64) -> (Option<String>, Option<u64>) {
-    let idx = images.partition_point(|img| img.base_address <= address);
-    if idx == 0 {
+    let Some(img) = images.iter().find(|image| {
+        image
+            .text_start
+            .zip(image.text_end)
+            .is_some_and(|(start, end)| address >= start && address < end)
+    }) else {
         return (None, None);
-    }
-    let img = &images[idx - 1];
-    let offset = address - img.base_address;
+    };
+    let offset = address - img.text_start.unwrap_or(img.base_address);
 
     let name = img.path.rsplit('/').next().unwrap_or(&img.path).to_string();
     (Some(name), Some(offset))
@@ -333,6 +414,7 @@ fn read_c_string(
 ) -> Result<String, String> {
     // Try progressively larger reads — most paths are < 128 bytes,
     // so the first attempt usually succeeds even near page boundaries.
+    let mut last_prefix = None;
     for &chunk in &[128, 512, max_len] {
         context.checkpoint()?;
         let try_len = chunk.min(max_len);
@@ -341,11 +423,15 @@ fn read_c_string(
             if let Some(end) = bytes.iter().position(|&b| b == 0) {
                 return Ok(String::from_utf8_lossy(&bytes[..end]).into_owned());
             }
+            last_prefix = Some(String::from_utf8_lossy(&bytes).into_owned());
             // No null terminator found — try a larger read if available
             if try_len >= max_len {
                 return Ok(String::from_utf8_lossy(&bytes).into_owned());
             }
         }
+    }
+    if let Some(prefix) = last_prefix {
+        return Ok(prefix);
     }
     // All progressive reads failed
     Err(format!(

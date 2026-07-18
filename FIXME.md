@@ -534,11 +534,11 @@
 
 ### P1-41. dylib identity와 실제 image range를 수집한다
 
-- [ ] 각 image의 LC_UUID, architecture, slide, 실제 segment range를 수집한다.
-- [ ] “가장 가까운 낮은 base”만으로 주소를 image에 귀속하지 않고 `__TEXT` 범위 안인지 확인한다.
-- [ ] 임의의 image별 256MB window를 제거한다.
-- [ ] NUL 없는 C string을 여러 번 읽다가 후속 read가 실패해도 마지막 성공 prefix를 보존한다.
-- [ ] Mach-O read helper를 공용 bounds-checked reader로 추출한다.
+- [x] 각 image의 LC_UUID, architecture, slide, 실제 segment range를 수집한다.
+- [x] “가장 가까운 낮은 base”만으로 주소를 image에 귀속하지 않고 `__TEXT` 범위 안인지 확인한다.
+- [x] 임의의 image별 256MB window를 제거한다.
+- [x] NUL 없는 C string을 여러 번 읽다가 후속 read가 실패해도 마지막 성공 prefix를 보존한다.
+- [x] Mach-O read helper를 공용 bounds-checked reader로 추출한다.
 
 범위: `src/collectors/dylib.rs`, `src/preprocessors/symbolicate.rs`.
 

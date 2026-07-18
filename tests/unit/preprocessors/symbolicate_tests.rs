@@ -169,6 +169,10 @@ fn resolver_reads_and_parses_regular_file_from_open_descriptor() {
         path: path.to_string_lossy().into_owned(),
         base_address: 0x1000,
         slide: None,
+        uuid: None,
+        architecture: None,
+        text_start: Some(0x1000),
+        text_end: Some(0x2000),
     };
 
     let symbols =

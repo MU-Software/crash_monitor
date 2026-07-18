@@ -101,6 +101,10 @@ fn image(path: &str, base: u64, slide: Option<u64>) -> RawImageData {
         path: path.to_string(),
         base_address: base,
         slide,
+        uuid: None,
+        architecture: Some("arm64".into()),
+        text_start: Some(base),
+        text_end: base.checked_add(0x1_0000),
     }
 }
 

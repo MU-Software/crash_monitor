@@ -164,6 +164,10 @@ fn format_images(images: &[RawImageData]) -> Vec<LoadedImageReport> {
             path: img.path.clone(),
             base: format!("{:#x}", img.base_address),
             slide: img.slide.map(|s| format!("{s:#x}")),
+            uuid: img.uuid.clone(),
+            architecture: img.architecture.clone(),
+            text_start: img.text_start.map(|value| format!("{value:#x}")),
+            text_end: img.text_end.map(|value| format!("{value:#x}")),
         })
         .collect()
 }
@@ -307,23 +311,21 @@ fn prot_string(prot: i32) -> &'static str {
 /// Generate a human-readable label for a VM region, cross-referencing loaded images.
 /// Images must be sorted by `base_address` (as returned by `enumerate_loaded_images`).
 fn region_label(region: &VmRegionInfo, images: &[RawImageData]) -> String {
-    // Binary search: find the last image whose base_address <= region.address
-    let idx = images.partition_point(|img| img.base_address <= region.address);
-    if idx > 0 {
-        let img = &images[idx - 1];
-        let offset = region.address - img.base_address;
-        // Only label if the region is reasonably close to the image base (< 256MB)
-        if offset < 0x1000_0000 {
-            let name = img.path.rsplit('/').next().unwrap_or(&img.path);
-            let segment = if region.protection & 4 != 0 {
-                "__TEXT"
-            } else if region.protection & 2 != 0 {
-                "__DATA"
-            } else {
-                "__OTHER"
-            };
-            return format!("{segment} {name}");
-        }
+    if let Some(img) = images.iter().find(|image| {
+        image
+            .text_start
+            .zip(image.text_end)
+            .is_some_and(|(start, end)| region.address >= start && region.address < end)
+    }) {
+        let name = img.path.rsplit('/').next().unwrap_or(&img.path);
+        let segment = if region.protection & 4 != 0 {
+            "__TEXT"
+        } else if region.protection & 2 != 0 {
+            "__DATA"
+        } else {
+            "__OTHER"
+        };
+        return format!("{segment} {name}");
     }
 
     // Fall back to user_tag label

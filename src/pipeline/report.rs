@@ -219,6 +219,14 @@ pub struct LoadedImageReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub slide: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_end: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

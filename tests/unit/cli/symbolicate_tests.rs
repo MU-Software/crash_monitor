@@ -32,11 +32,19 @@ fn test_build_slide_map_sorted() {
             path: "/b".into(),
             base: "0x200000000".into(),
             slide: Some("0x2000".into()),
+            uuid: None,
+            architecture: None,
+            text_start: None,
+            text_end: None,
         },
         LoadedImageReport {
             path: "/a".into(),
             base: "0x100000000".into(),
             slide: Some("0x1000".into()),
+            uuid: None,
+            architecture: None,
+            text_start: None,
+            text_end: None,
         },
     ];
     let slides = build_slide_map(&images);
@@ -107,6 +115,10 @@ fn test_build_slide_map_no_slide() {
         path: "/a".into(),
         base: "0x100000000".into(),
         slide: None,
+        uuid: None,
+        architecture: None,
+        text_start: None,
+        text_end: None,
     }];
     let slides = build_slide_map(&images);
     assert_eq!(slides.len(), 1);

@@ -128,8 +128,10 @@ impl PreProcessor for SymbolResolver {
             let img_addrs: Vec<u64> = addresses
                 .iter()
                 .copied()
-                .filter(|&a| {
-                    a >= img.base_address && a < img.base_address.saturating_add(0x1000_0000)
+                .filter(|&address| {
+                    img.text_start
+                        .zip(img.text_end)
+                        .is_some_and(|(start, end)| address >= start && address < end)
                 })
                 .collect();
 

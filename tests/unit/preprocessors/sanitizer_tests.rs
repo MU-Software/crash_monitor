@@ -34,6 +34,10 @@ fn test_masks_username_in_image_paths() {
         path: format!("/Users/{user}/project/libfoo.dylib"),
         base_address: 0x1000,
         slide: None,
+        uuid: None,
+        architecture: None,
+        text_start: None,
+        text_end: None,
     });
 
     sanitizer
@@ -79,6 +83,10 @@ fn test_no_username_is_noop() {
         path: "/Users/alice/project/lib.dylib".into(),
         base_address: 0x1000,
         slide: None,
+        uuid: None,
+        architecture: None,
+        text_start: None,
+        text_end: None,
     });
 
     sanitizer
@@ -104,6 +112,10 @@ fn test_preserves_non_path_strings() {
         path: "/usr/lib/system/libsystem.dylib".into(),
         base_address: 0x2000,
         slide: None,
+        uuid: None,
+        architecture: None,
+        text_start: None,
+        text_end: None,
     });
 
     sanitizer

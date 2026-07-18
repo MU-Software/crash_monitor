@@ -98,7 +98,7 @@ shape is:
       "stack_memory": { "sp", "size", "hex_dump" } | null // explicit privacy opt-in
     }
   ],
-  "loaded_images": [ { "path", "base", "slide" } ],
+  "loaded_images": [ { "path", "base", "slide", "uuid", "architecture", "text_start", "text_end" } ],
   "memory_map":    [ { "address", "size", "prot", "info" } ],
   "heap_summary":  {
     "task_vm": { "virtual_size_bytes", "resident_size_bytes", "physical_footprint_bytes", "internal_bytes", "compressed_bytes" },
@@ -150,6 +150,11 @@ resident pages times host page size, and `region_count` counts VM regions, not
 allocator objects. Legacy `in_use_bytes`/`in_use_count` inputs remain accepted
 as aliases. The task VM summary exposes footprint, internal, and compressed
 bytes without relabeling them as allocator usage.
+
+Loaded-image identity includes Mach-O `LC_UUID`, CPU architecture, ASLR slide,
+and the actual runtime `__TEXT` half-open range. Address attribution and
+symbol-selection require that range and never use a fixed 256MB window or the
+nearest lower image base.
 `exception.severity` is `fatal`. `EXC_BREAKPOINT` is subscribed as a fatal
 `crash` mapped to `SIGTRAP`, and `EXC_GUARD` as a fatal `crash` mapped to
 `SIGKILL`; both retain every raw code. `EXC_RESOURCE` is deliberately not

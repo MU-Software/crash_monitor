@@ -56,6 +56,10 @@ fn app_image() -> RawImageData {
         path: "/Users/me/build/voxelcore_desktop".into(),
         base_address: 0x1_0000_0000,
         slide: Some(0x1000),
+        uuid: None,
+        architecture: Some("arm64".into()),
+        text_start: Some(0x1_0000_0000),
+        text_end: Some(0x1_0001_0000),
     }
 }
 
@@ -64,6 +68,10 @@ fn system_image() -> RawImageData {
         path: "/usr/lib/system/libsystem_pthread.dylib".into(),
         base_address: 0x2_0000_0000,
         slide: None,
+        uuid: None,
+        architecture: Some("arm64".into()),
+        text_start: Some(0x2_0000_0000),
+        text_end: Some(0x2_0001_0000),
     }
 }
 
