@@ -2816,6 +2816,10 @@ fn disabled_pipeline_recovery_is_a_filesystem_noop() {
     };
 
     assert_eq!(pipeline.recover_prepared_artifacts().unwrap(), 0);
+    assert_eq!(
+        pipeline.recover_startup_artifacts().unwrap(),
+        StartupRecovery::default()
+    );
     assert!(!output_root.exists());
 }
 

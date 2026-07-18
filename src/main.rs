@@ -725,9 +725,12 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             return event_loop::EXIT_MONITOR_INTERNAL;
         }
     };
-    match pl.recover_prepared_artifacts() {
-        Ok(recovered) if recovered != 0 => {
-            eprintln!("[monitor] recovered {recovered} prepared report transaction(s)");
+    match pl.recover_startup_artifacts() {
+        Ok(recovery) if recovery.recovered != 0 || recovery.scavenged != 0 => {
+            eprintln!(
+                "[monitor] startup artifact recovery: {} prepared, {} stale incomplete transaction(s)",
+                recovery.recovered, recovery.scavenged
+            );
         }
         Ok(_) => {}
         Err(error) => {

@@ -23,7 +23,7 @@ use crate::platform::{
 pub use crate::config::CollectionPolicy;
 pub use artifact::{
     ArtifactKind, ArtifactTransaction, CommittedReport, ReportContext, ReportId, ReportManifest,
-    load_manifest, recover_prepared_reports,
+    load_manifest, recover_prepared_reports, scavenge_stale_pending,
 };
 pub use safety::{
     CancellationToken, PluginContext, PluginRunResult, SubprocessOutput,
@@ -250,6 +250,27 @@ impl Pipeline {
         }
         let output_root = self.resolved_output_root()?;
         recover_prepared_reports(&output_root)
+    }
+
+    /// Recover manifest-complete transactions, then delete only old,
+    /// unlocked transactions that never reached the manifest commit marker.
+    /// Raw and temporary artifacts are transaction-local, so this one policy
+    /// covers their orphaned forms without matching arbitrary user files.
+    ///
+    /// # Errors
+    /// Returns an error when recovery or the bounded stale scan cannot safely
+    /// complete. A live owner lock always leaves its transaction untouched.
+    pub fn recover_startup_artifacts(&self) -> Result<StartupRecovery, String> {
+        if !self.enabled {
+            return Ok(StartupRecovery::default());
+        }
+        let output_root = self.resolved_output_root()?;
+        let recovered = recover_prepared_reports(&output_root)?;
+        let scavenged = scavenge_stale_pending(&output_root, STARTUP_STALE_ARTIFACT_AGE)?;
+        Ok(StartupRecovery {
+            recovered,
+            scavenged,
+        })
     }
 
     pub(super) fn create_report_context(
@@ -1256,6 +1277,14 @@ impl Pipeline {
         }
         Ok(())
     }
+}
+
+const STARTUP_STALE_ARTIFACT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StartupRecovery {
+    pub recovered: usize,
+    pub scavenged: usize,
 }
 
 fn merge_owned_collected_data(target: &mut CollectedData, owned: &mut CollectedData) {

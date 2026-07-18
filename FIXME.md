@@ -453,10 +453,10 @@
 
 ### P1-33. startup recovery/scavenger를 구현한다
 
-- [ ] startup에서 orphan temp, incomplete manifest, stale `pending`, raw, stale SHM을 안전하게 식별한다.
-- [ ] commit marker가 없는 artifact는 복구·quarantine·삭제 중 명시된 정책으로 처리한다.
-- [ ] 다른 실행 중 instance의 파일을 건드리지 않게 lock/owner/age를 확인한다.
-- [ ] pipeline 각 단계에서 강제 종료한 뒤 재시작하는 fault-injection test를 추가한다.
+- [x] startup에서 orphan temp, incomplete manifest, stale `pending`, raw, stale SHM을 안전하게 식별한다.
+- [x] commit marker가 없는 artifact는 복구·quarantine·삭제 중 명시된 정책으로 처리한다.
+- [x] 다른 실행 중 instance의 파일을 건드리지 않게 lock/owner/age를 확인한다.
+- [x] pipeline 각 단계에서 강제 종료한 뒤 재시작하는 fault-injection test를 추가한다.
 
 범위: artifact store startup, SHM lifecycle.
 

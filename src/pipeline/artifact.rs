@@ -837,9 +837,8 @@ pub fn recover_prepared_reports(output_root: &Path) -> Result<usize, String> {
 /// protected by the advisory directory lock.
 ///
 /// # Errors
-///
-/// Returns an error when the output root cannot be scanned safely, a recovery
-/// bound is exceeded, or a stale transaction cannot be removed.
+/// Returns an error if the root cannot be boundedly enumerated, a candidate is
+/// unsafe, or an abandoned candidate cannot be durably removed.
 pub fn scavenge_stale_pending(output_root: &Path, max_age: Duration) -> Result<usize, String> {
     let mut removed = 0;
     let now = SystemTime::now();
