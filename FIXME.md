@@ -755,11 +755,11 @@
 
 ### P2-13. stack CLI의 경계·출력·메모리 사용을 고친다
 
-- [ ] thread가 0개일 때 `0..0` range가 아니라 전용 no-threads 메시지를 낸다.
-- [ ] header에 declared size가 아니라 실제 decoded byte 길이를 표시하고 mismatch를 경고한다.
-- [ ] 최대 입력의 전체 hexdump 문자열을 메모리에 만들지 않고 locked writer에 line 단위로 출력한다.
-- [ ] import는 파일 상단, test module은 하단에 두어 module layout을 정리한다.
-- [ ] `src/pipeline/safety.rs` 중간의 `#[cfg(test)] mod tests` 선언도 파일 끝으로 이동한다.
+- [x] thread가 0개일 때 `0..0` range가 아니라 전용 no-threads 메시지를 낸다.
+- [x] header에 declared size가 아니라 실제 decoded byte 길이를 표시하고 mismatch를 경고한다.
+- [x] 최대 입력의 전체 hexdump 문자열을 메모리에 만들지 않고 locked writer에 line 단위로 출력한다.
+- [x] import는 파일 상단, test module은 하단에 두어 module layout을 정리한다.
+- [x] `src/pipeline/safety.rs` 중간의 `#[cfg(test)] mod tests` 선언도 파일 끝으로 이동한다.
 
 범위: `src/cli/stack.rs`.
 

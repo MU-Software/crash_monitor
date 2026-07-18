@@ -954,10 +954,6 @@ pub fn write_raw_stage1(
     })
 }
 
-#[cfg(test)]
-#[path = "../../tests/unit/pipeline/safety_tests.rs"]
-mod tests;
-
 /// Write raw shared memory sections (breadcrumbs + context) to disk.
 /// Separate from Stage 1 thread data — both are fail-safe dumps.
 ///
@@ -980,3 +976,7 @@ pub fn write_raw_shm_stage1(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/pipeline/safety_tests.rs"]
+mod tests;
