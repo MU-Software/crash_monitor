@@ -1033,10 +1033,10 @@
 
 ### P2-44. privacy·retention·공유 지침을 제공한다
 
-- [ ] environment, stack/memory, screenshot, breadcrumb, attachment path/content, hostname의 민감성을 분류한다.
-- [ ] 기본 수집, opt-in, consent, redaction, retention, encryption 정책을 적는다.
-- [ ] report를 support/vendor와 공유하기 전 검토·정제하는 절차를 제공한다.
-- [ ] raw와 final archive의 차이 및 uploader가 추가될 때 필요한 별도 동의를 설명한다.
+- [x] environment, stack/memory, screenshot, breadcrumb, attachment path/content, hostname의 민감성을 분류한다.
+- [x] 기본 수집, opt-in, consent, redaction, retention, encryption 정책을 적는다.
+- [x] report를 support/vendor와 공유하기 전 검토·정제하는 절차를 제공한다.
+- [x] raw와 final archive의 차이 및 uploader가 추가될 때 필요한 별도 동의를 설명한다.
 
 범위: privacy/security documentation.
 

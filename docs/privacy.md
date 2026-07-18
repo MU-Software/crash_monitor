@@ -47,6 +47,21 @@ deliberate:
 }
 ```
 
+### Evidence classification
+
+| Evidence | Sensitivity and handling |
+|---|---|
+| Environment | highly sensitive; even the allowlist may reveal locale, terminal, and timezone |
+| Hostname | identifying; the built-in collector emits `[REDACTED]` rather than the host value |
+| Thread registers/backtraces | diagnostic addresses and paths; treat as sensitive |
+| Stack bytes / memory map / heap | highly sensitive; bytes may contain arbitrary user data or secrets |
+| Screenshot | highly sensitive pixels with no general redaction; full-profile opt-in only |
+| Breadcrumb / annotation | producer-defined activity and state text; potentially sensitive even in the minimal profile |
+| Attachment label and source path | identifying metadata; sanitized in JSON but still sensitive |
+| Attachment content | arbitrary user-controlled bytes; highly sensitive and not content-redacted |
+| Child stdout/stderr | arbitrary application text; highly sensitive |
+| Raw SHM | opaque producer bytes; highly sensitive and not content-redacted |
+
 Environment capture uses a minimal allowlist (`LANG`, `LC_*`, `TERM`, and
 `TZ`) rather than attempting to enumerate secret names. URL/DSN/cookie and
 credential/key variables are therefore excluded by default. Hostname is
@@ -197,3 +212,36 @@ rejects the configuration before capture because it cannot satisfy the
 requirement, rather than silently writing plaintext. The top-level
 `enabled: false` kill switch is the sole exception because it creates no report
 artifacts at all.
+
+## Review and sharing procedure
+
+Before sending a report to support, a vendor, or any third party:
+
+1. Copy the committed `<ReportId>` directory to a private review location; do
+   not share a hidden `.report-*.pending` staging directory.
+2. Read `manifest.json` and review every listed artifact. Use `crash_monitor
+   analyze report.zip` for the summary, then inspect the ZIP entries and JSON.
+3. Remove or redact environment values, stack bytes, memory data, screenshots,
+   breadcrumbs, annotations, feedback, attachment metadata/content, child
+   output, usernames, home paths, and identifiers that are not necessary for
+   the recipient. Rebuild a new archive rather than editing the committed
+   monitor transaction in place.
+4. Re-open the new archive and verify its exact contents, destination, and
+   recipient. Transfer it only through an approved encrypted channel with an
+   explicit retention/deletion agreement.
+5. Delete the review copy when the support purpose ends, recognizing that
+   backups, recipient copies, and storage remanence are outside monitor
+   retention.
+
+Stage-1 raw files are fail-safe capture evidence and may be less redacted than
+the final JSON. The default final `report.zip` can contain those raw files plus
+JSON, screenshots, and attachments; “archived” does not mean “sanitized” or
+“encrypted.” Always review the manifest and archive entries, not only the
+human-readable summary.
+
+Crash Monitor does not currently upload reports. Adding an uploader requires a
+separate, disclosed remote-transfer consent; local collection consent does not
+authorize network sharing. An uploader must use the committed manifest as its
+only allowlist, avoid hidden/incomplete transactions, authenticate the
+destination, encrypt transport, expose retry/deletion behavior, and preserve
+the user's ability to revoke future uploads.
