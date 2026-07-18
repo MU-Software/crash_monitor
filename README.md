@@ -39,6 +39,13 @@ without sudo. Override the identity with `make build SIGN_IDENTITY="…"`.
 ./target/release/crash_monitor run <path-to-app> [args…]
 ```
 
+`crash_monitor` uses a stable exit-status contract: `0` means normal child
+completion, `2` is a clap command-line usage error, `70` is an internal monitor
+failure, `80` is a non-zero child exit, and `81` is a detected crash whose
+terminal signal is unavailable. A child signal is preserved conventionally as
+`128 + signal` (for example, SIGSEGV is `139`), including when that signal was
+observed after a detected Mach exception.
+
 Each event is assigned a 32-character `ReportId`. While its artifacts are being
 built, they stay hidden in
 `~/.crash_monitor/crashes/pending/.report-<ReportId>.pending/`. A report becomes

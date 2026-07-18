@@ -774,10 +774,10 @@
 
 ### P2-15. main CLI help와 exit-code contract를 정리한다
 
-- [ ] subcommand 없는 수동 usage 문자열을 제거하고 clap-generated help를 사용한다.
-- [ ] usage 오류는 관례적인 별도 exit code를 사용한다.
-- [ ] monitor internal failure, child failure, detected crash, normal completion의 exit code를 문서화한다.
-- [ ] 성공·실패 메시지가 실제 build target과 command 이름을 가리키게 한다.
+- [x] subcommand 없는 수동 usage 문자열을 제거하고 clap-generated help를 사용한다.
+- [x] usage 오류는 관례적인 별도 exit code를 사용한다.
+- [x] monitor internal failure, child failure, detected crash, normal completion의 exit code를 문서화한다.
+- [x] 성공·실패 메시지가 실제 build target과 command 이름을 가리키게 한다.
 
 범위: `src/main.rs`, README/help tests.
 
