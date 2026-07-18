@@ -964,8 +964,8 @@
 
 ### P2-36. dependency 갱신은 근거 기반 유지보수로 수행한다
 
-- [ ] advisory, changelog, MSRV, API break, migration cost를 검토하는 정기 dependency audit를 둔다.
-- [ ] 단순히 최신 major가 아니라는 이유만으로 confirmed defect로 취급하거나 일괄 업그레이드하지 않는다.
+- [x] advisory, changelog, MSRV, API break, migration cost를 검토하는 정기 dependency audit를 둔다.
+- [x] 단순히 최신 major가 아니라는 이유만으로 confirmed defect로 취급하거나 일괄 업그레이드하지 않는다.
 
 범위: Cargo dependencies, dependency-review process.
 
