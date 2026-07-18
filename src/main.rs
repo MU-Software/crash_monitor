@@ -1162,8 +1162,8 @@ fn main() {
         }) => cli::symbolicate::run(&report, &dsym, output.as_deref()),
         None => {
             // No subcommand: treat positional args as "run" mode
-            // Usage: crash_monitor ./voxelcore_desktop [args...]
-            //    or: crash_monitor -- ./voxelcore_desktop [args...]
+            // Usage: crash_monitor ./native_app [args...]
+            //    or: crash_monitor -- ./native_app [args...]
             if cli.args.is_empty() {
                 eprintln!("Usage: crash_monitor [run] <app_path> [args...]");
                 1

@@ -23,7 +23,7 @@
 
 /* ── Region header — 64 bytes, initialized by the monitor ── */
 #define SUT_SHM_MAGIC   0x434D4F4Eu /* "CMON" (Crash MONitor) */
-#define SUT_SHM_VERSION 4u
+#define SUT_SHM_VERSION 5u
 #define SUT_SHM_CANARY  0xDEADBEEFu
 #define SUT_SHM_TOTAL_SIZE 50033364u
 #define SUT_SHM_PRODUCER_NOT_READY 0u
@@ -74,10 +74,10 @@ _Static_assert(SUT_SHM_PRODUCER_READY == 1, "producer ready value changed");
 #define SUT_CRUMB_CATEGORY_MAX 10u
 
 typedef enum sut_crumb_category {
-    SUT_CRUMB_CAT_TOOL = 0,
-    SUT_CRUMB_CAT_WORLD,
-    SUT_CRUMB_CAT_UNDO,
-    SUT_CRUMB_CAT_MESH,
+    SUT_CRUMB_CAT_APPLICATION_0 = 0,
+    SUT_CRUMB_CAT_APPLICATION_1,
+    SUT_CRUMB_CAT_APPLICATION_2,
+    SUT_CRUMB_CAT_APPLICATION_3,
     SUT_CRUMB_CAT_IO,
     SUT_CRUMB_CAT_RENDER,
     SUT_CRUMB_CAT_INPUT,
@@ -87,7 +87,7 @@ typedef enum sut_crumb_category {
     SUT_CRUMB_CAT_USER = SUT_CRUMB_CATEGORY_MAX,
 } sut_crumb_category_t;
 
-_Static_assert(SUT_CRUMB_CAT_TOOL == 0, "breadcrumb category minimum changed");
+_Static_assert(SUT_CRUMB_CAT_APPLICATION_0 == 0, "breadcrumb category minimum changed");
 _Static_assert(SUT_CRUMB_CAT_USER == SUT_CRUMB_CATEGORY_MAX,
                "breadcrumb category maximum changed");
 
@@ -188,17 +188,28 @@ _Static_assert(offsetof(sut_crash_context_t, git_dirty) == 92,
 _Static_assert(offsetof(sut_crash_context_t, annotation_count) == 216,
                "annotation count offset changed");
 
-/* ── Settings snapshot ── */
+/* ── Versioned producer extension ──
+ * Domain-specific state is a bounded generic string map. Extension version 1
+ * defines four entries with UTF-8/NUL rules identical to annotations. */
+#define SUT_PRODUCER_EXTENSION_VERSION 1u
+#define SUT_PRODUCER_EXTENSION_MAX_ENTRIES 4u
+
+typedef struct sut_producer_extension_entry {
+    char key[16];
+    char value[20];
+} sut_producer_extension_entry_t;
+
 typedef struct sut_crash_settings_snapshot {
-    int32_t world_bound_min[3];
-    int32_t world_bound_max[3];
-    int32_t palette_count;
-    int32_t history_max;
-    char extra[128];
+    uint32_t schema_version;
+    uint32_t entry_count;
+    sut_producer_extension_entry_t entries[SUT_PRODUCER_EXTENSION_MAX_ENTRIES];
+    uint8_t reserved[8];
 } sut_crash_settings_snapshot_t;
 
 _Static_assert(sizeof(sut_crash_settings_snapshot_t) == 160,
                "sut_crash_settings_snapshot_t size changed");
+_Static_assert(offsetof(sut_crash_settings_snapshot_t, entries) == 8,
+               "producer extension entries offset changed");
 
 /* ── Registered attachment paths ── */
 #define SUT_SHM_MAX_ATTACHMENTS 4

@@ -349,10 +349,10 @@ fn region_label(region: &VmRegionInfo, images: &[RawImageData]) -> String {
 /// Map category enum to string (matches `sut_crumb_category_t` order).
 fn crumb_category_name(cat: u16) -> &'static str {
     match cat {
-        0 => "TOOL",
-        1 => "WORLD",
-        2 => "UNDO",
-        3 => "MESH",
+        0 => "APPLICATION_0",
+        1 => "APPLICATION_1",
+        2 => "APPLICATION_2",
+        3 => "APPLICATION_3",
         4 => "IO",
         5 => "RENDER",
         6 => "INPUT",
@@ -436,17 +436,8 @@ fn format_settings(
     let s = settings?;
     Some(SettingsSnapshotReport {
         source: ReportValueSource::ProducerSharedMemory,
-        world_bounds: [
-            s.world_bound_min[0],
-            s.world_bound_min[1],
-            s.world_bound_min[2],
-            s.world_bound_max[0],
-            s.world_bound_max[1],
-            s.world_bound_max[2],
-        ],
-        palette_count: s.palette_count,
-        history_max: s.history_max,
-        extra: (!s.extra.is_empty()).then(|| s.extra.clone()),
+        schema_version: s.schema_version,
+        values: s.values.iter().cloned().collect(),
     })
 }
 

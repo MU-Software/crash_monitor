@@ -25,10 +25,10 @@ fn test_prot_string() {
 
 #[test]
 fn test_crumb_category_name() {
-    assert_eq!(crumb_category_name(0), "TOOL");
-    assert_eq!(crumb_category_name(1), "WORLD");
-    assert_eq!(crumb_category_name(2), "UNDO");
-    assert_eq!(crumb_category_name(3), "MESH");
+    assert_eq!(crumb_category_name(0), "APPLICATION_0");
+    assert_eq!(crumb_category_name(1), "APPLICATION_1");
+    assert_eq!(crumb_category_name(2), "APPLICATION_2");
+    assert_eq!(crumb_category_name(3), "APPLICATION_3");
     assert_eq!(crumb_category_name(4), "IO");
     assert_eq!(crumb_category_name(5), "RENDER");
     assert_eq!(crumb_category_name(6), "INPUT");
@@ -69,7 +69,7 @@ fn test_format_breadcrumbs_single() {
     let v = &result[0];
     assert_eq!(v.time_ns, 123_456_789_u64);
     assert_eq!(v.thread, 42);
-    assert_eq!(v.cat, "TOOL");
+    assert_eq!(v.cat, "APPLICATION_0");
     assert_eq!(v.sev, "WARN");
     assert_eq!(v.file, "test.c");
     assert_eq!(v.line, 100);
@@ -346,18 +346,12 @@ fn test_format_settings_none() {
 #[test]
 fn test_format_settings_some() {
     let s = RawSettingsSnapshot {
-        world_bound_min: [-10, -20, -30],
-        world_bound_max: [10, 20, 30],
-        palette_count: 8,
-        history_max: 64,
-        extra: "opaque-settings-v1".to_string(),
+        schema_version: 1,
+        values: vec![("render_mode".into(), "diagnostic".into())],
     };
     let json = format_settings(Some(&s)).expect("Some");
-    assert_eq!(json.palette_count, 8);
-    assert_eq!(json.history_max, 64);
-    assert_eq!(json.world_bounds[0], -10);
-    assert_eq!(json.world_bounds[5], 30);
-    assert_eq!(json.extra.as_deref(), Some("opaque-settings-v1"));
+    assert_eq!(json.schema_version, 1);
+    assert_eq!(json.values["render_mode"], "diagnostic");
 }
 
 // ── format_environment ──
@@ -410,11 +404,8 @@ fn sample_crash_context() -> RawCrashContext {
 #[test]
 fn test_format_crash_context_none_passes_settings_through() {
     let settings = RawSettingsSnapshot {
-        world_bound_min: [0, 0, 0],
-        world_bound_max: [1, 1, 1],
-        palette_count: 2,
-        history_max: 4,
-        extra: String::new(),
+        schema_version: 1,
+        values: Vec::new(),
     };
     let (ctx, build, snap) = format_crash_context(None, Some(&settings));
     assert!(ctx.is_none());

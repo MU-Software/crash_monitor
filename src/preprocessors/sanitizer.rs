@@ -163,7 +163,10 @@ impl PreProcessor for Sanitizer {
         }
 
         if let Some(settings) = &mut data.raw.settings_snapshot {
-            self.sanitize_str(&mut settings.extra);
+            for (key, value) in &mut settings.values {
+                self.sanitize_str(key);
+                self.sanitize_str(value);
+            }
         }
 
         for attachment in &mut data.raw.attachment_registrations {

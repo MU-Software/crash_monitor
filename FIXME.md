@@ -699,9 +699,9 @@
 
 ### P2-07. app-specific SHM field를 generic extension schema로 옮긴다
 
-- [ ] TOOL/WORLD/UNDO/MESH, palette/history/world-bound와 voxel category를 core schema에서 제거하거나 versioned extension으로 격리한다.
-- [ ] generic annotations/settings/category extension contract를 정의한다.
-- [ ] context collector와 dialog/help의 이전 host-project 예시를 generic wording으로 바꾼다.
+- [x] TOOL/WORLD/UNDO/MESH, palette/history/world-bound와 voxel category를 core schema에서 제거하거나 versioned extension으로 격리한다.
+- [x] generic annotations/settings/category extension contract를 정의한다.
+- [x] context collector와 dialog/help의 이전 host-project 예시를 generic wording으로 바꾼다.
 
 범위: `schema/crash_shm.h`, formatter/collectors/docs.
 

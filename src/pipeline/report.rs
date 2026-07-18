@@ -55,7 +55,7 @@ pub struct CrashReport {
     pub heap_summary: Option<HeapSummary>,
     #[serde(default)]
     pub session: Option<SessionReport>,
-    #[serde(default)]
+    #[serde(default, rename = "producer_extension", alias = "settings_snapshot")]
     pub settings_snapshot: Option<SettingsSnapshotReport>,
     #[serde(default)]
     pub fingerprint: Option<String>,
@@ -181,11 +181,8 @@ pub struct BreadcrumbReport {
 pub struct SettingsSnapshotReport {
     #[serde(default)]
     pub source: ReportValueSource,
-    pub world_bounds: [i32; 6],
-    pub palette_count: i32,
-    pub history_max: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra: Option<String>,
+    pub schema_version: u32,
+    pub values: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]

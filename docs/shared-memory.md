@@ -129,12 +129,12 @@ sanitization for torn generations is a separate publication-integrity rule.
 
 ## Report field provenance
 
-Stable crash-context and settings publications are serialized as the typed
-`crash_context` and `settings_snapshot` report objects. Both carry
+Stable crash-context and producer-extension publications are serialized as the typed
+`crash_context` and `producer_extension` report objects. Both carry
 `source = "producer_shared_memory"`. `session_id`, `session_start_ns`, and
 `heartbeat_counter` therefore describe the producer's last published state,
 not values synthesized by the monitor. Empty `session_id`, zero
-`session_start_ns`, and empty `settings.extra` mean unavailable and are omitted;
+`session_start_ns` and an empty extension map mean unavailable;
 the heartbeat counter is always emitted, including zero. Producer readiness is
 validated separately and is not inferred from that counter.
 
@@ -223,11 +223,13 @@ from before readiness is never considered a hang. A heartbeat operation
 publishes no other context field and does not participate in
 `context_generation`.
 
-### Settings
+### Producer extension
 
-The producer begins `header.settings_generation`, writes the complete settings
-snapshot, and ends it. An odd or changed value drops the settings unit without
-retrying or affecting other sections.
+The producer begins `header.settings_generation`, writes extension schema
+version 1 plus up to four bounded generic key/value entries, and ends it. An
+odd/changed generation, unsupported version, invalid count, or malformed string
+drops the extension without affecting other sections. Product concepts belong
+in these values or generic annotations, never in the core wire layout.
 
 ### Attachments
 
