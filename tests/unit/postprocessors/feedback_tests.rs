@@ -82,6 +82,29 @@ fn test_not_available_when_missing() {
 }
 
 #[test]
+fn test_packaged_dialog_is_allowed_from_libexec_not_bin() {
+    let prefix = tempfile::tempdir().unwrap();
+    let bin_dir = prefix.path().join("bin");
+    let libexec_dir = prefix.path().join("libexec/crash_monitor");
+    fs::create_dir(&bin_dir).unwrap();
+    fs::create_dir_all(&libexec_dir).unwrap();
+    let monitor = bin_dir.join("crash_monitor");
+    let packaged_dialog = make_mock_script(&libexec_dir, "crash_dialog_macos", "exit 0");
+    let bin_sibling = make_mock_script(&bin_dir, "crash_dialog_macos", "exit 0");
+
+    assert!(production_dialog_is_available(
+        &packaged_dialog,
+        &monitor,
+        false
+    ));
+    assert!(!production_dialog_is_available(
+        &bin_sibling,
+        &monitor,
+        false
+    ));
+}
+
+#[test]
 fn test_dialog_validation_rejects_symlink_unsafe_mode_and_outside_path() {
     use std::os::unix::fs::symlink;
 

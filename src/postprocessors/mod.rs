@@ -10,6 +10,7 @@ mod session_recorder;
 pub mod zip_archiver;
 
 pub use feedback::FeedbackPostProcessor;
+pub(crate) use feedback::production_dialog_path;
 pub use log_rotator::LogRotator;
 pub use move_to_sent::MoveToSent;
 pub use png_converter::PNGConverter;

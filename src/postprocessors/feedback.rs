@@ -27,12 +27,11 @@ pub struct FeedbackPostProcessor {
 impl FeedbackPostProcessor {
     #[must_use]
     pub fn new(dialog_binary: PathBuf) -> Self {
-        let allowed_dir = std::env::current_exe()
+        let available = std::env::current_exe()
             .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf));
-        let available = allowed_dir.is_some_and(|allowed_dir| {
-            validate_dialog_binary(&dialog_binary, &allowed_dir, true).is_ok()
-        });
+            .is_some_and(|monitor_executable| {
+                production_dialog_is_available(&dialog_binary, &monitor_executable, true)
+            });
         Self {
             dialog_binary,
             timeout: DEFAULT_TIMEOUT,
@@ -65,6 +64,30 @@ impl FeedbackPostProcessor {
             available,
         }
     }
+}
+
+fn production_dialog_directory(monitor_executable: &Path) -> Option<PathBuf> {
+    let directory = monitor_executable.parent()?;
+    if directory.file_name().is_some_and(|name| name == "bin") {
+        Some(directory.parent()?.join("libexec/crash_monitor"))
+    } else {
+        Some(directory.to_path_buf())
+    }
+}
+
+pub(crate) fn production_dialog_path(monitor_executable: &Path) -> Option<PathBuf> {
+    production_dialog_directory(monitor_executable)
+        .map(|directory| directory.join("crash_dialog_macos"))
+}
+
+fn production_dialog_is_available(
+    dialog_binary: &Path,
+    monitor_executable: &Path,
+    require_signature: bool,
+) -> bool {
+    production_dialog_directory(monitor_executable).is_some_and(|allowed_dir| {
+        validate_dialog_binary(dialog_binary, &allowed_dir, require_signature).is_ok()
+    })
 }
 
 fn validate_dialog_binary(
