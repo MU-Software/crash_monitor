@@ -20,6 +20,9 @@ unsafe_op_in_unsafe_fn = "warn"
 
 # CRITICAL: Do NOT set panic = "abort" in any profile.
 # Cooperative plugin panic isolation depends on catch_unwind (panic = "unwind").
+[profile.dev]
+panic = "unwind"
+
 [profile.release]
 panic = "unwind"
 
@@ -72,6 +75,10 @@ path = "tests/integration/event_loop_test.rs"
 [[test]]
 name = "capture_isolation_test"
 path = "tests/integration/capture_isolation_test.rs"
+
+[[test]]
+name = "panic_strategy"
+path = "tests/integration/panic_strategy.rs"
 
 [[test]]
 name = "e2e_tests"

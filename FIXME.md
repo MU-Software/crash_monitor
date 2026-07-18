@@ -482,10 +482,10 @@
 
 ### P1-36. panic isolation의 build 전제를 강제한다
 
-- [ ] `catch_unwind`를 쓰는 target crate에서 `panic="unwind"`를 compile-time에 검증한다.
-- [ ] 상위 workspace profile이나 `RUSTFLAGS`가 `panic=abort`로 바꿔도 잘못된 안전 보장을 제공하지 않게 한다.
-- [ ] host `build.rs` 환경만 검사하는 방식에 의존하지 않는다.
-- [ ] panic payload가 report diagnostics에 보존되는 테스트를 추가한다.
+- [x] `catch_unwind`를 쓰는 target crate에서 `panic="unwind"`를 compile-time에 검증한다.
+- [x] 상위 workspace profile이나 `RUSTFLAGS`가 `panic=abort`로 바꿔도 잘못된 안전 보장을 제공하지 않게 한다.
+- [x] host `build.rs` 환경만 검사하는 방식에 의존하지 않는다.
+- [x] panic payload가 report diagnostics에 보존되는 테스트를 추가한다.
 
 범위: `Cargo.toml`, target crate root, `src/pipeline/safety.rs`.
 

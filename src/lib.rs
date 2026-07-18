@@ -7,6 +7,11 @@ compile_error!(
     "crash_monitor currently supports native arm64 macOS only; x86_64 and Rosetta are unsupported"
 );
 
+#[cfg(panic = "abort")]
+compile_error!(
+    "crash_monitor requires panic=unwind because cooperative plugin isolation uses catch_unwind"
+);
+
 pub mod cli;
 mod collectors;
 pub mod config;

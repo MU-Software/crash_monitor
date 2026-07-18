@@ -2275,13 +2275,25 @@ fn test_collector_panic_is_isolated() {
 
     let diag = pipeline.handle_event(&make_crash_event(), 0);
 
-    // The panicking collector is recorded as an error, not a crash of the monitor.
-    assert!(!diag.succeeded("PanicCollector"));
+    let panic_status = diag
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "PanicCollector")
+        .map(|plugin| &plugin.status);
+    assert!(matches!(
+        panic_status,
+        Some(PluginStatus::Panic(payload)) if payload == "intentional collector panic"
+    ));
     // A collector registered after the panic still runs.
     assert!(survived.load(Ordering::SeqCst), "pipeline halted on panic");
     assert!(diag.succeeded("SurvivorCollector"));
     // A report is still produced despite the panic.
-    assert!(json_report_exists(tempdir.path()));
+    let report_path = committed_artifact(tempdir.path(), "report.json").unwrap();
+    let report = report::load_report(&report_path).unwrap();
+    assert_eq!(
+        report.diagnostics.as_ref().unwrap()["plugins"]["PanicCollector"]["payload"],
+        "intentional collector panic"
+    );
 }
 
 #[test]
