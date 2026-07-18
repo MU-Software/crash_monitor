@@ -73,7 +73,7 @@ fn run_helper_handoff(
         OwnedThreadPort::new(thread)
     });
     let request = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "event": {
             "report_id": "0123456789abcdef0123456789abcdef",
             "report_type": "snapshot",

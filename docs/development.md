@@ -1,6 +1,6 @@
 # Development setup
 
-The repository is pinned to Rust 1.93.0 by `rust-toolchain.toml`. Rustup
+The repository is pinned to Rust 1.97.1 by `rust-toolchain.toml`. Rustup
 installs the compiler, rustfmt, Clippy, and `llvm-tools-preview` automatically.
 Install `cargo-llvm-cov` separately before running the coverage targets.
 `cargo-llvm-cov` discovers the rustup LLVM tools; callers may override

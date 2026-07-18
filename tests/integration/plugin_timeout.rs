@@ -198,7 +198,7 @@ fn subprocess_helper() {
         "cpu" => loop {
             std::hint::spin_loop();
         },
-        "sleep" => std::thread::sleep(Duration::from_secs(60)),
+        "sleep" => std::thread::sleep(Duration::from_mins(1)),
         "blocked-read" => run_blocked_read_helper(),
         "retry-eintr" => run_retrying_read_helper(),
         "grandchild" => {
@@ -207,7 +207,7 @@ fn subprocess_helper() {
                 .spawn()
                 .expect("spawn grandchild");
             write_env_file(HELPER_GRANDCHILD_FILE, child.id().to_string());
-            std::thread::sleep(Duration::from_secs(60));
+            std::thread::sleep(Duration::from_mins(1));
         }
         "successful-grandchild" => {
             let child = Command::new("sleep")

@@ -582,7 +582,9 @@ fn rewrite_report_json_in_zip(path: &Path, report_json: &[u8]) -> Result<(), Str
             .map_err(|e| format!("cannot create temporary ZIP '{}': {e}", tmp_path.display()))?;
         owns_tmp = true;
         let mut writer = zip::ZipWriter::new(destination);
-        writer.set_raw_comment(archive.comment().to_vec().into_boxed_slice());
+        writer
+            .set_raw_comment(archive.comment().to_vec().into_boxed_slice())
+            .map_err(|e| format!("cannot preserve ZIP comment: {e}"))?;
 
         for index in 0..archive.len() {
             let entry = archive.by_index(index).map_err(|e| {

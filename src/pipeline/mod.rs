@@ -1432,7 +1432,7 @@ impl Pipeline {
     }
 }
 
-const STARTUP_STALE_ARTIFACT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const STARTUP_STALE_ARTIFACT_AGE: Duration = Duration::from_hours(24);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StartupRecovery {

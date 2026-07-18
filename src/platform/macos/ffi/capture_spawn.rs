@@ -677,7 +677,7 @@ pub fn spawn_capture_helper(
         ));
     }
     let mut child = CaptureHelperProcess::new(Pid::from_raw(child_pid));
-    let handoff_deadline = Instant::now() + handoff_timeout.min(Duration::from_millis(1_000));
+    let handoff_deadline = Instant::now() + handoff_timeout.min(Duration::from_secs(1));
     let transfer = receive_one_port(handoff.raw(), timeout_millis_until(handoff_deadline))
         .and_then(|control| {
             send_capabilities(

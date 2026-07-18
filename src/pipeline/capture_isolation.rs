@@ -1,10 +1,9 @@
 //! Killable process boundary for collectors that require a live Mach task port.
 
-use bincode::Options;
 use mach2::port::mach_port_t;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,8 +18,8 @@ use crate::platform::macos::ffi::capture_spawn::{CaptureHelperProcess, CaptureHe
 use crate::platform::macos::ffi::types::OwnedThreadPort;
 use crate::platform::{MacOsPlatform, PlatformOps, VmRegionInfo};
 
-const CAPTURE_WIRE_VERSION: u32 = 1;
-const MAX_CAPTURE_WIRE_BYTES: u64 = 64 * 1024 * 1024;
+const CAPTURE_WIRE_VERSION: u32 = 2;
+const MAX_CAPTURE_WIRE_BYTES: usize = 64 * 1024 * 1024;
 const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const HELPER_REAP_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_COLLECTOR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -272,9 +271,16 @@ pub fn run_capture_helper(request_json: &str) -> Result<(), String> {
         diagnostics: diagnostics.plugins.into_iter().map(Into::into).collect(),
     };
     let mut output = crate::platform::macos::ffi::capture_spawn::capture_result_file()?;
-    wire_options()
-        .serialize_into(&mut output, &result)
+    let encoded = rmp_serde::to_vec(&result)
         .map_err(|error| format!("cannot encode capture-helper result: {error}"))?;
+    if encoded.len() > MAX_CAPTURE_WIRE_BYTES {
+        return Err(format!(
+            "capture-helper result exceeds {MAX_CAPTURE_WIRE_BYTES} bytes"
+        ));
+    }
+    output
+        .write_all(&encoded)
+        .map_err(|error| format!("cannot write capture-helper result: {error}"))?;
     output
         .sync_data()
         .map_err(|error| format!("cannot sync capture-helper result: {error}"))
@@ -394,7 +400,7 @@ fn decode_result(result_file: &mut File) -> IsolatedCaptureOutcome {
             ));
         }
     };
-    if length == 0 || length > MAX_CAPTURE_WIRE_BYTES {
+    if length == 0 || length > MAX_CAPTURE_WIRE_BYTES as u64 {
         return IsolatedCaptureOutcome::Failed(format!(
             "capture-helper result size is invalid: {length}"
         ));
@@ -404,7 +410,19 @@ fn decode_result(result_file: &mut File) -> IsolatedCaptureOutcome {
             "cannot rewind capture-helper result: {error}"
         ));
     }
-    let result: TaskCaptureResult = match wire_options().deserialize_from(result_file) {
+    let Ok(capacity) = usize::try_from(length) else {
+        return IsolatedCaptureOutcome::Failed(format!(
+            "capture-helper result size is not addressable: {length}"
+        ));
+    };
+    let mut encoded = Vec::with_capacity(capacity);
+    if let Err(error) = result_file.read_to_end(&mut encoded) {
+        return IsolatedCaptureOutcome::Failed(format!(
+            "cannot read capture-helper result: {error}"
+        ));
+    }
+    let mut decoder = rmp_serde::Deserializer::new(Cursor::new(&encoded));
+    let result = match TaskCaptureResult::deserialize(&mut decoder) {
         Ok(result) => result,
         Err(error) => {
             return IsolatedCaptureOutcome::Failed(format!(
@@ -412,6 +430,17 @@ fn decode_result(result_file: &mut File) -> IsolatedCaptureOutcome {
             ));
         }
     };
+    let Ok(consumed) = usize::try_from(decoder.position()) else {
+        return IsolatedCaptureOutcome::Failed(
+            "capture-helper decoder position is not addressable".to_string(),
+        );
+    };
+    if consumed != encoded.len() {
+        return IsolatedCaptureOutcome::Failed(format!(
+            "capture-helper decoder consumed {consumed} of {} bytes",
+            encoded.len()
+        ));
+    }
     if result.version != CAPTURE_WIRE_VERSION {
         return IsolatedCaptureOutcome::Failed(format!(
             "unsupported capture-helper result version {}",
@@ -472,19 +501,12 @@ fn plugin_status<T>(outcome: &PluginRunResult<T>) -> PluginStatus {
     }
 }
 
-fn wire_options() -> impl Options {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(MAX_CAPTURE_WIRE_BYTES)
-        .reject_trailing_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn capture_wire_round_trip_uses_identical_options() {
+    fn capture_wire_round_trip_consumes_exact_message() {
         let result = TaskCaptureResult {
             version: CAPTURE_WIRE_VERSION,
             data: TaskCaptureData::default(),
@@ -497,12 +519,22 @@ mod tests {
                 finished_offset_ms: 15,
             }],
         };
-        let encoded = wire_options().serialize(&result).expect("encode result");
-        let decoded: TaskCaptureResult =
-            wire_options().deserialize(&encoded).expect("decode result");
+        let encoded = rmp_serde::to_vec(&result).expect("encode result");
+        let mut deserializer = rmp_serde::Deserializer::new(Cursor::new(&encoded));
+        let decoded = TaskCaptureResult::deserialize(&mut deserializer).expect("decode result");
+        let consumed = usize::try_from(deserializer.position()).expect("wire length fits usize");
+        assert_eq!(consumed, encoded.len());
         assert_eq!(decoded.version, CAPTURE_WIRE_VERSION);
         assert_eq!(decoded.diagnostics.len(), 1);
         assert!(decoded.diagnostics[0].report_id.is_none());
         assert_eq!(decoded.diagnostics[0].finished_offset_ms, 15);
+
+        let mut result_file = tempfile::tempfile().expect("create wire result");
+        result_file.write_all(&encoded).expect("write wire result");
+        result_file.write_all(&[0]).expect("append trailing byte");
+        let IsolatedCaptureOutcome::Failed(error) = decode_result(&mut result_file) else {
+            panic!("trailing wire bytes must be rejected");
+        };
+        assert!(error.contains("decoder consumed"));
     }
 }

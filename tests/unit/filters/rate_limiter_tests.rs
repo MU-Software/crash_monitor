@@ -29,7 +29,7 @@ fn check(limiter: &RateLimiter, report_type: ReportType, now: Instant) -> bool {
 
 #[test]
 fn test_first_n_pass_within_window() {
-    let limiter = RateLimiter::new(3, Duration::from_secs(60));
+    let limiter = RateLimiter::new(3, Duration::from_mins(1));
     let now = Instant::now();
     assert!(check(&limiter, ReportType::Crash, now));
     assert!(check(&limiter, ReportType::Crash, now));
@@ -38,7 +38,7 @@ fn test_first_n_pass_within_window() {
 
 #[test]
 fn test_blocks_when_exceeding_limit() {
-    let limiter = RateLimiter::new(3, Duration::from_secs(60));
+    let limiter = RateLimiter::new(3, Duration::from_mins(1));
     let now = Instant::now();
     for _ in 0..3 {
         assert!(check(&limiter, ReportType::Crash, now));
@@ -49,7 +49,7 @@ fn test_blocks_when_exceeding_limit() {
 
 #[test]
 fn test_contended_state_fails_open_without_waiting() {
-    let limiter = RateLimiter::new(1, Duration::from_secs(60));
+    let limiter = RateLimiter::new(1, Duration::from_mins(1));
     let _guard = limiter.recent.lock().unwrap();
 
     assert!(
@@ -65,7 +65,7 @@ fn test_contended_state_fails_open_without_waiting() {
 
 #[test]
 fn test_window_expiry_allows_new_events() {
-    let window = Duration::from_secs(60);
+    let window = Duration::from_mins(1);
     let limiter = RateLimiter::new(3, window);
     let base = Instant::now();
     for i in 0..3 {
@@ -92,7 +92,7 @@ fn test_window_expiry_allows_new_events() {
 
 #[test]
 fn test_report_types_count_independently() {
-    let limiter = RateLimiter::new(3, Duration::from_secs(60));
+    let limiter = RateLimiter::new(3, Duration::from_mins(1));
     let now = Instant::now();
     for _ in 0..3 {
         assert!(check(&limiter, ReportType::Crash, now));
@@ -108,7 +108,7 @@ fn test_report_types_count_independently() {
 
 #[test]
 fn test_partial_window_expiry() {
-    let window = Duration::from_secs(60);
+    let window = Duration::from_mins(1);
     let limiter = RateLimiter::new(3, window);
     let base = Instant::now();
     assert!(check(&limiter, ReportType::Crash, base));
@@ -138,7 +138,7 @@ fn test_partial_window_expiry() {
 
 #[test]
 fn test_should_process_uses_real_time() {
-    let limiter = RateLimiter::new(2, Duration::from_secs(60));
+    let limiter = RateLimiter::new(2, Duration::from_mins(1));
     let event = dummy_event(ReportType::Crash);
     assert!(
         limiter
@@ -164,12 +164,12 @@ fn test_persistent_state_survives_monitor_restart_and_stays_bounded() {
     let event = dummy_event(ReportType::Crash);
     let context = PluginContext::without_deadline();
 
-    let first = RateLimiter::with_state_path(2, Duration::from_secs(60), state_path.clone());
+    let first = RateLimiter::with_state_path(2, Duration::from_mins(1), state_path.clone());
     assert!(first.should_process(&event, &context).unwrap());
     assert!(first.should_process(&event, &context).unwrap());
     drop(first);
 
-    let restarted = RateLimiter::with_state_path(2, Duration::from_secs(60), state_path.clone());
+    let restarted = RateLimiter::with_state_path(2, Duration::from_mins(1), state_path.clone());
     assert!(!restarted.should_process(&event, &context).unwrap());
     assert!(std::fs::metadata(state_path).unwrap().len() <= 128 * 1024);
 }
@@ -180,8 +180,8 @@ fn test_separate_limiters_reload_shared_state_before_each_decision() {
     let state_path = directory.path().join("rate-limit.json");
     let event = dummy_event(ReportType::Crash);
     let context = PluginContext::without_deadline();
-    let first = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path.clone());
-    let second = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path);
+    let first = RateLimiter::with_state_path(1, Duration::from_mins(1), state_path.clone());
+    let second = RateLimiter::with_state_path(1, Duration::from_mins(1), state_path);
 
     assert!(first.should_process(&event, &context).unwrap());
     assert!(!second.should_process(&event, &context).unwrap());
@@ -196,7 +196,7 @@ fn test_concurrent_limiters_atomically_share_one_quota() {
     let handles = (0..2)
         .map(|_| {
             let limiter =
-                RateLimiter::with_state_path(1, Duration::from_secs(60), state_path.clone());
+                RateLimiter::with_state_path(1, Duration::from_mins(1), state_path.clone());
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
@@ -226,7 +226,7 @@ fn test_corrupt_persistent_state_is_quarantined_and_replaced() {
     std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let event = dummy_event(ReportType::Crash);
-    let limiter = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path.clone());
+    let limiter = RateLimiter::with_state_path(1, Duration::from_mins(1), state_path.clone());
     let error = limiter
         .should_process(&event, &PluginContext::without_deadline())
         .unwrap_err();
@@ -243,7 +243,7 @@ fn test_corrupt_persistent_state_is_quarantined_and_replaced() {
             .starts_with(".rate-limit-state.corrupt.")
     }));
 
-    let restarted = RateLimiter::with_state_path(1, Duration::from_secs(60), state_path);
+    let restarted = RateLimiter::with_state_path(1, Duration::from_mins(1), state_path);
     assert!(
         !restarted
             .should_process(&event, &PluginContext::without_deadline())
@@ -253,7 +253,7 @@ fn test_corrupt_persistent_state_is_quarantined_and_replaced() {
 
 #[test]
 fn test_plugin_metadata() {
-    let limiter = RateLimiter::new(3, Duration::from_secs(60));
+    let limiter = RateLimiter::new(3, Duration::from_mins(1));
     assert_eq!(limiter.name(), "RateLimiter");
     assert!(limiter.is_available());
     assert!(limiter.hard_dependencies().is_empty());

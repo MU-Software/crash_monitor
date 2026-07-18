@@ -14,11 +14,11 @@ jobs:
     name: macOS ARM64 fast checks
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify native architecture
         run: test "$(uname -m)" = arm64
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy,rustfmt
       - name: Format, strict Clippy, tests, and schema drift
@@ -33,7 +33,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install signing certificate
         shell: bash
         env:
@@ -67,7 +67,7 @@ jobs:
             "$keychain_path"
           security list-keychains -d user -s "$keychain_path"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy,rustfmt
       - name: Run required signed E2E gate

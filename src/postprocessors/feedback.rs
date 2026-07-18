@@ -16,7 +16,7 @@ use crate::pipeline::{
 };
 
 /// Default timeout waiting for the user to submit feedback (5 minutes).
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
 pub struct FeedbackPostProcessor {
     dialog_binary: PathBuf,

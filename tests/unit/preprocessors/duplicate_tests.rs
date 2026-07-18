@@ -28,7 +28,7 @@ fn data_with_fingerprint(fp: &str) -> CollectedData {
 
 #[test]
 fn test_first_event_always_passes() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     let event = dummy_event();
     let mut data = data_with_fingerprint("abc123");
 
@@ -40,7 +40,7 @@ fn test_first_event_always_passes() {
 
 #[test]
 fn test_duplicate_within_window_detected() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     let event = dummy_event();
 
     // First event
@@ -80,7 +80,7 @@ fn test_duplicate_outside_window_passes() {
 
 #[test]
 fn test_different_fingerprints_not_blocked() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     let event = dummy_event();
 
     let mut data1 = data_with_fingerprint("abc123");
@@ -97,7 +97,7 @@ fn test_different_fingerprints_not_blocked() {
 
 #[test]
 fn test_duplicate_key_separates_report_type_process_and_build() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     let base = dummy_event();
     let mut first = data_with_fingerprint("same");
     detector
@@ -145,7 +145,7 @@ fn test_duplicate_key_separates_report_type_process_and_build() {
 
 #[test]
 fn test_duplicate_observations_do_not_extend_suppression_window() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     let event = dummy_event();
     let base = std::time::Instant::now();
     let context = PluginContext::without_deadline();
@@ -191,7 +191,7 @@ fn test_duplicate_observations_do_not_extend_suppression_window() {
 
 #[test]
 fn test_contended_state_returns_without_waiting() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     let _guard = detector.recent.lock().unwrap();
     let mut data = data_with_fingerprint("same");
 
@@ -208,7 +208,7 @@ fn test_contended_state_returns_without_waiting() {
 
 #[test]
 fn test_no_fingerprint_passes() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     let event = dummy_event();
     let mut data = CollectedData::default(); // fingerprint is None
 
@@ -220,14 +220,14 @@ fn test_no_fingerprint_passes() {
 
 #[test]
 fn test_depends_on_fingerprinter() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     assert_eq!(detector.hard_dependencies(), &["Fingerprinter"]);
     assert!(detector.order_after().is_empty());
 }
 
 #[test]
 fn test_plugin_metadata() {
-    let detector = DuplicateDetector::new(Duration::from_secs(60));
+    let detector = DuplicateDetector::new(Duration::from_mins(1));
     assert_eq!(detector.name(), "DuplicateDetector");
     assert!(detector.is_available());
 }
