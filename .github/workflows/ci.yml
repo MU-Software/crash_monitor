@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main, "release/**"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,10 +26,46 @@ jobs:
 
   privileged-e2e:
     name: Signed privileged E2E
-    runs-on: [self-hosted, macOS, ARM64, crash-monitor-e2e]
+    # Signing credentials must never be exposed to code from pull requests.
+    # The fast checks above still run for PRs; signed E2E runs after merge or
+    # when a trusted maintainer dispatches this workflow manually.
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Install signing certificate
+        shell: bash
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.CRASH_MONITOR_BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.CRASH_MONITOR_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.CRASH_MONITOR_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          : "${BUILD_CERTIFICATE_BASE64:?CRASH_MONITOR_BUILD_CERTIFICATE_BASE64 is not configured}"
+          : "${P12_PASSWORD:?CRASH_MONITOR_P12_PASSWORD is not configured}"
+          : "${KEYCHAIN_PASSWORD:?CRASH_MONITOR_KEYCHAIN_PASSWORD is not configured}"
+
+          certificate_path="$RUNNER_TEMP/crash-monitor-signing.p12"
+          keychain_path="$RUNNER_TEMP/crash-monitor-signing.keychain-db"
+          trap 'rm -f "$certificate_path"' EXIT
+
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" \
+            | base64 --decode -o "$certificate_path"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$P12_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
