@@ -13,6 +13,51 @@ use crate::collectors::RawData;
 //  Plugin dependency metadata
 // ═══════════════════════════════════════════════
 
+/// Stable process-wide plugin identity.
+///
+/// The inner value is restricted to `'static` registration data so runtime
+/// display names and user-controlled strings cannot become graph identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PluginId(&'static str);
+
+impl PluginId {
+    #[must_use]
+    pub const fn new(id: &'static str) -> Self {
+        Self(id)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for PluginId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl AsRef<str> for PluginId {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
+impl PartialEq<&str> for PluginId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+/// A typed dependency edge. Hard data requirements and order-only edges are
+/// intentionally distinct values and share one representation in every stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginDependency {
+    pub plugin: PluginId,
+    pub kind: DependencyKind,
+}
+
 /// Pipeline stage in which a plugin is registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PluginCategory {

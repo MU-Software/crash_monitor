@@ -35,8 +35,8 @@ pub use traits::{
 };
 pub use types::{
     CaptureOutcome, CapturePayload, CapturedEvent, CollectedData, CrashEvent, DependencyKind,
-    Diagnostics, PluginCategory, PluginDiagnostic, PluginStatus, PluginTimeout, Priority,
-    RawShmSnapshot, ReportResult, ReportType, TerminationReason,
+    Diagnostics, PluginCategory, PluginDependency, PluginDiagnostic, PluginId, PluginStatus,
+    PluginTimeout, Priority, RawShmSnapshot, ReportResult, ReportType, TerminationReason,
 };
 
 /// Immutable per-trigger report policy installed in a [`Pipeline`].
@@ -1276,27 +1276,25 @@ impl Pipeline {
         let phases = self
             .post_processors
             .iter()
-            .map(|plugin| (plugin.name(), plugin.phase()))
+            .map(|plugin| (plugin.id(), plugin.phase()))
             .collect::<std::collections::BTreeMap<_, _>>();
         for plugin in &self.post_processors {
-            for (dependencies, kind) in [
-                (plugin.hard_dependencies(), DependencyKind::Hard),
-                (plugin.order_after(), DependencyKind::OrderOnly),
-            ] {
-                for dependency in dependencies {
-                    if phases.get(dependency).is_some_and(|dependency_phase| {
+            for dependency in plugin.dependencies() {
+                if phases
+                    .get(&dependency.plugin)
+                    .is_some_and(|dependency_phase| {
                         post_processor_phase_rank(*dependency_phase)
                             > post_processor_phase_rank(plugin.phase())
-                    }) {
-                        return Err(
-                            crate::config::ConfigValidationError::InvalidDependencyOrder {
-                                category: PluginCategory::PostProcessor,
-                                plugin_id: plugin.name().to_string(),
-                                dependency: (*dependency).to_string(),
-                                kind,
-                            },
-                        );
-                    }
+                    })
+                {
+                    return Err(
+                        crate::config::ConfigValidationError::InvalidDependencyOrder {
+                            category: PluginCategory::PostProcessor,
+                            plugin_id: plugin.id().to_string(),
+                            dependency: dependency.plugin.to_string(),
+                            kind: dependency.kind,
+                        },
+                    );
                 }
             }
         }
@@ -1369,15 +1367,11 @@ fn stable_plugin_order<T: Plugin + ?Sized>(
             .iter()
             .enumerate()
             .filter(|(_, (_, plugin))| {
-                plugin
-                    .hard_dependencies()
-                    .iter()
-                    .chain(plugin.order_after())
-                    .all(|dependency| {
-                        !remaining
-                            .iter()
-                            .any(|(_, pending)| pending.name() == *dependency)
-                    })
+                plugin.dependencies().iter().all(|dependency| {
+                    !remaining
+                        .iter()
+                        .any(|(_, pending)| pending.id() == dependency.plugin)
+                })
             })
             .min_by_key(|(_, (insertion_index, plugin))| {
                 (
@@ -1430,16 +1424,18 @@ fn plugin_graph_nodes<T: Plugin + ?Sized>(
     plugins
         .iter()
         .map(|plugin| crate::config::PluginGraphNode {
-            id: plugin.name().to_string(),
+            id: plugin.id().to_string(),
             hard_dependencies: plugin
-                .hard_dependencies()
+                .dependencies()
                 .iter()
-                .map(|dependency| (*dependency).to_string())
+                .filter(|dependency| dependency.kind == DependencyKind::Hard)
+                .map(|dependency| dependency.plugin.to_string())
                 .collect(),
             order_dependencies: plugin
-                .order_after()
+                .dependencies()
                 .iter()
-                .map(|dependency| (*dependency).to_string())
+                .filter(|dependency| dependency.kind == DependencyKind::OrderOnly)
+                .map(|dependency| dependency.plugin.to_string())
                 .collect(),
         })
         .collect()
@@ -1559,7 +1555,7 @@ pub fn default_macos_pipeline_from_config_with_runtime(
     let platform: Arc<dyn PlatformOps> = Arc::new(MacOsPlatform::default());
 
     // Dependency closure and category switches were resolved at config load.
-    let on = |plugin_id: &str| validated.plugin_enabled(plugin_id);
+    let on = |plugin_id: &'static str| validated.plugin_enabled(PluginId::new(plugin_id));
 
     // ── Filters ──
     let mut filters: Vec<Box<dyn Filter>> = vec![];

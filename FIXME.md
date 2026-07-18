@@ -690,10 +690,10 @@
 
 ### P2-06. plugin identity와 dependency 모델을 typed하게 만든다
 
-- [ ] 문자열 이름 대신 stable typed `PluginId`를 사용한다.
-- [ ] dependency graph를 topological order로 계산하고 cycle을 진단한다.
-- [ ] hard data dependency와 단순 실행 순서를 별개 타입/field로 표현한다.
-- [ ] 모든 category에 같은 uniqueness, dependency, skip contract를 적용한다.
+- [x] 문자열 이름 대신 stable typed `PluginId`를 사용한다.
+- [x] dependency graph를 topological order로 계산하고 cycle을 진단한다.
+- [x] hard data dependency와 단순 실행 순서를 별개 타입/field로 표현한다.
+- [x] 모든 category에 같은 uniqueness, dependency, skip contract를 적용한다.
 
 범위: pipeline traits/types/builder.
 

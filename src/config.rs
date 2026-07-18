@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::pipeline::types::{DependencyKind, PluginCategory};
+use crate::pipeline::types::{DependencyKind, PluginCategory, PluginId};
 use crate::utils::paths;
 
 // ═══════════════════════════════════════════════════
@@ -143,7 +143,7 @@ pub struct ValidatedConfig {
     /// Trigger policy with the `triggers.enabled` category switch resolved.
     pub triggers: ValidatedTriggersConfig,
     diagnostics: Vec<ConfigValidationDiagnostic>,
-    enabled_plugins: BTreeSet<&'static str>,
+    enabled_plugins: BTreeSet<PluginId>,
     collection_policy: CollectionPolicy,
     config: CrashReporterConfig,
 }
@@ -164,8 +164,12 @@ impl ValidatedConfig {
     /// Effective plugin enablement after category switches and hard
     /// dependency closure have been applied.
     #[must_use]
-    pub(crate) fn plugin_enabled(&self, plugin_id: &str) -> bool {
-        self.enabled && self.enabled_plugins.contains(plugin_id)
+    pub(crate) fn plugin_enabled(&self, plugin_id: impl AsRef<str>) -> bool {
+        self.enabled
+            && self
+                .enabled_plugins
+                .iter()
+                .any(|enabled| enabled.as_str() == plugin_id.as_ref())
     }
 
     /// Effective immutable sensitive-data policy for capture and persistence.
@@ -1280,7 +1284,7 @@ fn find_dependency_cycle(
 // ═══════════════════════════════════════════════════
 fn resolve_plugin_enablement(
     config: &CrashReporterConfig,
-) -> Result<(BTreeSet<&'static str>, Vec<ConfigValidationDiagnostic>), ConfigValidationError> {
+) -> Result<(BTreeSet<PluginId>, Vec<ConfigValidationDiagnostic>), ConfigValidationError> {
     let categories: Vec<(PluginCategory, Vec<PluginGraphNode>)> = [
         PluginCategory::Filter,
         PluginCategory::Collector,
@@ -1318,7 +1322,7 @@ fn resolve_plugin_enablement(
 
     let mut diagnostics = sensitive_collector_diagnostics(config);
     let requested = configured_plugin_toggles(config);
-    let enabled: BTreeSet<&'static str> = requested
+    let enabled: BTreeSet<PluginId> = requested
         .into_iter()
         .filter_map(|(id, requested)| requested.then_some(id))
         .collect();
@@ -1426,7 +1430,7 @@ fn sensitive_evidence_diagnostics(config: &CrashReporterConfig) -> Vec<ConfigVal
 
 fn resolve_collection_policy(
     config: &CrashReporterConfig,
-    enabled_plugins: &BTreeSet<&'static str>,
+    enabled_plugins: &BTreeSet<PluginId>,
 ) -> CollectionPolicy {
     if !config.enabled {
         return CollectionPolicy::MINIMAL;
@@ -1437,16 +1441,19 @@ fn resolve_collection_policy(
             && config.collectors.thread.enabled
             && config.collectors.thread.stack_memory
             && privacy_allows_diagnostic_evidence(&config.privacy),
-        capture_shm_screenshots: enabled_plugins.contains("ScreenshotCollector"),
-        capture_shm_attachments: enabled_plugins.contains("AttachmentCollector"),
+        capture_shm_screenshots: enabled_plugins.contains(&PluginId::new("ScreenshotCollector")),
+        capture_shm_attachments: enabled_plugins.contains(&PluginId::new("AttachmentCollector")),
         persist_raw_shm: config.privacy.raw_shm && privacy_allows_full_evidence(&config.privacy),
     }
 }
 
-fn close_plugin_enablement(
+fn close_plugin_enablement<T>(
     specs: &[PluginSpec],
-    mut enabled: BTreeSet<&'static str>,
-) -> (BTreeSet<&'static str>, Vec<ConfigValidationDiagnostic>) {
+    mut enabled: BTreeSet<T>,
+) -> (BTreeSet<T>, Vec<ConfigValidationDiagnostic>)
+where
+    T: Copy + Ord + AsRef<str>,
+{
     let mut diagnostics = Vec::new();
 
     // Repeated removal computes the greatest hard-dependency-closed subset of
@@ -1454,22 +1461,26 @@ fn close_plugin_enablement(
     loop {
         let mut removed = None;
         for spec in specs {
-            if !enabled.contains(spec.id) {
-                continue;
-            }
-            if let Some(dependency) = spec
-                .hard_dependencies
+            let Some(enabled_id) = enabled
                 .iter()
-                .find(|dependency| !enabled.contains(**dependency))
-            {
-                removed = Some((*spec, *dependency));
+                .find(|enabled| enabled.as_ref() == spec.id)
+                .copied()
+            else {
+                continue;
+            };
+            if let Some(dependency) = spec.hard_dependencies.iter().find(|dependency| {
+                !enabled
+                    .iter()
+                    .any(|enabled| enabled.as_ref() == **dependency)
+            }) {
+                removed = Some((*spec, enabled_id, *dependency));
                 break;
             }
         }
-        let Some((spec, dependency)) = removed else {
+        let Some((spec, enabled_id, dependency)) = removed else {
             break;
         };
-        enabled.remove(spec.id);
+        enabled.remove(&enabled_id);
         diagnostics.push(ConfigValidationDiagnostic::DependentDisabled {
             category: spec.category,
             plugin_id: spec.id.to_string(),
@@ -1481,30 +1492,30 @@ fn close_plugin_enablement(
 }
 
 #[allow(clippy::too_many_lines)] // explicit mapping is the config/plugin SSOT boundary
-fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str, bool)> {
+fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(PluginId, bool)> {
     vec![
         (
-            "DiskSpaceFilter",
+            PluginId::new("DiskSpaceFilter"),
             config.filters.enabled && config.filters.disk_space.enabled,
         ),
         (
-            "RateLimiter",
+            PluginId::new("RateLimiter"),
             config.filters.enabled && config.filters.rate_limiter.enabled,
         ),
         (
-            "ThreadCollector",
+            PluginId::new("ThreadCollector"),
             config.collectors.enabled && config.collectors.thread.enabled,
         ),
         (
-            "BreadcrumbCollector",
+            PluginId::new("BreadcrumbCollector"),
             config.collectors.enabled && config.collectors.breadcrumb.enabled,
         ),
         (
-            "ContextCollector",
+            PluginId::new("ContextCollector"),
             config.collectors.enabled && config.collectors.context.enabled,
         ),
         (
-            "MemoryCollector",
+            PluginId::new("MemoryCollector"),
             sensitive_collector_enabled(
                 config,
                 "MemoryCollector",
@@ -1512,11 +1523,11 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "DylibCollector",
+            PluginId::new("DylibCollector"),
             config.collectors.enabled && config.collectors.dylib.enabled,
         ),
         (
-            "ScreenshotCollector",
+            PluginId::new("ScreenshotCollector"),
             sensitive_collector_enabled(
                 config,
                 "ScreenshotCollector",
@@ -1524,7 +1535,7 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "AttachmentCollector",
+            PluginId::new("AttachmentCollector"),
             sensitive_collector_enabled(
                 config,
                 "AttachmentCollector",
@@ -1532,7 +1543,7 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "EnvironmentCollector",
+            PluginId::new("EnvironmentCollector"),
             sensitive_collector_enabled(
                 config,
                 "EnvironmentCollector",
@@ -1540,7 +1551,7 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "ProcessOutputCollector",
+            PluginId::new("ProcessOutputCollector"),
             sensitive_collector_enabled(
                 config,
                 "ProcessOutputCollector",
@@ -1548,67 +1559,67 @@ fn configured_plugin_toggles(config: &CrashReporterConfig) -> Vec<(&'static str,
             ),
         ),
         (
-            "SessionEnricher",
+            PluginId::new("SessionEnricher"),
             config.pre_processors.enabled && config.pre_processors.session.enabled,
         ),
         (
-            "SymbolResolver",
+            PluginId::new("SymbolResolver"),
             config.pre_processors.enabled && config.pre_processors.symbolizer.enabled,
         ),
         (
-            "Fingerprinter",
+            PluginId::new("Fingerprinter"),
             config.pre_processors.enabled && config.pre_processors.fingerprint.enabled,
         ),
         (
-            "BuildInfoEnricher",
+            PluginId::new("BuildInfoEnricher"),
             config.pre_processors.enabled && config.pre_processors.build_info.enabled,
         ),
         (
-            "DuplicateDetector",
+            PluginId::new("DuplicateDetector"),
             config.pre_processors.enabled && config.pre_processors.duplicate.enabled,
         ),
         (
-            "Sanitizer",
+            PluginId::new("Sanitizer"),
             config.pre_processors.enabled && config.pre_processors.sanitizer.enabled,
         ),
         (
-            "RawCleanup",
+            PluginId::new("RawCleanup"),
             config.post_processors.enabled && config.post_processors.raw_cleanup.enabled,
         ),
         (
-            "SessionRecorder",
+            PluginId::new("SessionRecorder"),
             config.post_processors.enabled && config.post_processors.session_recorder.enabled,
         ),
         (
-            "PNGConverter",
+            PluginId::new("PNGConverter"),
             config.post_processors.enabled && config.post_processors.png_converter.enabled,
         ),
         (
-            "FeedbackDialog",
+            PluginId::new("FeedbackDialog"),
             config.post_processors.enabled && config.post_processors.feedback_dialog.enabled,
         ),
         (
-            "ZIPArchiver",
+            PluginId::new("ZIPArchiver"),
             config.post_processors.enabled && config.post_processors.zip_archiver.enabled,
         ),
         (
-            "MoveToSent",
+            PluginId::new("MoveToSent"),
             config.post_processors.enabled && config.post_processors.move_to_sent.enabled,
         ),
         (
-            "LogRotator",
+            PluginId::new("LogRotator"),
             config.post_processors.enabled && config.post_processors.log_rotator.enabled,
         ),
         (
-            "RetentionManager",
+            PluginId::new("RetentionManager"),
             config.post_processors.enabled && config.post_processors.retention.enabled,
         ),
         (
-            "ConsoleNotifier",
+            PluginId::new("ConsoleNotifier"),
             config.notifiers.enabled && config.notifiers.console.enabled,
         ),
         (
-            "SystemNotification",
+            PluginId::new("SystemNotification"),
             config.notifiers.enabled && config.notifiers.system_notification.enabled,
         ),
     ]
