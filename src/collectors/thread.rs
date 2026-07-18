@@ -235,14 +235,8 @@ fn get_registers(
     let state = plat.get_thread_state(thread)?;
     context.checkpoint()?;
 
-    // The highest fixed access is CPSR at word 66. Production returns the full
-    // 68-word ABI state, while defensive/mock callers must provide at least 67.
-    if state.len() < 67 {
-        return Err(format!(
-            "ARM64 thread state is truncated: got {} words, need at least 67",
-            state.len()
-        ));
-    }
+    // `ArmThreadState64` construction has already verified that the kernel or
+    // mock response covers the highest fixed access (CPSR at word 66).
 
     let mut regs = BTreeMap::new();
 

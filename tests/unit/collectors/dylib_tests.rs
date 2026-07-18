@@ -1,4 +1,5 @@
 use super::*;
+use crate::platform::mock::MockPlatform;
 
 fn make_image(path: &str, base: u64) -> RawImageData {
     RawImageData {
@@ -101,4 +102,20 @@ fn c_string_keeps_last_successful_prefix_when_larger_read_fails() {
     )
     .unwrap();
     assert_eq!(value, "a".repeat(128));
+}
+
+#[test]
+fn test_loaded_image_enumeration_rejects_short_task_info_count() {
+    let mut platform = MockPlatform::default();
+    platform
+        .task_info_responses
+        .insert(TASK_DYLD_INFO, vec![0; TASK_DYLD_INFO_WORDS - 1]);
+
+    let error = enumerate_loaded_images(
+        &platform,
+        0,
+        &crate::pipeline::PluginContext::without_deadline(),
+    )
+    .unwrap_err();
+    assert!(error.contains("returned 4 words; expected 5"));
 }

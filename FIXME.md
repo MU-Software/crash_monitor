@@ -313,10 +313,10 @@
 
 ### P1-18. task/thread info FFI를 typed aligned API로 바꾼다
 
-- [ ] alignment 1 byte wrapper 대신 정렬된 `[u32; N]` 또는 flavor별 전용 타입을 사용한다.
-- [ ] caller buffer 크기에 맞는 input count를 넘기고 kernel이 실제 반환한 word count를 검증·반환한다.
-- [ ] ARM64 thread state는 ABI의 68-word 전용 타입을 우선 사용한다. 가변 입력을 받을 때 현재 consumer의 최대 index 66을 기준으로 최소 67 words를 검사한다.
-- [ ] 작은 buffer, short count, unknown flavor를 테스트한다.
+- [x] alignment 1 byte wrapper 대신 정렬된 `[u32; N]` 또는 flavor별 전용 타입을 사용한다.
+- [x] caller buffer 크기에 맞는 input count를 넘기고 kernel이 실제 반환한 word count를 검증·반환한다.
+- [x] ARM64 thread state는 ABI의 68-word 전용 타입을 우선 사용한다. 가변 입력을 받을 때 현재 consumer의 최대 index 66을 기준으로 최소 67 words를 검사한다.
+- [x] 작은 buffer, short count, unknown flavor를 테스트한다.
 
 범위: `src/platform/mod.rs`, `src/platform/macos/ffi/memory.rs`, thread collector.
 

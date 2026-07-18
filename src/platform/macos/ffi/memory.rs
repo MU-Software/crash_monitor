@@ -163,23 +163,36 @@ fn host_page_size() -> Result<u64, String> {
     }
 }
 
-/// Read `task_info` with a given flavor, writing into the provided buffer.
+/// Read `task_info` with a given flavor into an aligned word buffer.
 ///
 /// # Errors
 /// Returns `MachError` if the `task_info` kernel call fails.
-pub fn get_task_info<T>(task: mach_port_t, flavor: u32, info: &mut T) -> Result<(), MachError> {
-    let mut count = (std::mem::size_of::<T>() / std::mem::size_of::<u32>()) as u32;
+pub fn get_task_info_words(
+    task: mach_port_t,
+    flavor: u32,
+    words: &mut [u32],
+) -> Result<usize, MachError> {
+    let Ok(mut count) = u32::try_from(words.len()) else {
+        return Err(MachError {
+            function: "task_info(buffer too large)",
+            kern_return: -1,
+        });
+    };
 
     // SAFETY: task_info writes into the provided buffer up to count u32 words.
     let kr = unsafe {
         task_info(
             task,
             flavor,
-            std::ptr::from_mut::<T>(info) as task_info_t,
+            words.as_mut_ptr().cast::<i32>() as task_info_t,
             &raw mut count,
         )
     };
-    mach_result("task_info", kr)
+    mach_result("task_info", kr)?;
+    usize::try_from(count).map_err(|_| MachError {
+        function: "task_info(invalid returned count)",
+        kern_return: -1,
+    })
 }
 
 /// Get high-level VM statistics for a task.
@@ -188,7 +201,19 @@ pub fn get_task_info<T>(task: mach_port_t, flavor: u32, info: &mut T) -> Result<
 /// Returns `MachError` if the `task_info` kernel call fails.
 pub fn get_task_vm_info(task: mach_port_t) -> Result<TaskVmSummary, MachError> {
     let mut info: task_vm_info = unsafe { std::mem::zeroed() };
-    get_task_info(task, TASK_VM_INFO, &mut info)?;
+    let capacity = std::mem::size_of::<task_vm_info>() / std::mem::size_of::<u32>();
+    // SAFETY: task_vm_info is at least u32-aligned and this slice spans exactly
+    // its initialized storage. task_info writes at most the supplied capacity.
+    let words = unsafe {
+        std::slice::from_raw_parts_mut(std::ptr::from_mut(&mut info).cast::<u32>(), capacity)
+    };
+    let returned = get_task_info_words(task, TASK_VM_INFO, words)?;
+    if returned != capacity {
+        return Err(MachError {
+            function: "task_info(TASK_VM_INFO short count)",
+            kern_return: -1,
+        });
+    }
     Ok(TaskVmSummary {
         virtual_size: info.virtual_size,
         resident_size: info.resident_size,

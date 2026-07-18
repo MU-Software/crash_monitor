@@ -88,8 +88,8 @@ impl Collector for DylibCollector {
 
 const TASK_DYLD_INFO: u32 = 17;
 
-/// Size of `TaskDyldInfo` C struct: u64 + u64 + i32 = 20 bytes.
-const TASK_DYLD_INFO_SIZE: usize = 20;
+/// `task_dyld_info_data_t` payload size in Mach natural words.
+const TASK_DYLD_INFO_WORDS: usize = 5;
 
 #[repr(C)]
 struct DyldAllImageInfos64 {
@@ -118,11 +118,21 @@ fn enumerate_loaded_images(
 ) -> Result<Vec<RawImageData>, String> {
     context.checkpoint()?;
     // Step 1: Get dyld_all_image_infos address via task_info
-    let mut buf = [0u8; TASK_DYLD_INFO_SIZE];
-    platform
-        .get_task_info_bytes(task, TASK_DYLD_INFO, &mut buf)
+    let mut words = [0u32; TASK_DYLD_INFO_WORDS];
+    let returned = platform
+        .get_task_info_words(task, TASK_DYLD_INFO, &mut words)
         .map_err(|e| format!("task_info(TASK_DYLD_INFO) failed: {e}"))?;
+    if returned != TASK_DYLD_INFO_WORDS {
+        return Err(format!(
+            "task_info(TASK_DYLD_INFO) returned {returned} words; expected {TASK_DYLD_INFO_WORDS}"
+        ));
+    }
     context.checkpoint()?;
+
+    let mut buf = [0u8; TASK_DYLD_INFO_WORDS * std::mem::size_of::<u32>()];
+    for (chunk, word) in buf.chunks_exact_mut(size_of::<u32>()).zip(words) {
+        chunk.copy_from_slice(&word.to_ne_bytes());
+    }
 
     // Parse TaskDyldInfo fields: u64 all_image_info_addr (offset 0),
     // u64 all_image_info_size (offset 8), i32 all_image_info_format (offset 16)

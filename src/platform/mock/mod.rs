@@ -9,8 +9,8 @@ use mach2::port::mach_port_t;
 use crate::pipeline::PluginContext;
 
 use super::{
-    PlatformOps, SupervisorHealth, TaskControlFailure, TaskVmSummary, VmRegionEnumerationQuality,
-    VmRegionInfo,
+    ArmThreadState64, PlatformOps, SupervisorHealth, TaskControlFailure, TaskVmSummary,
+    VmRegionEnumerationQuality, VmRegionInfo,
 };
 
 /// Mock thread data: port, optional name, register state [u32; 68].
@@ -39,8 +39,8 @@ pub struct MockPlatform {
     pub regions: Vec<VmRegionInfo>,
     pub vm_region_quality: VmRegionEnumerationQuality,
     pub vm_info: Option<TaskVmSummary>,
-    /// Task info responses: flavor → byte buffer.
-    pub task_info_responses: BTreeMap<u32, Vec<u8>>,
+    /// Task info responses: flavor → native-endian u32 words.
+    pub task_info_responses: BTreeMap<u32, Vec<u32>>,
     /// If true, `suspend_task` returns Err.
     pub suspend_fails: bool,
     /// If true, `resume_task` returns Err.
@@ -216,12 +216,12 @@ impl PlatformOps for MockPlatform {
             .ok_or_else(|| format!("mock: thread {thread} not found"))
     }
 
-    fn get_thread_state(&self, thread: mach_port_t) -> Result<Vec<u32>, String> {
+    fn get_thread_state(&self, thread: mach_port_t) -> Result<ArmThreadState64, String> {
         self.threads
             .iter()
             .find(|t| t.port == thread)
-            .map(|t| t.state.clone())
             .ok_or_else(|| format!("mock: thread {thread} not found"))
+            .and_then(|thread| ArmThreadState64::try_from_words(&thread.state))
     }
 
     fn deallocate_thread_port(&self, thread: mach_port_t) {
@@ -270,25 +270,31 @@ impl PlatformOps for MockPlatform {
             .ok_or_else(|| "mock: no vm_info".into())
     }
 
-    fn get_task_info_bytes(
+    fn get_task_info_words(
         &self,
         _task: mach_port_t,
         flavor: u32,
-        buf: &mut [u8],
-    ) -> Result<(), String> {
+        words: &mut [u32],
+    ) -> Result<usize, String> {
         let data = self
             .task_info_responses
             .get(&flavor)
             .ok_or_else(|| format!("mock: no task_info for flavor {flavor}"))?;
-        let len = buf.len().min(data.len());
-        buf[..len].copy_from_slice(&data[..len]);
-        Ok(())
+        if data.len() > words.len() {
+            return Err(format!(
+                "mock: task_info buffer has {} words, response requires {}",
+                words.len(),
+                data.len()
+            ));
+        }
+        words[..data.len()].copy_from_slice(data);
+        Ok(data.len())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MockPlatform, PlatformOps, VmRegionEnumerationQuality};
+    use super::{MockPlatform, MockThread, PlatformOps, VmRegionEnumerationQuality};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -353,5 +359,49 @@ mod tests {
         let (regions, quality) = mock.enumerate_vm_regions(0, &context).unwrap();
         assert!(regions.is_empty());
         assert_eq!(quality, VmRegionEnumerationQuality::CaptureDeadline);
+    }
+
+    #[test]
+    fn test_mock_task_info_reports_short_count_and_rejects_small_buffer() {
+        let mut mock = MockPlatform::default();
+        mock.task_info_responses.insert(17, vec![1, 2, 3, 4]);
+
+        let mut ample = [0_u32; 5];
+        assert_eq!(mock.get_task_info_words(0, 17, &mut ample).unwrap(), 4);
+        assert_eq!(&ample[..4], &[1, 2, 3, 4]);
+
+        let mut small = [0_u32; 3];
+        assert!(
+            mock.get_task_info_words(0, 17, &mut small)
+                .unwrap_err()
+                .contains("requires 4")
+        );
+    }
+
+    #[test]
+    fn test_mock_task_info_rejects_unknown_flavor() {
+        let mock = MockPlatform::default();
+        assert!(
+            mock.get_task_info_words(0, 999, &mut [0; 4])
+                .unwrap_err()
+                .contains("no task_info for flavor 999")
+        );
+    }
+
+    #[test]
+    fn test_mock_thread_state_requires_all_consumer_words() {
+        let mut mock = MockPlatform::default();
+        mock.threads.push(MockThread {
+            port: 10,
+            stable_id: 10,
+            name: None,
+            state: vec![0; 66],
+        });
+        assert!(mock.get_thread_state(10).unwrap_err().contains("66 words"));
+
+        mock.threads[0].state.push(123);
+        let state = mock.get_thread_state(10).unwrap();
+        assert_eq!(state[66], 123);
+        assert_eq!(state.words().len(), 68);
     }
 }

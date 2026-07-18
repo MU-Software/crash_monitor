@@ -3,6 +3,7 @@
 use mach2::port::mach_port_t;
 use mach2::thread_act::thread_get_state;
 
+use crate::platform::ArmThreadState64;
 use crate::platform::macos::thread::extract_thread_name;
 use crate::platform::macos::types::{
     ARM_THREAD_STATE64, ARM_THREAD_STATE64_COUNT, MachError, mach_result,
@@ -80,9 +81,7 @@ pub fn get_thread_identifier(thread: mach_port_t) -> Result<u64, MachError> {
 ///
 /// # Errors
 /// Returns `MachError` if `thread_get_state` fails or the returned count is unexpected.
-pub fn get_thread_state(
-    thread: mach_port_t,
-) -> Result<[u32; ARM_THREAD_STATE64_COUNT as usize], MachError> {
+pub fn get_thread_state(thread: mach_port_t) -> Result<ArmThreadState64, MachError> {
     let mut state = [0u32; ARM_THREAD_STATE64_COUNT as usize];
     let mut count = ARM_THREAD_STATE64_COUNT;
 
@@ -104,7 +103,10 @@ pub fn get_thread_state(
         });
     }
 
-    Ok(state)
+    ArmThreadState64::try_from_words(&state).map_err(|_| MachError {
+        function: "thread_get_state(invalid ARM64 state)",
+        kern_return: -1,
+    })
 }
 
 /// Get the name of a thread via `thread_info(THREAD_EXTENDED_INFO)`.

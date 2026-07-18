@@ -21,6 +21,51 @@ use std::sync::Mutex;
 
 use crate::pipeline::PluginContext;
 
+/// ABI-aligned ARM64 register state returned by `thread_get_state`.
+///
+/// The kernel flavor has a 68-word capacity. Consumers currently access
+/// through word 66; word 67 is ABI padding and may be absent from variable
+/// mock/fixture inputs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArmThreadState64([u32; 68]);
+
+impl ArmThreadState64 {
+    pub const WORD_CAPACITY: usize = 68;
+    pub const MIN_CONSUMER_WORDS: usize = 67;
+
+    /// Convert a variable word response into the dedicated ABI type.
+    ///
+    /// # Errors
+    /// Returns an error when the response cannot cover every word read by the
+    /// register consumer or exceeds the kernel flavor capacity.
+    pub fn try_from_words(words: &[u32]) -> Result<Self, String> {
+        if !(Self::MIN_CONSUMER_WORDS..=Self::WORD_CAPACITY).contains(&words.len()) {
+            return Err(format!(
+                "ARM_THREAD_STATE64 returned {} words; expected {}..={}",
+                words.len(),
+                Self::MIN_CONSUMER_WORDS,
+                Self::WORD_CAPACITY
+            ));
+        }
+        let mut state = [0; Self::WORD_CAPACITY];
+        state[..words.len()].copy_from_slice(words);
+        Ok(Self(state))
+    }
+
+    #[must_use]
+    pub const fn words(&self) -> &[u32; Self::WORD_CAPACITY] {
+        &self.0
+    }
+}
+
+impl std::ops::Index<usize> for ArmThreadState64 {
+    type Output = u32;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
 /// Abstraction over Mach kernel APIs used by collectors and pipeline.
 /// Enables mock-based unit testing without real child processes.
 pub trait PlatformOps: Send + Sync {
@@ -93,11 +138,11 @@ pub trait PlatformOps: Send + Sync {
     /// Returns an error string if the platform cannot query a stable ID.
     fn get_thread_identifier(&self, thread: mach_port_t) -> Result<u64, String>;
 
-    /// Returns ARM64 register state as `[u32; 68]`.
+    /// Returns ABI-aligned ARM64 register state.
     ///
     /// # Errors
     /// Returns an error string if the platform call fails.
-    fn get_thread_state(&self, thread: mach_port_t) -> Result<Vec<u32>, String>;
+    fn get_thread_state(&self, thread: mach_port_t) -> Result<ArmThreadState64, String>;
 
     /// Deallocate a thread port's send right.
     fn deallocate_thread_port(&self, thread: mach_port_t);
@@ -135,17 +180,17 @@ pub trait PlatformOps: Send + Sync {
     /// Returns an error string if the platform call fails.
     fn get_task_vm_info(&self, task: mach_port_t) -> Result<TaskVmSummary, String>;
 
-    /// Read `task_info` for a given flavor into a byte buffer.
-    /// The caller is responsible for interpreting the bytes as the correct type.
+    /// Read `task_info` words for a given flavor into an aligned buffer.
+    /// Returns the word count actually written by the kernel.
     ///
     /// # Errors
     /// Returns an error string if the platform call fails or the buffer is too large.
-    fn get_task_info_bytes(
+    fn get_task_info_words(
         &self,
         task: mach_port_t,
         flavor: u32,
-        buf: &mut [u8],
-    ) -> Result<(), String>;
+        words: &mut [u32],
+    ) -> Result<usize, String>;
 }
 
 /// Real macOS implementation — delegates to the free functions in `macos::*`.
@@ -207,10 +252,8 @@ impl PlatformOps for MacOsPlatform {
         macos::get_thread_identifier(thread).map_err(|e| e.to_string())
     }
 
-    fn get_thread_state(&self, thread: mach_port_t) -> Result<Vec<u32>, String> {
-        macos::get_thread_state(thread)
-            .map(|arr| arr.to_vec())
-            .map_err(|e| e.to_string())
+    fn get_thread_state(&self, thread: mach_port_t) -> Result<ArmThreadState64, String> {
+        macos::get_thread_state(thread).map_err(|e| e.to_string())
     }
 
     fn deallocate_thread_port(&self, thread: mach_port_t) {
@@ -238,26 +281,12 @@ impl PlatformOps for MacOsPlatform {
         macos::get_task_vm_info(task).map_err(|e| e.to_string())
     }
 
-    fn get_task_info_bytes(
+    fn get_task_info_words(
         &self,
         task: mach_port_t,
         flavor: u32,
-        buf: &mut [u8],
-    ) -> Result<(), String> {
-        // SAFETY: We reinterpret the byte buffer as the appropriate struct type.
-        // The caller ensures the buffer is correctly sized.
-        // We use get_task_info internally which handles alignment via kernel.
-        #[repr(C)]
-        struct RawBuf([u8; 256]);
-
-        if buf.len() > 256 {
-            return Err("task_info buffer too large".into());
-        }
-
-        let mut raw = RawBuf([0u8; 256]);
-        raw.0[..buf.len()].copy_from_slice(buf);
-        macos::get_task_info(task, flavor, &mut raw).map_err(|e| e.to_string())?;
-        buf.copy_from_slice(&raw.0[..buf.len()]);
-        Ok(())
+        words: &mut [u32],
+    ) -> Result<usize, String> {
+        macos::get_task_info_words(task, flavor, words).map_err(|e| e.to_string())
     }
 }
