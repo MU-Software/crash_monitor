@@ -257,6 +257,7 @@ fn test_format_threads_with_registers_backtrace_and_stack() {
     regs.insert("pc".to_string(), 0xDEAD_BEEF_u64);
     let threads = vec![RawThreadData {
         thread_port: 7,
+        thread_id: 7_007,
         name: Some("main".to_string()),
         crashed: true,
         registers: Some(regs),
@@ -264,6 +265,7 @@ fn test_format_threads_with_registers_backtrace_and_stack() {
         stack_capture: Some(RawStackCapture {
             sp: 0x0001_6d4f_e000,
             bytes: vec![1, 2, 3, 4],
+            truncated: false,
         }),
     }];
     let mut symbols = BTreeMap::new();
@@ -273,7 +275,7 @@ fn test_format_threads_with_registers_backtrace_and_stack() {
     assert_eq!(out.len(), 1);
     let t = &out[0];
     assert_eq!(t.index, 0);
-    assert_eq!(t.id, 7);
+    assert_eq!(t.id, 7_007);
     assert!(t.crashed);
     assert_eq!(t.registers["pc"], "0x00000000deadbeef");
     assert_eq!(t.backtrace.len(), 1);
@@ -288,6 +290,7 @@ fn test_format_threads_with_registers_backtrace_and_stack() {
 fn test_format_threads_without_registers_has_empty_backtrace() {
     let threads = vec![RawThreadData {
         thread_port: 1,
+        thread_id: 1_001,
         name: None,
         crashed: false,
         registers: None,

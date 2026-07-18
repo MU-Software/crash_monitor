@@ -87,6 +87,9 @@ pub trait PlatformOps: Send + Sync {
     /// Returns an error string if the platform call fails.
     fn get_thread_name(&self, thread: mach_port_t) -> Result<Option<String>, String>;
 
+    /// Return the system-wide stable `THREAD_IDENTIFIER_INFO.thread_id`.
+    fn get_thread_identifier(&self, thread: mach_port_t) -> Result<u64, String>;
+
     /// Returns ARM64 register state as `[u32; 68]`.
     ///
     /// # Errors
@@ -195,6 +198,10 @@ impl PlatformOps for MacOsPlatform {
 
     fn get_thread_name(&self, thread: mach_port_t) -> Result<Option<String>, String> {
         macos::get_thread_name(thread).map_err(|e| e.to_string())
+    }
+
+    fn get_thread_identifier(&self, thread: mach_port_t) -> Result<u64, String> {
+        macos::get_thread_identifier(thread).map_err(|e| e.to_string())
     }
 
     fn get_thread_state(&self, thread: mach_port_t) -> Result<Vec<u32>, String> {

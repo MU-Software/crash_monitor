@@ -19,6 +19,7 @@ use super::{
 #[allow(dead_code)]
 pub struct MockThread {
     pub port: mach_port_t,
+    pub stable_id: u64,
     pub name: Option<String>,
     pub state: Vec<u32>,
 }
@@ -205,6 +206,14 @@ impl PlatformOps for MockPlatform {
             .iter()
             .find(|t| t.port == thread)
             .and_then(|t| t.name.clone()))
+    }
+
+    fn get_thread_identifier(&self, thread: mach_port_t) -> Result<u64, String> {
+        self.threads
+            .iter()
+            .find(|candidate| candidate.port == thread)
+            .map(|candidate| candidate.stable_id)
+            .ok_or_else(|| format!("mock: thread {thread} not found"))
     }
 
     fn get_thread_state(&self, thread: mach_port_t) -> Result<Vec<u32>, String> {

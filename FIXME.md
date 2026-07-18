@@ -513,13 +513,13 @@
 
 ### P1-39. 안정적인 thread identity와 안전한 register/unwind를 구현한다
 
-- [ ] monitor-local Mach port name 대신 `THREAD_IDENTIFIER_INFO`의 stable thread ID를 수집한다.
-- [ ] register state 길이를 검증한 뒤 fixed index를 사용한다.
-- [ ] ARM64 ABI 결과는 68 words로 받고, 가변 data를 방어적으로 처리할 때 최대 접근 index 66에 필요한 최소 67 words를 확인한다.
-- [ ] frame pointer와 `+8` 등 모든 address arithmetic에 `checked_add`를 사용한다.
-- [ ] short memory read는 partial stack으로 진단하고 unchecked frame을 만들지 않는다.
-- [ ] frame-pointer walk 외 compact unwind 등 fallback을 검토하고 arm64e PAC를 처리한다.
-- [ ] unwind 품질과 truncation reason을 report에 표시한다.
+- [x] monitor-local Mach port name 대신 `THREAD_IDENTIFIER_INFO`의 stable thread ID를 수집한다.
+- [x] register state 길이를 검증한 뒤 fixed index를 사용한다.
+- [x] ARM64 ABI 결과는 68 words로 받고, 가변 data를 방어적으로 처리할 때 최대 접근 index 66에 필요한 최소 67 words를 확인한다.
+- [x] frame pointer와 `+8` 등 모든 address arithmetic에 `checked_add`를 사용한다.
+- [x] short memory read는 partial stack으로 진단하고 unchecked frame을 만들지 않는다.
+- [x] frame-pointer walk 외 compact unwind 등 fallback을 검토하고 arm64e PAC를 처리한다.
+- [x] unwind 품질과 truncation reason을 report에 표시한다.
 
 범위: `src/collectors/thread.rs`, platform thread API.
 

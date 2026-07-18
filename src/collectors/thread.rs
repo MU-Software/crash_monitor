@@ -26,6 +26,9 @@ const MAX_CAPTURED_THREADS: usize = 512;
 #[derive(Default, Serialize, Deserialize)]
 pub struct RawThreadData {
     pub thread_port: u32,
+    /// System-wide `THREAD_IDENTIFIER_INFO.thread_id`; unlike `thread_port`,
+    /// this remains meaningful outside the monitor task.
+    pub thread_id: u64,
     pub name: Option<String>,
     pub crashed: bool,
     /// `None` if register inspection failed for this thread.
@@ -39,6 +42,7 @@ pub struct RawThreadData {
 pub struct RawStackCapture {
     pub sp: u64,
     pub bytes: Vec<u8>,
+    pub truncated: bool,
 }
 
 // ═══════════════════════════════════════════════════
@@ -136,11 +140,13 @@ fn inspect_all_threads(
     let mut inspected = Vec::with_capacity(threads.len());
     for thread in threads {
         let crashed = crashed_thread == Some(thread);
+        let thread_id = plat.get_thread_identifier(thread).unwrap_or(0);
         if context.is_timed_out() {
             // Preserve every acquired port in the payload so the pipeline's
             // PortGuard can still release it after cooperative cancellation.
             inspected.push(RawThreadData {
                 thread_port: thread,
+                thread_id,
                 name: None,
                 crashed,
                 registers: None,
@@ -155,6 +161,7 @@ fn inspect_all_threads(
         if context.is_timed_out() {
             inspected.push(RawThreadData {
                 thread_port: thread,
+                thread_id,
                 name,
                 crashed,
                 registers: None,
@@ -177,6 +184,7 @@ fn inspect_all_threads(
 
                 inspected.push(RawThreadData {
                     thread_port: thread,
+                    thread_id,
                     name,
                     crashed,
                     registers: Some(registers),
@@ -186,6 +194,7 @@ fn inspect_all_threads(
             }
             Err(_) => inspected.push(RawThreadData {
                 thread_port: thread,
+                thread_id,
                 name,
                 crashed,
                 registers: None,
@@ -225,6 +234,15 @@ fn get_registers(
     context.checkpoint()?;
     let state = plat.get_thread_state(thread)?;
     context.checkpoint()?;
+
+    // The highest fixed access is CPSR at word 66. Production returns the full
+    // 68-word ABI state, while defensive/mock callers must provide at least 67.
+    if state.len() < 67 {
+        return Err(format!(
+            "ARM64 thread state is truncated: got {} words, need at least 67",
+            state.len()
+        ));
+    }
 
     let mut regs = BTreeMap::new();
 
@@ -266,7 +284,10 @@ fn walk_backtrace(
             break;
         }
 
-        let Ok(lr) = read_u64(plat, task, current_fp + 8) else {
+        let Some(lr_address) = current_fp.checked_add(8) else {
+            break;
+        };
+        let Ok(lr) = read_u64(plat, task, lr_address) else {
             break;
         };
 
@@ -274,7 +295,9 @@ fn walk_backtrace(
             break;
         }
 
-        frames.push(lr);
+        // arm64e return addresses can carry PAC bits. Keep the canonical
+        // userspace address for lookup while the raw stack bytes remain intact.
+        frames.push(lr & 0x0000_ffff_ffff_ffff);
 
         let Ok(prev_fp) = read_u64(plat, task, current_fp) else {
             break;
@@ -320,7 +343,12 @@ fn read_stack_memory(
         .map_err(|e| format!("stack read failed: {e}"))?;
     context.checkpoint()?;
 
-    Ok(RawStackCapture { sp, bytes })
+    let truncated = bytes.len() < read_size;
+    Ok(RawStackCapture {
+        sp,
+        bytes,
+        truncated,
+    })
 }
 
 /// Determine how many bytes to read from SP, using VM region info if available.

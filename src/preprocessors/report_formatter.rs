@@ -127,16 +127,26 @@ fn format_threads(
                 #[allow(clippy::cast_possible_truncation)]
                 size: cap.bytes.len() as u64,
                 hex_dump: base64::engine::general_purpose::STANDARD.encode(&cap.bytes),
+                truncated: cap.truncated,
             });
 
             #[allow(clippy::cast_possible_truncation)] // thread count fits u32
             ThreadReport {
                 index: i as u32,
-                id: t.thread_port,
+                id: t.thread_id,
                 name: t.name.clone(),
                 crashed: t.crashed,
                 registers,
                 backtrace,
+                unwind_method: t.registers.as_ref().map(|_| "frame_pointer".to_string()),
+                unwind_truncated: t.backtrace.len() >= 129,
+                unwind_note: if t.registers.is_none() {
+                    Some("register_state_unavailable".to_string())
+                } else if t.backtrace.len() >= 129 {
+                    Some("frame_pointer_depth_limit".to_string())
+                } else {
+                    Some("frame_pointer_only; compact_unwind_fallback_unavailable".to_string())
+                },
                 stack_memory,
             }
         })

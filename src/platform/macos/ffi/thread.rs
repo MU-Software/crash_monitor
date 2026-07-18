@@ -21,6 +21,7 @@ unsafe extern "C" {
 
 /// `THREAD_EXTENDED_INFO` flavor for `thread_info()`.
 const THREAD_EXTENDED_INFO: u32 = 5;
+const THREAD_IDENTIFIER_INFO: u32 = 4;
 
 /// Matches `thread_extended_info` from `<mach/thread_info.h>`.
 #[repr(C)]
@@ -37,6 +38,37 @@ struct ThreadExtendedInfo {
     pth_priority: i32,
     pth_maxpriority: i32,
     pth_name: [u8; 64],
+}
+
+#[repr(C)]
+struct ThreadIdentifierInfo {
+    thread_id: u64,
+    thread_handle: u64,
+    dispatch_qaddr: u64,
+}
+
+/// Get the system-wide stable thread identifier rather than exposing the
+/// monitor-local Mach port name as report identity.
+pub fn get_thread_identifier(thread: mach_port_t) -> Result<u64, MachError> {
+    let mut info = ThreadIdentifierInfo {
+        thread_id: 0,
+        thread_handle: 0,
+        dispatch_qaddr: 0,
+    };
+    let mut count =
+        (std::mem::size_of::<ThreadIdentifierInfo>() / std::mem::size_of::<u32>()) as u32;
+    // SAFETY: thread_info writes at most `count` natural words to this layout,
+    // which mirrors the SDK's thread_identifier_info_data_t.
+    let kr = unsafe {
+        thread_info(
+            thread,
+            THREAD_IDENTIFIER_INFO,
+            std::ptr::from_mut(&mut info).cast::<i32>(),
+            &raw mut count,
+        )
+    };
+    mach_result("thread_info(THREAD_IDENTIFIER_INFO)", kr)?;
+    Ok(info.thread_id)
 }
 
 /// Get ARM64 register state from a thread.

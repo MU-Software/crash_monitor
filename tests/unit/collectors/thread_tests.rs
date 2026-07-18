@@ -21,11 +21,13 @@ fn test_inspect_all_threads_success() {
     plat.threads = vec![
         MockThread {
             port: 100,
+            stable_id: 1_100,
             name: Some("main".into()),
             state: make_state(&[(32, 0xDEAD, 0)]),
         },
         MockThread {
             port: 200,
+            stable_id: 1_200,
             name: None,
             state: make_state(&[(32, 0xBEEF, 0)]),
         },
@@ -41,6 +43,7 @@ fn test_inspect_all_threads_success() {
     assert_eq!(result.len(), 2);
 
     assert_eq!(result[0].thread_port, 100);
+    assert_eq!(result[0].thread_id, 1_100);
     assert!(result[0].crashed);
     assert!(result[0].registers.is_some());
     assert_eq!(result[0].name, Some("main".into()));
@@ -57,6 +60,7 @@ fn test_stack_bytes_are_read_only_when_collection_policy_allows_them() {
         let mut platform = MockPlatform::default();
         platform.threads = vec![MockThread {
             port: 100,
+            stable_id: 1_100,
             name: Some("main".into()),
             state: make_state(&[(31, 0x1000, 0), (32, 0x2000, 0)]),
         }];
@@ -98,6 +102,7 @@ fn test_thread_cap_preserves_crashed_thread_and_releases_surplus_ports() {
     plat.threads = (0..MAX_CAPTURED_THREADS + 3)
         .map(|index| MockThread {
             port: u32::try_from(index + 1).unwrap(),
+            stable_id: u64::try_from(index + 10_001).unwrap(),
             name: None,
             state: make_state(&[]),
         })
@@ -130,6 +135,7 @@ fn test_get_registers_arm64() {
     let mut plat = MockPlatform::default();
     plat.threads = vec![MockThread {
         port: 10,
+        stable_id: 1_010,
         name: None,
         state: make_state(&[
             (0, 0x42, 0x1),
@@ -144,6 +150,19 @@ fn test_get_registers_arm64() {
     assert_eq!(regs["fp"], 0xF0);
     assert_eq!(regs["sp"], 0x0001_0000_00FF);
     assert_eq!(regs["pc"], 0x0002_0000_ABCD);
+}
+
+#[test]
+fn truncated_register_state_is_rejected_before_fixed_index_access() {
+    let mut plat = MockPlatform::default();
+    plat.threads = vec![MockThread {
+        port: 10,
+        stable_id: 1_010,
+        name: None,
+        state: vec![0; 66],
+    }];
+    let error = get_registers(&plat, 10, &PluginContext::without_deadline()).unwrap_err();
+    assert!(error.contains("need at least 67"));
 }
 
 #[test]
@@ -170,6 +189,20 @@ fn test_walk_backtrace_chain() {
 fn test_walk_backtrace_null_fp() {
     let plat = MockPlatform::default();
     let frames = walk_backtrace(&plat, 0, 0, 128, &PluginContext::without_deadline()).unwrap();
+    assert!(frames.is_empty());
+}
+
+#[test]
+fn test_walk_backtrace_checked_add_stops_on_address_overflow() {
+    let plat = MockPlatform::default();
+    let frames = walk_backtrace(
+        &plat,
+        0,
+        u64::MAX - 7,
+        128,
+        &PluginContext::without_deadline(),
+    )
+    .unwrap();
     assert!(frames.is_empty());
 }
 

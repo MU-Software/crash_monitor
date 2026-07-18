@@ -33,6 +33,7 @@ fn make_data_with_backtrace(
         raw: RawData {
             threads: vec![RawThreadData {
                 thread_port: 0,
+                thread_id: 100,
                 name: Some("main".into()),
                 crashed,
                 registers: None,

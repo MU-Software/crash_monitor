@@ -164,7 +164,7 @@ pub struct ExceptionReport {
 #[derive(Serialize, Deserialize)]
 pub struct ThreadReport {
     pub index: u32,
-    pub id: u32,
+    pub id: u64,
     #[serde(default)]
     pub name: Option<String>,
     pub crashed: bool,
@@ -172,6 +172,12 @@ pub struct ThreadReport {
     pub registers: BTreeMap<String, String>,
     #[serde(default)]
     pub backtrace: Vec<BacktraceFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unwind_method: Option<String>,
+    #[serde(default)]
+    pub unwind_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unwind_note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub stack_memory: Option<StackMemoryReport>,
@@ -182,6 +188,8 @@ pub struct StackMemoryReport {
     pub sp: String,
     pub size: u64,
     pub hex_dump: String,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Serialize, Deserialize)]

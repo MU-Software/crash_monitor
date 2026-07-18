@@ -760,6 +760,7 @@ impl Collector for TrackingCollector {
         regs.insert("fp".into(), 0x2000);
         data.raw.threads.push(RawThreadData {
             thread_port: 42,
+            thread_id: 4_242,
             name: Some("main".into()),
             crashed: true,
             registers: Some(regs),
@@ -1453,6 +1454,7 @@ fn test_stack_sentinel_is_absent_from_minimal_report_and_present_after_opt_in() 
         let mut mock = MockPlatform::default();
         mock.threads = vec![crate::platform::mock::MockThread {
             port: 42,
+            stable_id: 4_242,
             name: Some("private-thread".into()),
             state,
         }];

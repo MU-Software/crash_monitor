@@ -136,6 +136,11 @@ kernel return distinguishes `SIGSEGV` from `SIGBUS`. Other exception classes do
 not pretend that every code is a `kern_return_t` or every subcode is an address.
 The current `EXC_CRASH` signal mapping is explicitly marked approximate because
 the monitor does not yet authoritatively decode every kernel encoding.
+
+Thread `id` is the system-wide `THREAD_IDENTIFIER_INFO.thread_id`, not the
+monitor-local Mach port name. `unwind_method`, `unwind_truncated`, and
+`unwind_note` expose the current frame-pointer-only quality. arm64e PAC bits are
+removed from return-address lookup values; raw stack bytes remain unchanged.
 `exception.severity` is `fatal`. `EXC_BREAKPOINT` is subscribed as a fatal
 `crash` mapped to `SIGTRAP`, and `EXC_GUARD` as a fatal `crash` mapped to
 `SIGKILL`; both retain every raw code. `EXC_RESOURCE` is deliberately not

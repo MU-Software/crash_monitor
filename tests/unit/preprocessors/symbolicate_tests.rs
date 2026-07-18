@@ -9,6 +9,7 @@ use nix::unistd::mkfifo;
 fn raw_thread(backtrace: Vec<u64>) -> RawThreadData {
     RawThreadData {
         thread_port: 0,
+        thread_id: 100,
         name: None,
         crashed: false,
         registers: None,
