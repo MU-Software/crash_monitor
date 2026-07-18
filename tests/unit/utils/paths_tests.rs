@@ -78,6 +78,59 @@ fn existing_owned_directory_mode_is_corrected_without_replacing_it() {
 }
 
 #[test]
+fn existing_owned_file_mode_is_corrected_without_replacing_it() {
+    let root = tempfile::tempdir().unwrap();
+    ensure_private_directory(root.path()).unwrap();
+    let path = root.path().join("report.json");
+    std::fs::write(&path, b"private").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let before = std::fs::symlink_metadata(&path).unwrap();
+
+    let file = open_private_file(&path).unwrap();
+    let after = file.metadata().unwrap();
+
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(after.mode() & 0o7777, PRIVATE_FILE_MODE);
+}
+
+#[test]
+fn foreign_owned_file_is_rejected_before_any_mode_correction() {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { nix::libc::geteuid() } == 0 {
+        return;
+    }
+    let path = Path::new("/private/etc/passwd");
+    let before = std::fs::symlink_metadata(path).unwrap();
+    assert_eq!(before.uid(), 0);
+
+    let file = std::fs::File::open(path).unwrap();
+    let error = validate_private_file(&file, path).unwrap_err();
+
+    assert!(error.contains("owned by uid 0"), "{error}");
+    assert_eq!(
+        std::fs::symlink_metadata(path).unwrap().mode(),
+        before.mode()
+    );
+}
+
+#[test]
+fn private_file_symlink_is_rejected_without_changing_target() {
+    let root = tempfile::tempdir().unwrap();
+    ensure_private_directory(root.path()).unwrap();
+    let target = root.path().join("target");
+    std::fs::write(&target, b"preserve").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let linked = root.path().join("report.json");
+    symlink(&target, &linked).unwrap();
+
+    let error = open_private_file(&linked).unwrap_err();
+
+    assert!(error.contains("safely open"), "{error}");
+    assert_eq!(std::fs::read(&target).unwrap(), b"preserve");
+    assert_eq!(mode(&target), 0o644);
+}
+
+#[test]
 fn private_parent_does_not_cause_general_existing_ancestors_to_be_chmoded() {
     let root = tempfile::tempdir().unwrap();
     ensure_private_directory(root.path()).unwrap();
@@ -197,6 +250,7 @@ fn private_modes_under_subprocess_umask_helper() {
         crate::pipeline::ReportContext::new(&event, &root),
     )
     .unwrap();
+    assert_eq!(mode(transaction.staging_dir()), PRIVATE_DIRECTORY_MODE);
     for (name, kind) in [
         ("report.json", crate::pipeline::ArtifactKind::Report),
         ("threads.raw", crate::pipeline::ArtifactKind::ThreadRaw),
