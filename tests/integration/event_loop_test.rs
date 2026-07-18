@@ -17,9 +17,9 @@ use crash_monitor::event_loop::{
     event_loop as run_event_loop_with_context,
 };
 use crash_monitor::pipeline::{
-    CollectedData, Collector, CrashEvent, Notifier, Pipeline, Plugin, PluginContext,
-    PluginExecution, PluginStatus, PostProcessor, Priority, ReportResult, TerminationReason,
-    TriggerPolicy,
+    CollectedData, Collector, CrashEvent, Notifier, Pipeline, PipelineBuilder, Plugin,
+    PluginContext, PluginExecution, PluginStatus, PostProcessor, Priority, ReportResult,
+    TerminationReason, TriggerPolicy,
 };
 use crash_monitor::platform::ReceivedMachMessage;
 use crash_monitor::platform::{PlatformOps, RESUME_ATTEMPT_LIMIT};
@@ -136,19 +136,21 @@ fn make_test_pipeline_with_triggers(
     tempdir: &std::path::Path,
     triggers: TriggerPolicy,
 ) -> Arc<Pipeline> {
-    Arc::new(Pipeline {
-        enabled: true,
-        triggers,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: None,
-        platform: Arc::new(MockPlatform::default()),
-        output_dir: Some(tempdir.to_path_buf()),
-    })
+    Arc::new(
+        test_pipeline_builder(Arc::new(MockPlatform::default()), tempdir)
+            .triggers(triggers)
+            .build()
+            .expect("build test pipeline"),
+    )
+}
+
+fn test_pipeline_builder(
+    platform: Arc<dyn PlatformOps>,
+    output_dir: &std::path::Path,
+) -> PipelineBuilder {
+    PipelineBuilder::new(platform)
+        .collection_policy(crash_monitor::pipeline::CollectionPolicy::FULL)
+        .output_dir(output_dir.to_path_buf())
 }
 
 fn unique_event_loop_shm_id() -> u32 {
@@ -468,23 +470,16 @@ fn disabled_pipeline(
     let platform = Arc::new(MockPlatform::default());
     let collector_calls = Arc::new(AtomicUsize::new(0));
     let post_processor_calls = Arc::new(AtomicUsize::new(0));
-    let pipeline = Arc::new(Pipeline {
-        enabled: false,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::MINIMAL,
-        filters: vec![],
-        collectors: vec![Box::new(CountingCollector {
-            calls: collector_calls.clone(),
-        })],
-        pre_processors: vec![],
-        post_processors: vec![Box::new(CountingPostProcessor {
-            calls: post_processor_calls.clone(),
-        })],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.to_path_buf()),
-    });
+    let mut builder = test_pipeline_builder(platform.clone(), tempdir)
+        .enabled(false)
+        .collection_policy(crash_monitor::pipeline::CollectionPolicy::MINIMAL);
+    builder.add_collector(Box::new(CountingCollector {
+        calls: collector_calls.clone(),
+    }));
+    builder.add_post_processor(Box::new(CountingPostProcessor {
+        calls: post_processor_calls.clone(),
+    }));
+    let pipeline = Arc::new(builder.build().expect("build disabled test pipeline"));
     (pipeline, platform, collector_calls, post_processor_calls)
 }
 
@@ -628,19 +623,14 @@ fn assert_blocking_finalizer_does_not_delay_reply(
 ) {
     let tempdir = tempfile::tempdir().unwrap();
     let platform = Arc::new(MockPlatform::default());
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors,
-        notifiers,
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let mut builder = test_pipeline_builder(platform.clone(), tempdir.path());
+    for post_processor in post_processors {
+        builder.add_post_processor(post_processor);
+    }
+    for notifier in notifiers {
+        builder.add_notifier(notifier);
+    }
+    let pipeline = Arc::new(builder.build().expect("build finalizer test pipeline"));
     let mut source = TestEventSource::new(vec![MonitorEvent::Crash {
         received_at: std::time::Instant::now(),
         exception_type: 1,
@@ -721,23 +711,16 @@ fn assert_pipeline_rejects_without_work(
     let platform = Arc::new(MockPlatform::default());
     let collector_calls = Arc::new(AtomicUsize::new(0));
     let postprocessor_calls = Arc::new(AtomicUsize::new(0));
-    let pipeline = Pipeline {
-        enabled,
-        triggers,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![Box::new(CountingCollector {
-            calls: collector_calls.clone(),
-        })],
-        pre_processors: vec![],
-        post_processors: vec![Box::new(CountingPostProcessor {
-            calls: postprocessor_calls.clone(),
-        })],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    };
+    let mut builder = test_pipeline_builder(platform.clone(), tempdir.path())
+        .enabled(enabled)
+        .triggers(triggers);
+    builder.add_collector(Box::new(CountingCollector {
+        calls: collector_calls.clone(),
+    }));
+    builder.add_post_processor(Box::new(CountingPostProcessor {
+        calls: postprocessor_calls.clone(),
+    }));
+    let pipeline = builder.build().expect("build trigger-policy test pipeline");
     let event = report_event(report_type);
 
     let diagnostics = if event.termination.is_some() {
@@ -797,26 +780,22 @@ fn test_disabled_crash_trigger_replies_without_worker_capture_or_artifacts() {
     let platform = Arc::new(MockPlatform::default());
     let collector_calls = Arc::new(AtomicUsize::new(0));
     let postprocessor_calls = Arc::new(AtomicUsize::new(0));
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy {
+    let mut builder =
+        test_pipeline_builder(platform.clone(), tempdir.path()).triggers(TriggerPolicy {
             crash: false,
             ..TriggerPolicy::ALL_ENABLED
-        },
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![Box::new(CountingCollector {
-            calls: collector_calls.clone(),
-        })],
-        pre_processors: vec![],
-        post_processors: vec![Box::new(CountingPostProcessor {
-            calls: postprocessor_calls.clone(),
-        })],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+        });
+    builder.add_collector(Box::new(CountingCollector {
+        calls: collector_calls.clone(),
+    }));
+    builder.add_post_processor(Box::new(CountingPostProcessor {
+        calls: postprocessor_calls.clone(),
+    }));
+    let pipeline = Arc::new(
+        builder
+            .build()
+            .expect("build disabled-trigger test pipeline"),
+    );
     let mut source = TestEventSource::new(vec![MonitorEvent::Crash {
         received_at: std::time::Instant::now(),
         exception_type: 1,
@@ -1097,19 +1076,9 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
     let tempdir = tempfile::tempdir().unwrap();
     let platform = Arc::new(MockPlatform::default());
     let (gate, entered_rx, release) = blocking_gate();
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![Box::new(BlockingCollector { gate })],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let mut builder = test_pipeline_builder(platform.clone(), tempdir.path());
+    builder.add_collector(Box::new(BlockingCollector { gate }));
+    let pipeline = Arc::new(builder.build().expect("build timeout test pipeline"));
     let received_at = std::time::Instant::now()
         .checked_sub(Duration::from_millis(4_900))
         .expect("recent monotonic timestamp");
@@ -1172,19 +1141,9 @@ fn test_capture_timeout_uses_absolute_mach_receive_deadline() {
 #[test]
 fn test_fatal_zip_is_created_with_termination_before_archiving() {
     let tempdir = tempfile::tempdir().unwrap();
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![Box::new(ZIPArchiver)],
-        notifiers: vec![],
-        shm: None,
-        platform: Arc::new(MockPlatform::default()),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let mut builder = test_pipeline_builder(Arc::new(MockPlatform::default()), tempdir.path());
+    builder.add_post_processor(Box::new(ZIPArchiver));
+    let pipeline = Arc::new(builder.build().expect("build archive test pipeline"));
     let mut source = TestEventSource::new(vec![MonitorEvent::Crash {
         received_at: std::time::Instant::now(),
         exception_type: 1,
@@ -1291,19 +1250,12 @@ fn test_unclaimed_shm_never_arms_anr_watchdog() {
         SharedMemory::create(unique_event_loop_shm_id()).expect("create zeroed shared memory"),
     );
     let platform = Arc::new(MockPlatform::default());
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: Some(shm.clone()),
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let pipeline = Arc::new(
+        test_pipeline_builder(platform.clone(), tempdir.path())
+            .shared_memory(shm.clone())
+            .build()
+            .expect("build unclaimed-shm test pipeline"),
+    );
     // Five deadline intervals exceed this threshold. Without the
     // producer-ready gate, the monitor-initialized zero heartbeat fires ANR.
     let anr_config = AnrConfig {
@@ -1339,19 +1291,12 @@ fn test_ready_stale_heartbeat_triggers_anr_capture() {
         Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
     publish_anr_readiness(&shm, 7);
     let platform = Arc::new(MockPlatform::default());
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: Some(shm.clone()),
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let pipeline = Arc::new(
+        test_pipeline_builder(platform.clone(), tempdir.path())
+            .shared_memory(shm.clone())
+            .build()
+            .expect("build ready-shm test pipeline"),
+    );
     let anr_config = AnrConfig {
         warmup_ms: 0,
         threshold_ms: 10,
@@ -1391,21 +1336,12 @@ fn test_slow_anr_capture_time_does_not_trigger_a_second_anr() {
         Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
     publish_anr_readiness(&shm, 11);
     let platform = Arc::new(MockPlatform::default());
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![Box::new(SlowCaptureCollector {
-            delay: Duration::from_millis(350),
-        })],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: Some(shm.clone()),
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let mut builder =
+        test_pipeline_builder(platform.clone(), tempdir.path()).shared_memory(shm.clone());
+    builder.add_collector(Box::new(SlowCaptureCollector {
+        delay: Duration::from_millis(350),
+    }));
+    let pipeline = Arc::new(builder.build().expect("build slow-ANR test pipeline"));
     let anr_config = AnrConfig {
         warmup_ms: 0,
         threshold_ms: 20,
@@ -1455,21 +1391,12 @@ fn test_slow_snapshot_monitor_time_does_not_trigger_false_anr() {
         Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
     publish_anr_readiness(&shm, 7);
     let platform = Arc::new(MockPlatform::default());
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![Box::new(SlowCaptureCollector {
-            delay: Duration::from_millis(175),
-        })],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: Some(shm.clone()),
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let mut builder =
+        test_pipeline_builder(platform.clone(), tempdir.path()).shared_memory(shm.clone());
+    builder.add_collector(Box::new(SlowCaptureCollector {
+        delay: Duration::from_millis(175),
+    }));
+    let pipeline = Arc::new(builder.build().expect("build slow-snapshot test pipeline"));
     let anr_config = AnrConfig {
         warmup_ms: 0,
         threshold_ms: 20,
@@ -1518,21 +1445,16 @@ fn test_snapshot_preserves_real_stale_time_around_excluded_monitor_work() {
         Arc::new(SharedMemory::create(unique_event_loop_shm_id()).expect("create shared memory"));
     publish_anr_readiness(&shm, 13);
     let platform = Arc::new(MockPlatform::default());
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![Box::new(SlowCaptureCollector {
-            delay: Duration::from_millis(350),
-        })],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: Some(shm.clone()),
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let mut builder =
+        test_pipeline_builder(platform.clone(), tempdir.path()).shared_memory(shm.clone());
+    builder.add_collector(Box::new(SlowCaptureCollector {
+        delay: Duration::from_millis(350),
+    }));
+    let pipeline = Arc::new(
+        builder
+            .build()
+            .expect("build preserved-stale-time test pipeline"),
+    );
     let anr_config = AnrConfig {
         warmup_ms: 0,
         threshold_ms: 25,
@@ -1598,19 +1520,11 @@ fn test_resume_and_terminate_failure_becomes_monitor_failure() {
     platform.resume_fails = true;
     platform.terminate_fails = true;
     let platform = Arc::new(platform);
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let pipeline = Arc::new(
+        test_pipeline_builder(platform.clone(), tempdir.path())
+            .build()
+            .expect("build containment-failure test pipeline"),
+    );
     let mut source = TestEventSource::new(vec![MonitorEvent::Snapshot, exited(0, 25)]);
 
     let result = event_loop(
@@ -1643,19 +1557,11 @@ fn test_bounded_resume_failure_and_task_termination_stops_monitoring() {
     let mut platform = MockPlatform::default();
     platform.resume_fails = true;
     let platform = Arc::new(platform);
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let pipeline = Arc::new(
+        test_pipeline_builder(platform.clone(), tempdir.path())
+            .build()
+            .expect("build bounded-recovery test pipeline"),
+    );
     let mut source = TestEventSource::new(vec![MonitorEvent::Snapshot, exited(0, 25)]);
 
     let result = event_loop(
@@ -1687,19 +1593,11 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
     platform.resume_fails = true;
     platform.terminate_fails = true;
     let platform = Arc::new(platform);
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let pipeline = Arc::new(
+        test_pipeline_builder(platform.clone(), tempdir.path())
+            .build()
+            .expect("build crash-escalation test pipeline"),
+    );
     let mut source = TestEventSource::new(vec![MonitorEvent::Crash {
         received_at: std::time::Instant::now(),
         exception_type: 1,
@@ -1759,14 +1657,15 @@ fn test_crash_resume_escalation_still_replies_before_monitor_failure() {
 fn test_disabled_snapshot_trigger_does_not_suspend_or_create_artifacts() {
     let tempdir = tempfile::tempdir().unwrap();
     let platform = Arc::new(MockPlatform::default());
-    let mut pipeline = make_test_pipeline_with_triggers(
-        tempdir.path(),
-        TriggerPolicy {
-            snapshot: false,
-            ..TriggerPolicy::ALL_ENABLED
-        },
+    let pipeline = Arc::new(
+        test_pipeline_builder(platform.clone(), tempdir.path())
+            .triggers(TriggerPolicy {
+                snapshot: false,
+                ..TriggerPolicy::ALL_ENABLED
+            })
+            .build()
+            .expect("build disabled-snapshot test pipeline"),
     );
-    Arc::get_mut(&mut pipeline).unwrap().platform = platform.clone();
     let mut source = TestEventSource::new(vec![MonitorEvent::Snapshot, exited(0, 25)]);
 
     let outcome = event_loop(
@@ -2017,19 +1916,13 @@ fn test_nonzero_exit_produces_exit_failure_and_preserves_code() {
 fn test_child_termination_finalization_runs_off_event_loop_thread() {
     let tempdir = tempfile::tempdir().unwrap();
     let (thread_tx, thread_rx) = mpsc::sync_channel(1);
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![Box::new(ThreadRecordingPostProcessor { thread_tx })],
-        notifiers: vec![],
-        shm: None,
-        platform: Arc::new(MockPlatform::default()),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let mut builder = test_pipeline_builder(Arc::new(MockPlatform::default()), tempdir.path());
+    builder.add_post_processor(Box::new(ThreadRecordingPostProcessor { thread_tx }));
+    let pipeline = Arc::new(
+        builder
+            .build()
+            .expect("build termination-finalizer test pipeline"),
+    );
     let event_loop_thread = std::thread::current().id();
     let mut source = TestEventSource::new(vec![exited(7, 12)]);
 
@@ -2055,19 +1948,11 @@ fn test_child_termination_finalization_runs_off_event_loop_thread() {
 fn test_termination_report_never_touches_dead_task_port() {
     let tempdir = tempfile::tempdir().unwrap();
     let platform = Arc::new(MockPlatform::default());
-    let pipeline = Arc::new(Pipeline {
-        enabled: true,
-        triggers: TriggerPolicy::ALL_ENABLED,
-        collection_policy: crash_monitor::pipeline::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: None,
-        platform: platform.clone(),
-        output_dir: Some(tempdir.path().to_path_buf()),
-    });
+    let pipeline = Arc::new(
+        test_pipeline_builder(platform.clone(), tempdir.path())
+            .build()
+            .expect("build dead-task test pipeline"),
+    );
     let mut source = TestEventSource::new(vec![exited(42, 5)]);
 
     let outcome = event_loop(

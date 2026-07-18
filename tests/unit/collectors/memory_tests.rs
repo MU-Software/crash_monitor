@@ -77,19 +77,11 @@ fn test_partial_memory_quality_is_exposed_in_pipeline_diagnostics() {
     mock.vm_region_quality = VmRegionEnumerationQuality::ConsecutiveErrorLimit;
     let platform = std::sync::Arc::new(mock);
     let tempdir = tempfile::tempdir().unwrap();
-    let pipeline = crate::pipeline::Pipeline {
-        enabled: true,
-        triggers: crate::pipeline::TriggerPolicy::ALL_ENABLED,
-        collection_policy: crate::config::CollectionPolicy::FULL,
-        filters: vec![],
-        collectors: vec![Box::new(MemoryCollector::new(platform.clone()))],
-        pre_processors: vec![],
-        post_processors: vec![],
-        notifiers: vec![],
-        shm: None,
-        platform,
-        output_dir: Some(tempdir.path().to_path_buf()),
-    };
+    let mut builder = crate::pipeline::PipelineBuilder::new(platform.clone())
+        .collection_policy(crate::config::CollectionPolicy::FULL)
+        .output_dir(tempdir.path().to_path_buf());
+    builder.add_collector(Box::new(MemoryCollector::new(platform)));
+    let pipeline = builder.build().expect("build memory test pipeline");
     let event = CrashEvent {
         report_id: crate::pipeline::ReportId::default(),
         report_type: crate::pipeline::ReportType::Crash,

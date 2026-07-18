@@ -110,40 +110,24 @@ impl From<crate::config::ValidatedTriggersConfig> for TriggerPolicy {
 //  Pipeline
 // ═══════════════════════════════════════════════════
 
-#[cfg(any(test, feature = "test-support"))]
 pub struct Pipeline {
     /// Authoritative process-wide report-generation kill switch.
-    pub enabled: bool,
-    /// Explicit policy for each event source that can create a report.
-    pub triggers: TriggerPolicy,
-    /// Immutable privacy decisions shared by capture and finalization.
-    pub collection_policy: CollectionPolicy,
-    pub filters: Vec<Box<dyn Filter>>,
-    pub collectors: Vec<Box<dyn Collector>>,
-    pub pre_processors: Vec<Box<dyn PreProcessor>>,
-    pub post_processors: Vec<Box<dyn PostProcessor>>,
-    pub notifiers: Vec<Box<dyn Notifier>>,
-    /// Live shared-memory mapping used only to create an owned snapshot while
-    /// this monitor owns the task suspension (None if shm is unavailable).
-    pub shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
-    /// Platform abstraction for suspend/resume and port deallocation.
-    pub platform: Arc<dyn PlatformOps>,
-    /// Override for report output directory. If None, uses default `pending_dir()`.
-    pub output_dir: Option<PathBuf>,
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-pub struct Pipeline {
     enabled: bool,
+    /// Explicit policy for each event source that can create a report.
     triggers: TriggerPolicy,
+    /// Immutable privacy decisions shared by capture and finalization.
     collection_policy: CollectionPolicy,
     filters: Vec<Box<dyn Filter>>,
     collectors: Vec<Box<dyn Collector>>,
     pre_processors: Vec<Box<dyn PreProcessor>>,
     post_processors: Vec<Box<dyn PostProcessor>>,
     notifiers: Vec<Box<dyn Notifier>>,
+    /// Live shared-memory mapping used only to create an owned snapshot while
+    /// this monitor owns the task suspension (None if shm is unavailable).
     shm: Option<std::sync::Arc<crate::shm::SharedMemory>>,
+    /// Platform abstraction for suspend/resume and port deallocation.
     platform: Arc<dyn PlatformOps>,
+    /// Override for report output directory. If None, uses default `pending_dir()`.
     output_dir: Option<PathBuf>,
 }
 
@@ -187,6 +171,12 @@ impl PipelineBuilder {
     #[must_use]
     pub fn collection_policy(mut self, policy: CollectionPolicy) -> Self {
         self.pipeline.collection_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn shared_memory(mut self, shm: std::sync::Arc<crate::shm::SharedMemory>) -> Self {
+        self.pipeline.shm = Some(shm);
         self
     }
 
@@ -1899,16 +1889,7 @@ pub(crate) fn assemble_macos_pipeline_from_config_with_runtime(
 }
 
 fn production_dialog_path(monitor_executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    let directory = monitor_executable.parent()?;
-    if directory.file_name().is_some_and(|name| name == "bin") {
-        Some(
-            directory
-                .parent()?
-                .join("libexec/crash_monitor/crash_dialog_macos"),
-        )
-    } else {
-        Some(directory.join("crash_dialog_macos"))
-    }
+    crate::postprocessors::production_dialog_path(monitor_executable)
 }
 
 #[cfg(test)]
