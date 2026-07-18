@@ -8,7 +8,7 @@ fn minimal_report_json() -> String {
             "version": 1,
             "timestamp": "2026-04-05T12:00:00.000000000+09:00",
             "pid": 1234,
-            "process": "voxelcore_desktop",
+            "process": "sample_app",
             "collector": "crash_monitor",
             "type": "crash"
         },
@@ -26,7 +26,7 @@ fn full_crash_report_json() -> String {
             "version": 1,
             "timestamp": "2026-04-05T12:00:00.000000000+09:00",
             "pid": 1234,
-            "process": "voxelcore_desktop",
+            "process": "sample_app",
             "collector": "crash_monitor",
             "type": "crash"
         },
@@ -51,8 +51,8 @@ fn full_crash_report_json() -> String {
             "crashed": true,
             "registers": {"x0": "0x0000000000000008"},
             "backtrace": [
-                {"address": "0x0000000100a3b1a8", "image": "/path/to/voxelcore_desktop", "offset": "0x1a8", "symbol": "vxc_face_drag_step"},
-                {"address": "0x0000000100a2f094", "image": "/path/to/voxelcore_desktop", "offset": "0x94", "symbol": "abi_dispatch_action"},
+                {"address": "0x0000000100a3b1a8", "image": "/path/to/sample_app", "offset": "0x1a8", "symbol": "render_frame"},
+                {"address": "0x0000000100a2f094", "image": "/path/to/sample_app", "offset": "0x94", "symbol": "dispatch_action"},
                 {"address": "0x00000001a2b3c000", "image": "/usr/lib/system/libsystem_pthread.dylib", "offset": "0x20"}
             ]
         }],
@@ -176,7 +176,7 @@ fn test_parse_snapshot_report() {
             "version": 1,
             "timestamp": "2026-04-05T12:00:00+09:00",
             "pid": 5678,
-            "process": "voxelcore_desktop",
+            "process": "sample_app",
             "collector": "crash_monitor",
             "type": "snapshot"
         },
@@ -207,7 +207,7 @@ fn test_parse_anr_report() {
             "version": 1,
             "timestamp": "2026-04-05T12:00:00+09:00",
             "pid": 9999,
-            "process": "voxelcore_desktop",
+            "process": "sample_app",
             "collector": "crash_monitor",
             "type": "anr",
             "trigger": "watchdog_5s",

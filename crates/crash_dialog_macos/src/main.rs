@@ -17,7 +17,7 @@ struct Args {
     #[arg(long, rename_all = "verbatim")]
     r#type: String,
 
-    /// Process name (e.g. "voxelcore_desktop").
+    /// Process name (for example, "sample_app").
     #[arg(long)]
     process: String,
 

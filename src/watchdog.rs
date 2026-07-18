@@ -4,7 +4,7 @@
 //! in shared memory. Time before the producer is ready, and time spent doing
 //! monitor-owned work, is never counted as application hang time.
 //!
-//! Design doc: `docs/plans/crash_reporter.md` L417-487
+//! The ANR timing and readiness contract is documented in `docs/architecture.md`.
 
 use std::time::Instant;
 

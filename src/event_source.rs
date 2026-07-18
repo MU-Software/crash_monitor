@@ -3,7 +3,7 @@
 //! `MacEventSource` multiplexes the three OS-level trigger channels into the
 //! platform-agnostic `MonitorEvent` stream consumed by `event_loop`:
 //! - **Mach exception port** → `Crash`
-//! - **SIGUSR1 pipe** (F8 manual snapshot) → `Snapshot`
+//! - **SIGUSR1 pipe** (manual snapshot request) → `Snapshot`
 //! - **`waitpid`** → one lossless `ChildTerminated(TerminationReason)` event
 //!
 //! The pure `MonitorEvent` → `CrashEvent` mapping (plus ANR/OOM decisions) lives

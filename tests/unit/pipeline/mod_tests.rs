@@ -332,7 +332,7 @@ fn subprocess_adapter_cancellation_maps_to_pipeline_timeout_status() {
 }
 
 // CRITICAL: Test pipelines must always set `output_dir` to a tempdir.
-// If `output_dir` is None, `handle_event()` falls back to `~/.modelblockbuilder/crashes/pending/`
+// If `output_dir` is None, `handle_event()` falls back to `~/.crash_monitor/crashes/pending/`
 // (the user's real crash directory) and pollutes it with test fixture reports.
 fn make_pipeline_with_collector(
     collector: Box<dyn Collector>,

@@ -1,7 +1,7 @@
-//! `crash_monitor` — Out-of-process crash monitor for Model Block Builder.
+//! `crash_monitor` — Out-of-process crash monitor for native macOS applications.
 //!
 //! Spawns the desktop app as a child process, monitors for crashes via
-//! Mach exception ports, and handles F8 manual snapshots via SIGUSR1.
+//! Mach exception ports, and handles manual snapshots via SIGUSR1.
 //!
 //! macOS only — uses Mach kernel APIs (exception ports, `vm_read`, `task_for_pid`).
 
@@ -836,7 +836,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     // Start exception listener thread AFTER task port is acquired
     let exc_rx = platform::start_listener(exception_port.raw());
 
-    eprintln!("[monitor] Monitoring active. Press F8 in app for manual snapshot.");
+    eprintln!("[monitor] Monitoring active. Send SIGUSR1 for a manual snapshot.");
 
     // ANR watchdog config (used inline by event_loop, no dedicated thread).
     // Configuration alone does not arm it: the child must publish its first
@@ -1031,8 +1031,7 @@ fn main() {
         }) => cli::symbolicate::run(&report, &dsym, output.as_deref()),
         None => {
             // No subcommand: treat positional args as "run" mode
-            // Usage: crash_monitor ./voxelcore_desktop [args...]
-            //    or: crash_monitor -- ./voxelcore_desktop [args...]
+            // Usage: crash_monitor run ./target_application [args...]
             if cli.args.is_empty() {
                 eprintln!("Usage: crash_monitor [run] <app_path> [args...]");
                 1

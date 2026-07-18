@@ -5,7 +5,7 @@
 #
 # Without this, any test that constructs a `Pipeline` with `output_dir: None`
 # (or any code path that falls back to `paths::pending_dir()`) would write
-# real crash report files into the user's `~/.modelblockbuilder/crashes/pending/`,
+# real crash report files into the user's `~/.crash_monitor/crashes/pending/`,
 # polluting their actual crash inventory.
 #
 # The production binary (codesigned and launched by `make desktop-monitor-run`)
@@ -13,8 +13,8 @@
 # continues to use `~/.modelblockbuilder/` as designed.
 #
 # `relative = true` (Cargo 1.43+) resolves the path relative to the directory
-# containing this config file (i.e. `tools/crash_monitor/`), so the sandbox
-# becomes `tools/crash_monitor/target/test-crash-data/` — gitignored and
+# containing this config file, so the sandbox becomes
+# `target/test-crash-data/` — gitignored and
 # automatically removed by `cargo clean`.
 
 [env]

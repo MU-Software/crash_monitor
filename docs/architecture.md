@@ -14,7 +14,7 @@ producing a report. This is the core reason for the out-of-process design.
 │  ANR watchdog (ready + heartbeat)    │        │  opts in, then bumps heartbeat│
 │  plugin pipeline → JSON report       │        │  (optionally) raises SIGUSR1 │
 └──────────────────────────────────────┘        └──────────────────────────────┘
-             ▲  fork + exec, task port acquired, exception port pre-installed
+             ▲  posix_spawn, task port acquired, exception port pre-installed
 ```
 
 ## Startup

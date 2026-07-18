@@ -980,10 +980,10 @@
 
 ### P2-38. 이전 host project의 이름·경로·개념을 제거한다
 
-- [ ] `.cargo/config.toml`, `src/main.rs`, dialog title/help, tests/docs의 Model Block Builder, voxel, F8, 이전 tool path를 Crash Monitor의 중립 명칭으로 바꾼다.
-- [ ] 존재하지 않는 make target과 `docs/plans/crash_reporter.md` 참조를 실제 command/document로 교체한다.
-- [ ] 의미 없는 Phase 주석과 이미 완료된 roadmap 표현을 현재 구조 설명으로 바꾼다.
-- [ ] schema의 app-specific field 정리와 문서 용어 정리를 함께 수행한다.
+- [x] `.cargo/config.toml`, `src/main.rs`, dialog title/help, tests/docs의 Model Block Builder, voxel, F8, 이전 tool path를 Crash Monitor의 중립 명칭으로 바꾼다.
+- [x] 존재하지 않는 make target과 `docs/plans/crash_reporter.md` 참조를 실제 command/document로 교체한다.
+- [x] 의미 없는 Phase 주석과 이미 완료된 roadmap 표현을 현재 구조 설명으로 바꾼다.
+- [x] schema의 app-specific field 정리와 문서 용어 정리를 함께 수행한다.
 
 범위: repository-wide comments, config, UI strings, docs.
 

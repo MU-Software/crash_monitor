@@ -32,7 +32,7 @@ pub fn show_feedback_dialog(
     let alert = NSAlert::new(mtm);
     alert.setAlertStyle(NSAlertStyle::Informational);
 
-    let message = NSString::from_str(&format!("Model Block Builder — {report_type} Report"));
+    let message = NSString::from_str(&format!("{process_name} — {report_type} Report"));
     alert.setMessageText(&message);
 
     let info = NSString::from_str(&format!(

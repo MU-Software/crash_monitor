@@ -1,6 +1,6 @@
 //! Plugin pipeline architecture for crash/snapshot report generation.
 //!
-//! Design: `docs/plans/crash_reporter.md` L1493-1867
+//! The implemented stage ordering and failure policy are documented in `docs/pipeline.md`.
 
 pub mod artifact;
 pub mod capture_isolation;

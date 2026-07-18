@@ -24,7 +24,7 @@ pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 /// monitor points it at its own namespace (e.g. `~/.myapp`) by exporting
 /// `CRASH_MONITOR_DATA_DIR` before launching the monitor — the same value is
 /// inherited by the monitored child, so the C reporter and the Rust monitor
-/// agree on one location. It is also set by `tools/crash_monitor/.cargo/config.toml`
+/// agree on one location. Repository tests set it through `.cargo/config.toml`
 /// during `cargo test`/`cargo run` to a sandbox under `target/` so tests never
 /// touch the real data directory.
 ///

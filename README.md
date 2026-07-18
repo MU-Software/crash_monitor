@@ -10,7 +10,7 @@ works when the target's own address space is corrupt.
 ## How it works
 
 ```
-crash_monitor (parent)  ──fork+exec──▶  target app (child)
+crash_monitor (parent)  ──posix_spawn──▶  target app (child)
   Mach exception port                     maps POSIX shared memory
   SIGUSR1 snapshot listener               writes breadcrumbs / context / heartbeat
   ANR watchdog (ready + heartbeat poll)   (via the shared schema — see docs)

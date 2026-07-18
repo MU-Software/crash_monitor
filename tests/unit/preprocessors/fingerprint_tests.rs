@@ -53,7 +53,7 @@ fn make_data_with_backtrace(
 
 fn app_image() -> RawImageData {
     RawImageData {
-        path: "/Users/me/build/voxelcore_desktop".into(),
+        path: "/Users/me/build/sample_app".into(),
         base_address: 0x1_0000_0000,
         slide: Some(0x1000),
         uuid: None,
@@ -235,7 +235,7 @@ fn test_is_system_image() {
     assert!(is_system_image("/Library/Apple/usr/lib/libdispatch.dylib"));
     assert!(is_system_image("/AppleInternal/Library/test.dylib"));
 
-    assert!(!is_system_image("/Users/me/build/voxelcore_desktop"));
+    assert!(!is_system_image("/Users/me/build/sample_app"));
     assert!(!is_system_image("/opt/homebrew/lib/libfreetype.dylib"));
     assert!(!is_system_image(""));
 }
