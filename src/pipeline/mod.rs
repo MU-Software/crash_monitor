@@ -1693,21 +1693,22 @@ pub fn default_macos_pipeline_from_config_with_runtime(
         post_processors.push(Box::new(PNGConverter));
     }
 
-    // Production accepts only the signed sibling helper. An arbitrary
-    // environment override exists solely in explicitly test-enabled builds.
+    // Production accepts only the helper at the documented package-relative
+    // path. An arbitrary environment override exists solely in explicitly
+    // test-enabled builds.
     if on("FeedbackDialog") {
-        let sibling = || {
+        let installed_dialog = || {
             std::env::current_exe()
                 .ok()
-                .and_then(|path| path.parent().map(|dir| dir.join("crash_dialog_macos")))
+                .and_then(|path| production_dialog_path(&path))
         };
         #[cfg(feature = "test-support")]
         let dialog = std::env::var_os("CRASH_MONITOR_DIALOG_BIN")
             .map(std::path::PathBuf::from)
             .map(FeedbackPostProcessor::for_test)
-            .or_else(|| sibling().map(FeedbackPostProcessor::new));
+            .or_else(|| installed_dialog().map(FeedbackPostProcessor::new));
         #[cfg(not(feature = "test-support"))]
-        let dialog = sibling().map(FeedbackPostProcessor::new);
+        let dialog = installed_dialog().map(FeedbackPostProcessor::new);
         if let Some(dialog) = dialog
             && dialog.is_available()
         {
@@ -1759,6 +1760,19 @@ pub fn default_macos_pipeline_from_config_with_runtime(
         output_dir,
     }
     .finish_registration()
+}
+
+fn production_dialog_path(monitor_executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    let directory = monitor_executable.parent()?;
+    if directory.file_name().is_some_and(|name| name == "bin") {
+        Some(
+            directory
+                .parent()?
+                .join("libexec/crash_monitor/crash_dialog_macos"),
+        )
+    } else {
+        Some(directory.join("crash_dialog_macos"))
+    }
 }
 
 #[cfg(test)]

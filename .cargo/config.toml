@@ -1,21 +1,5 @@
 # Cargo configuration for the crash monitor crate.
 #
-# CRITICAL: This file redirects the crash monitor's data directory to a
-# tempdir under `target/` whenever cargo invokes the binary or test runners.
-#
-# Without this, any test that constructs a `Pipeline` with `output_dir: None`
-# (or any code path that falls back to `paths::pending_dir()`) would write
-# real crash report files into the user's `~/.crash_monitor/crashes/pending/`,
-# polluting their actual crash inventory.
-#
-# The production binary (codesigned and launched by `make desktop-monitor-run`)
-# is NOT invoked through cargo, so it does NOT inherit this env var and
-# continues to use `~/.modelblockbuilder/` as designed.
-#
-# `relative = true` (Cargo 1.43+) resolves the path relative to the directory
-# containing this config file, so the sandbox becomes
-# `target/test-crash-data/` — gitignored and
-# automatically removed by `cargo clean`.
-
-[env]
-CRASH_MONITOR_DATA_DIR = { value = "target/test-crash-data", relative = true }
+# Unit tests allocate a process-unique temporary directory in `utils::paths`.
+# Integration and E2E tests inject their own temporary output roots explicitly,
+# so Cargo does not mutate process-global environment or share a fixed path.

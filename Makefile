@@ -8,7 +8,7 @@
 #   make build SIGN_IDENTITY="Developer ID Application: ..."   # different signer
 #   CRASH_MONITOR_DATA_DIR_NAME=.myapp make build             # bake a host default
 
-.DEFAULT_GOAL := build
+.DEFAULT_GOAL := build-unsigned
 
 # Codesigning identity for the debugger entitlement (task_for_pid, vm_read).
 # Without it the monitor cannot inspect a crashing child (and e2e self-skips).
@@ -29,9 +29,8 @@ E2E_SRC   := tests/e2e/fixtures/crash_app.c
 SHM_ATOMIC_TEST     := target/shm_atomic_contract_test
 SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
 
-# Homebrew LLVM tools for cargo-llvm-cov (macOS).
-LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
-                LLVM_PROFDATA=/opt/homebrew/opt/llvm/bin/llvm-profdata
+# cargo-llvm-cov discovers rustup's llvm-tools-preview. LLVM_COV and
+# LLVM_PROFDATA remain supported as explicit caller-provided overrides.
 # Exclude untestable code from coverage:
 #   platform/.*/ffi/ — platform FFI (macos/ffi/, future linux/ffi/)
 #   main.rs          — OS orchestration (signal, spawn, waitpid)
@@ -39,26 +38,52 @@ LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
 #   platform/mod.rs  — FFI delegation wrappers
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
-.PHONY: build e2e-build lint test unit-test integration-test e2e-test e2e-child shm-atomic-test \
-        coverage unit-coverage integration-coverage e2e-coverage clean
+.PHONY: build build-unsigned check-sign-identity sign sign-adhoc package verify-package e2e-build lint test \
+        unit-test integration-test e2e e2e-test e2e-child shm-atomic-test coverage \
+        unit-coverage integration-coverage e2e-coverage clean
 
-# ── Build (release + codesign) ────────────────────────────────
-build:
+# ── Compile / sign / package ──────────────────────────────────
+build-unsigned:
 	cargo build --release --workspace
+
+# Backward-compatible compile-only alias. Signing is always explicit.
+build: build-unsigned
+
+check-sign-identity:
+	@test -n "$(SIGN_IDENTITY)" || (echo "SIGN_IDENTITY is required for privileged signing" >&2; exit 2)
+	@security find-identity -v -p codesigning | grep -F -- "$(SIGN_IDENTITY)" >/dev/null || \
+		(echo "codesigning identity not found: $(SIGN_IDENTITY)" >&2; exit 2)
+
+# Check credentials before starting a potentially long release compilation.
+sign: check-sign-identity
+	$(MAKE) build-unsigned
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
 	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
 
+# Ad-hoc signing is suitable for local distribution checks only. It does not
+# grant task_for_pid and therefore cannot run privileged capture E2E tests.
+sign-adhoc: build-unsigned
+	codesign --force --sign - $(MONITOR_BIN)
+	codesign --force --sign - $(MONITOR_DIALOG_BIN)
+
+package: sign
+	./scripts/package-release.sh target/package $(MONITOR_BIN) $(MONITOR_DIALOG_BIN)
+
+verify-package: package
+	./scripts/verify-release.sh target/package/crash-monitor.tar.gz
+
 # E2E alone enables the mock-dialog environment override. Production `build`
 # never compiles that trust-boundary bypass.
-e2e-build:
+e2e-build: check-sign-identity
 	cargo build --release --workspace --features test-support
+	cargo build --release --locked --manifest-path crates/crash_dialog_mock/Cargo.toml --target-dir target
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
 	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
 
 # ── Lint ──────────────────────────────────────────────────────
 lint:
-	cargo fmt -- --check
-	cargo clippy -- -D warnings -A dead_code
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # ── E2E child (compiled from the shm schema alone) ────────────
 $(E2E_CHILD): $(E2E_SRC) schema/crash_shm.h schema/crash_shm_atomic.h
@@ -86,23 +111,25 @@ e2e-test: e2e-build $(E2E_CHILD)
 	cargo build
 	cargo test --test e2e_tests
 
+e2e: e2e-test
+
 test: unit-test integration-test e2e-test
 
 # ── Coverage (HTML reports under coverage-report*/) ───────────
 unit-coverage:
-	$(LLVM_COV_ENV) cargo llvm-cov --lib $(COV_EXCLUDE) --html --output-dir coverage-report-unit
+	cargo llvm-cov --lib $(COV_EXCLUDE) --html --output-dir coverage-report-unit
 	@echo "Unit coverage: coverage-report-unit/html/index.html"
 
 integration-coverage:
-	$(LLVM_COV_ENV) cargo llvm-cov $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report-integration
+	cargo llvm-cov $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report-integration
 	@echo "Integration coverage: coverage-report-integration/html/index.html"
 
 e2e-coverage: build $(E2E_CHILD)
-	$(LLVM_COV_ENV) cargo llvm-cov --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
+	cargo llvm-cov --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"
 
 coverage: build $(E2E_CHILD)
-	$(LLVM_COV_ENV) cargo llvm-cov --lib $(INTEGRATION_TESTS) --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report
+	cargo llvm-cov --lib $(INTEGRATION_TESTS) --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report
 	@echo "Coverage: coverage-report/html/index.html"
 
 # ── Clean ─────────────────────────────────────────────────────

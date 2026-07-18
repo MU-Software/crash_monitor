@@ -1005,6 +1005,65 @@ fn test_read_breadcrumbs_with_entry() {
 }
 
 #[test]
+fn breadcrumb_wrap_order_skips_zero_timestamp_and_bounds_huge_index() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let ring = SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, rings);
+    let buffer = ring + std::mem::offset_of!(SutCrumbRing, buf);
+    unsafe {
+        let base = shm.base_ptr();
+        for (slot, timestamp, message) in [
+            (CRUMB_RING_CAPACITY - 2, 10_u64, b"oldest ".as_slice()),
+            (CRUMB_RING_CAPACITY - 1, 0_u64, b"torn ".as_slice()),
+            (0, 30_u64, b"newest ".as_slice()),
+        ] {
+            write_breadcrumb_wire(
+                base,
+                buffer + slot * size_of::<SutBreadcrumb>(),
+                timestamp,
+                0,
+                CRUMB_SEVERITY_INFO,
+                b"wrap.c ",
+                message,
+            );
+        }
+        write_val::<u32>(base, ring + std::mem::offset_of!(SutCrumbRing, count), 3);
+        write_val::<u32>(
+            base,
+            ring + std::mem::offset_of!(SutCrumbRing, write_idx),
+            u32::try_from(CRUMB_RING_CAPACITY + 1).unwrap(),
+        );
+        store_u32_release(
+            base,
+            SECTION2_OFFSET + std::mem::offset_of!(SutCrumbState, ring_count),
+            1,
+        );
+    }
+
+    let breadcrumbs = snapshot(&shm).read_breadcrumbs();
+    assert_eq!(
+        breadcrumbs
+            .iter()
+            .map(|entry| entry.timestamp_ns)
+            .collect::<Vec<_>>(),
+        vec![10, 30]
+    );
+
+    unsafe {
+        write_val::<u32>(
+            shm.base_ptr(),
+            ring + std::mem::offset_of!(SutCrumbRing, count),
+            u32::MAX,
+        );
+        write_val::<u32>(
+            shm.base_ptr(),
+            ring + std::mem::offset_of!(SutCrumbRing, write_idx),
+            u32::MAX,
+        );
+    }
+    assert!(snapshot(&shm).read_breadcrumbs().len() <= CRUMB_RING_CAPACITY);
+}
+
+#[test]
 fn test_breadcrumb_ring_count_accepts_max_and_rejects_above_max() {
     let shm = SharedMemory::create(unique_pid()).expect("shm create");
     let last_ring = SECTION2_OFFSET
@@ -1528,4 +1587,25 @@ fn test_owned_snapshot_survives_mapping_drop_and_arc_clone() {
             .heartbeat_counter,
         77
     );
+}
+
+#[test]
+fn arbitrary_shm_payload_bytes_never_panic() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let mut state = 0xc001_d00d_u32;
+    let payload_len = SHM_TOTAL_SIZE - SECTION2_OFFSET;
+    unsafe {
+        for offset in 0..payload_len {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *shm.base_ptr().add(SECTION2_OFFSET + offset) = (state >> 24) as u8;
+        }
+    }
+
+    if let Ok(snapshot) = shm.snapshot_owned_until(None) {
+        let _ = snapshot.read_breadcrumbs();
+        let _ = snapshot.read_context();
+        let _ = snapshot.read_settings();
+        let _ = snapshot.read_attachments();
+        let _ = snapshot.read_screenshots_bounded(8, 4 * 1024 * 1024, || true);
+    }
 }

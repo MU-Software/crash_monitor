@@ -1,4 +1,5 @@
 use crate::filters::DiskSpaceFilter;
+use crate::filters::disk_space::{available_bytes, space_is_sufficient};
 use crate::pipeline::{CrashEvent, Filter, Plugin, PluginContext, ReportType};
 
 fn dummy_event() -> CrashEvent {
@@ -47,4 +48,18 @@ fn test_plugin_metadata() {
     let filter = DiskSpaceFilter::new(100);
     assert_eq!(filter.name(), "DiskSpaceFilter");
     assert!(filter.is_available());
+}
+
+#[test]
+fn available_space_saturates_for_very_large_volumes() {
+    assert_eq!(available_bytes(u64::MAX, 4096), u64::MAX);
+    assert!(space_is_sufficient(Ok((u64::MAX, u64::MAX)), u64::MAX));
+}
+
+#[test]
+fn stat_api_error_preserves_fail_open_policy() {
+    assert!(space_is_sufficient(
+        Err("statvfs failed".to_string()),
+        u64::MAX
+    ));
 }

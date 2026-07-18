@@ -92,23 +92,21 @@ fn test_find_dwarf_binary_nonexistent() {
 #[test]
 fn test_find_dwarf_binary_invalid_bundle() {
     // A directory that isn't a valid dSYM bundle
-    let tmp = std::env::temp_dir().join("test_invalid_dsym");
-    let _ = std::fs::create_dir_all(&tmp);
-    let result = find_dwarf_binary(&tmp);
+    let tmp = tempfile::tempdir().unwrap();
+    let result = find_dwarf_binary(tmp.path());
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("not a valid dSYM"));
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_find_dwarf_binary_file_path() {
     // If given a file path directly, should return it
-    let tmp = std::env::temp_dir().join("test_dwarf_direct");
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("dwarf-direct");
     std::fs::write(&tmp, b"fake").unwrap();
     let result = find_dwarf_binary(&tmp);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), tmp);
-    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]

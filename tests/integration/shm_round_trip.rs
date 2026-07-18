@@ -199,8 +199,7 @@ fn test_breadcrumbs_write_read() {
         // SutCrumbState is at SECTION2_OFFSET
         let crumb_state = base.add(SECTION2_OFFSET);
 
-        // Set ring_count = 1 (at end of SutCrumbState: offset = rings_size)
-        let ring_count_offset = size_of::<SutCrumbRing>() * CRUMB_MAX_THREADS;
+        let ring_count_offset = offset_of!(SutCrumbState, ring_count);
         write_val::<u32>(crumb_state, ring_count_offset, 1);
 
         // Ring 0 is at crumb_state + 0
@@ -216,20 +215,23 @@ fn test_breadcrumbs_write_read() {
         //   line: u16 (32)
         //   pad: u16 (34)
         //   message: [u8; 28] (36)
-        let entry = ring0; // buf starts at offset 0 of ring
-        write_val::<u64>(entry, 0, 123_456_789); // timestamp_ns
-        write_val::<u32>(entry, 8, 42); // thread_id
-        write_val::<u16>(entry, 12, 3); // category
-        write_val::<u16>(entry, 14, 2); // severity
-        write_c_str(entry.add(16), "test.c", 16); // file
-        write_val::<u16>(entry, 32, 99); // line
-        write_c_str(entry.add(36), "hello crash", 28); // message
+        let entry = ring0.add(offset_of!(SutCrumbRing, buf));
+        write_val::<u64>(entry, offset_of!(SutBreadcrumb, timestamp_ns), 123_456_789);
+        write_val::<u32>(entry, offset_of!(SutBreadcrumb, thread_id), 42);
+        write_val::<u16>(entry, offset_of!(SutBreadcrumb, category), 3);
+        write_val::<u16>(entry, offset_of!(SutBreadcrumb, severity), 2);
+        write_c_str(entry.add(offset_of!(SutBreadcrumb, file)), "test.c", 16);
+        write_val::<u16>(entry, offset_of!(SutBreadcrumb, line), 99);
+        write_c_str(
+            entry.add(offset_of!(SutBreadcrumb, message)),
+            "hello crash",
+            28,
+        );
 
         // Set ring0.write_idx = 1, ring0.count = 1
         // write_idx is at offset: buf_size = 512 * 64 = 32768
-        let buf_size = CRUMB_RING_CAPACITY * size_of::<SutBreadcrumb>();
-        write_val::<u32>(ring0, buf_size, 1); // write_idx
-        write_val::<u32>(ring0, buf_size + 4, 1); // count
+        write_val::<u32>(ring0, offset_of!(SutCrumbRing, write_idx), 1);
+        write_val::<u32>(ring0, offset_of!(SutCrumbRing, count), 1);
     }
 
     let crumbs = shm
@@ -252,34 +254,33 @@ fn test_breadcrumbs_multi_ring_merge_sort() {
     let base = shm.base_ptr();
 
     let ring_size = size_of::<SutCrumbRing>();
-    let buf_size = CRUMB_RING_CAPACITY * size_of::<SutBreadcrumb>();
 
     unsafe {
         let crumb_state = base.add(SECTION2_OFFSET);
 
         // Set ring_count = 2
-        let ring_count_offset = ring_size * CRUMB_MAX_THREADS;
+        let ring_count_offset = offset_of!(SutCrumbState, ring_count);
         write_val::<u32>(crumb_state, ring_count_offset, 2);
 
         // Ring 0: one entry with timestamp 200
         let ring0 = crumb_state;
-        let entry0 = ring0;
-        write_val::<u64>(entry0, 0, 200); // timestamp_ns
-        write_val::<u32>(entry0, 8, 1); // thread_id
-        write_c_str(entry0.add(16), "a.c", 16);
-        write_c_str(entry0.add(36), "second", 28);
-        write_val::<u32>(ring0, buf_size, 1); // write_idx
-        write_val::<u32>(ring0, buf_size + 4, 1); // count
+        let entry0 = ring0.add(offset_of!(SutCrumbRing, buf));
+        write_val::<u64>(entry0, offset_of!(SutBreadcrumb, timestamp_ns), 200);
+        write_val::<u32>(entry0, offset_of!(SutBreadcrumb, thread_id), 1);
+        write_c_str(entry0.add(offset_of!(SutBreadcrumb, file)), "a.c", 16);
+        write_c_str(entry0.add(offset_of!(SutBreadcrumb, message)), "second", 28);
+        write_val::<u32>(ring0, offset_of!(SutCrumbRing, write_idx), 1);
+        write_val::<u32>(ring0, offset_of!(SutCrumbRing, count), 1);
 
         // Ring 1: one entry with timestamp 100
         let ring1 = crumb_state.add(ring_size);
-        let entry1 = ring1;
-        write_val::<u64>(entry1, 0, 100); // timestamp_ns
-        write_val::<u32>(entry1, 8, 2); // thread_id
-        write_c_str(entry1.add(16), "b.c", 16);
-        write_c_str(entry1.add(36), "first", 28);
-        write_val::<u32>(ring1, buf_size, 1); // write_idx
-        write_val::<u32>(ring1, buf_size + 4, 1); // count
+        let entry1 = ring1.add(offset_of!(SutCrumbRing, buf));
+        write_val::<u64>(entry1, offset_of!(SutBreadcrumb, timestamp_ns), 100);
+        write_val::<u32>(entry1, offset_of!(SutBreadcrumb, thread_id), 2);
+        write_c_str(entry1.add(offset_of!(SutBreadcrumb, file)), "b.c", 16);
+        write_c_str(entry1.add(offset_of!(SutBreadcrumb, message)), "first", 28);
+        write_val::<u32>(ring1, offset_of!(SutCrumbRing, write_idx), 1);
+        write_val::<u32>(ring1, offset_of!(SutCrumbRing, count), 1);
     }
 
     let crumbs = shm

@@ -115,6 +115,20 @@ typedef struct sut_breadcrumb {
 } sut_breadcrumb_t;
 
 _Static_assert(sizeof(sut_breadcrumb_t) == 64, "sut_breadcrumb_t must be 64 bytes");
+_Static_assert(offsetof(sut_breadcrumb_t, timestamp_ns) == 0,
+               "breadcrumb timestamp offset changed");
+_Static_assert(offsetof(sut_breadcrumb_t, thread_id) == 8,
+               "breadcrumb thread-id offset changed");
+_Static_assert(offsetof(sut_breadcrumb_t, category) == 12,
+               "breadcrumb category offset changed");
+_Static_assert(offsetof(sut_breadcrumb_t, severity) == 14,
+               "breadcrumb severity offset changed");
+_Static_assert(offsetof(sut_breadcrumb_t, file) == 16,
+               "breadcrumb file offset changed");
+_Static_assert(offsetof(sut_breadcrumb_t, line) == 32,
+               "breadcrumb line offset changed");
+_Static_assert(offsetof(sut_breadcrumb_t, message) == 36,
+               "breadcrumb message offset changed");
 
 /* ── Per-thread ring buffer ── */
 #define SUT_CRUMB_RING_CAPACITY 512 /* per thread: 512 × 64B = 32KB */
@@ -135,6 +149,12 @@ typedef struct sut_crumb_state {
 } sut_crumb_state_t;
 
 _Static_assert(sizeof(sut_crumb_ring_t) == 32784, "sut_crumb_ring_t size changed");
+_Static_assert(offsetof(sut_crumb_ring_t, buf) == 0,
+               "breadcrumb ring buffer offset changed");
+_Static_assert(offsetof(sut_crumb_ring_t, write_idx) == 32768,
+               "breadcrumb ring write index offset changed");
+_Static_assert(offsetof(sut_crumb_ring_t, count) == 32772,
+               "breadcrumb ring count offset changed");
 _Static_assert(offsetof(sut_crumb_ring_t, generation) == 32780,
                "breadcrumb ring generation offset changed");
 _Static_assert(sizeof(sut_crumb_state_t) == 262280, "sut_crumb_state_t size changed");

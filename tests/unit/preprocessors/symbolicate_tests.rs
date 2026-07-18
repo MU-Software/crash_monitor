@@ -182,3 +182,68 @@ fn resolver_reads_and_parses_regular_file_from_open_descriptor() {
 
     assert_eq!(symbols, vec![(0x1004, "func".to_string())]);
 }
+
+#[test]
+fn symbol_lookup_enforces_exact_and_one_mib_boundaries() {
+    let symbols = vec![NlistEntry {
+        address: 0x1000,
+        name: "boundary".to_string(),
+    }];
+
+    assert_eq!(find_symbol(&symbols, 0x1000).as_deref(), Some("boundary"));
+    assert_eq!(
+        find_symbol(&symbols, 0x1000 + 1024 * 1024).as_deref(),
+        Some("boundary")
+    );
+    assert_eq!(find_symbol(&symbols, 0x1000 + 1024 * 1024 + 1), None);
+    assert_eq!(find_symbol(&[], 0x1000), None);
+    assert_eq!(find_symbol(&symbols, 0x0fff), None);
+}
+
+#[test]
+fn parser_strips_one_leading_underscore_and_rejects_truncated_tables() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let path = tempdir.path().join("image");
+    std::fs::write(&path, minimal_macho()).unwrap();
+    let image = RawImageData {
+        path: path.to_string_lossy().into_owned(),
+        base_address: 0x1000,
+        slide: None,
+        uuid: None,
+        architecture: None,
+        text_start: Some(0x1000),
+        text_end: Some(0x2000),
+        segments: Vec::new(),
+    };
+    assert_eq!(
+        resolve_image_symbols_from_disk(&image, &[0x1000], &PluginContext::without_deadline())
+            .unwrap(),
+        vec![(0x1000, "func".to_string())]
+    );
+
+    let mut truncated_commands = minimal_macho();
+    truncated_commands.truncate(40);
+    assert!(find_symtab_info(&truncated_commands, &PluginContext::without_deadline()).is_none());
+
+    let mut invalid_string_range = minimal_macho();
+    write_u32(&mut invalid_string_range, 32 + 16, u32::MAX);
+    std::fs::write(&path, invalid_string_range).unwrap();
+    assert!(
+        resolve_image_symbols_from_disk(&image, &[0x1000], &PluginContext::without_deadline())
+            .is_none()
+    );
+}
+
+#[test]
+fn arbitrary_macho_bytes_never_panic() {
+    let context = PluginContext::without_deadline();
+    let mut state = 0xa5a5_5a5a_u32;
+    for len in 0..1024 {
+        let mut bytes = vec![0_u8; len];
+        for byte in &mut bytes {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            *byte = (state >> 16) as u8;
+        }
+        let _ = find_symtab_info(&bytes, &context);
+    }
+}

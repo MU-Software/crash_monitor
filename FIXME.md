@@ -858,121 +858,121 @@
 
 ### P2-24. collector와 parser의 경계 테스트를 보강한다
 
-- [ ] attachment, breadcrumb, context, screenshot collector의 success, partial failure, bounds를 테스트한다.
-- [ ] Mach-O symbol parser에 thin/FAT, malformed command, truncated string/table, invalid range fixture를 추가한다.
-- [ ] `find_symbol`의 exact match, empty symbol array, 1MiB 거리 초과, underscore stripping 경계를 테스트한다.
-- [ ] same-second snapshot test는 `>=1`이 아니라 정확히 2개의 고유 report와 분리된 artifact를 단언한다.
-- [ ] screenshot tier/limit, attachment name/size/symlink, empty fingerprint를 포함한다.
+- [x] attachment, breadcrumb, context, screenshot collector의 success, partial failure, bounds를 테스트한다.
+- [x] Mach-O symbol parser에 thin/FAT, malformed command, truncated string/table, invalid range fixture를 추가한다.
+- [x] `find_symbol`의 exact match, empty symbol array, 1MiB 거리 초과, underscore stripping 경계를 테스트한다.
+- [x] same-second snapshot test는 `>=1`이 아니라 정확히 2개의 고유 report와 분리된 artifact를 단언한다.
+- [x] screenshot tier/limit, attachment name/size/symlink, empty fingerprint를 포함한다.
 
 범위: unit/integration collector and parser tests.
 
 ### P2-25. fuzz, property, fault-injection suite를 추가한다
 
-- [ ] malformed Mach message, Mach-O, SHM header/ring을 fuzz한다.
-- [ ] plugin toggle/dependency graph와 schema offsets를 property test한다.
-- [ ] path traversal, symlink swap, disk full, permission denied, cross-device move, ZIP bomb/failure를 fault-inject한다.
-- [ ] capture/finalize 각 단계에서 process kill 후 recovery를 검증한다.
+- [x] malformed Mach message, Mach-O, SHM header/ring을 fuzz한다.
+- [x] plugin toggle/dependency graph와 schema offsets를 property test한다.
+- [x] path traversal, symlink swap, disk full, permission denied, cross-device move, ZIP bomb/failure를 fault-inject한다.
+- [x] capture/finalize 각 단계에서 process kill 후 recovery를 검증한다.
 
 범위: parser crates, pipeline/artifact store, dedicated fuzz targets.
 
 ### P2-26. test의 process-global state와 고정 경로를 제거한다
 
-- [ ] environment filter를 pure function으로 만들고 synthetic environment를 주입한다.
-- [ ] process-global `set_var`에 의존하는 병렬 테스트를 제거한다.
-- [ ] 고정 temp path와 공유 `target/test-crash-data` 대신 `tempfile`/unique directory를 사용한다.
-- [ ] SHM test name은 실제 PID+random nonce/counter로 global POSIX namespace 충돌을 막는다.
-- [ ] raw cleanup, symbolicate, session tests도 각각 격리된 tempdir를 사용한다.
+- [x] environment filter를 pure function으로 만들고 synthetic environment를 주입한다.
+- [x] process-global `set_var`에 의존하는 병렬 테스트를 제거한다.
+- [x] 고정 temp path와 공유 `target/test-crash-data` 대신 `tempfile`/unique directory를 사용한다.
+- [x] SHM test name은 실제 PID+random nonce/counter로 global POSIX namespace 충돌을 막는다.
+- [x] raw cleanup, symbolicate, session tests도 각각 격리된 tempdir를 사용한다.
 
 범위: tests repository-wide.
 
 ### P2-27. SHM producer와 layout fixture를 production contract에 묶는다
 
-- [ ] E2E C producer가 `fstat`으로 mapping size와 schema version을 확인한 뒤 offset에 쓴다.
-- [ ] integration test의 수동 숫자 offset을 `offset_of!`/generated constants로 교체한다.
-- [ ] 수동 테스트가 유일하게 검증하던 `SutBreadcrumb` field와 `SutCrumbRing.buf/write_idx/count` numeric offsets는 production compile-time assertion으로 옮긴다.
-- [ ] breadcrumb capacity wrap order, timestamp 0 torn entry, corrupted/huge write index를 테스트한다.
+- [x] E2E C producer가 `fstat`으로 mapping size와 schema version을 확인한 뒤 offset에 쓴다.
+- [x] integration test의 수동 숫자 offset을 `offset_of!`/generated constants로 교체한다.
+- [x] 수동 테스트가 유일하게 검증하던 `SutBreadcrumb` field와 `SutCrumbRing.buf/write_idx/count` numeric offsets는 production compile-time assertion으로 옮긴다.
+- [x] breadcrumb capacity wrap order, timestamp 0 torn entry, corrupted/huge write index를 테스트한다.
 
 범위: `tests/e2e/fixtures/crash_app.c`, SHM integration/unit tests.
 
 ### P2-28. config와 pipeline factory 테스트를 실제 loader 기준으로 만든다
 
-- [ ] `load_config_from_path` happy path를 직접 호출하고 모든 주요 field를 단언한다.
-- [ ] malformed, unknown field, range violation, missing file을 각각 테스트한다.
-- [ ] default pipeline test가 공유 data directory의 외부 config 상태에 의존하지 않고 config를 직접 주입받게 한다.
+- [x] `load_config_from_path` happy path를 직접 호출하고 모든 주요 field를 단언한다.
+- [x] malformed, unknown field, range violation, missing file을 각각 테스트한다.
+- [x] default pipeline test가 공유 data directory의 외부 config 상태에 의존하지 않고 config를 직접 주입받게 한다.
 
 범위: config and pipeline unit tests.
 
 ### P2-29. postprocessor 테스트가 실제 부수효과를 검증하게 한다
 
-- [ ] SessionRecorder가 JSONL 내용, lock 생성/삭제, rotation behavior를 tempdir에서 단언한다.
-- [ ] RawCleanup이 파일 삭제와 in-memory path 갱신을 모두 단언한다.
-- [ ] PNG/ZIP/retention test가 atomicity, manifest, logical-report grouping, symlink 거부를 검증한다.
+- [x] SessionRecorder가 JSONL 내용, lock 생성/삭제, rotation behavior를 tempdir에서 단언한다.
+- [x] RawCleanup이 파일 삭제와 in-memory path 갱신을 모두 단언한다.
+- [x] PNG/ZIP/retention test가 atomicity, manifest, logical-report grouping, symlink 거부를 검증한다.
 
 범위: postprocessor unit/integration tests.
 
 ### P2-30. lint gate를 workspace 전체에 적용한다
 
-- [ ] Clippy를 `--workspace --all-targets --all-features`와 warning deny 정책으로 실행한다.
-- [ ] workspace 공통 lint에서 `unsafe_op_in_unsafe_fn`을 실제 `deny`로 올리고 member가 상속하는지 검증한다.
-- [ ] global dead-code allow를 제거하고 필요한 예외만 좁게 둔다.
-- [ ] format은 workspace member까지 검사한다는 실제 동작을 반영해 명령을 명확히 유지한다.
-- [ ] local Make target과 CI gate가 같은 범위를 검사하게 한다.
+- [x] Clippy를 `--workspace --all-targets --all-features`와 warning deny 정책으로 실행한다.
+- [x] workspace 공통 lint에서 `unsafe_op_in_unsafe_fn`을 실제 `deny`로 올리고 member가 상속하는지 검증한다.
+- [x] global dead-code allow를 제거하고 필요한 예외만 좁게 둔다.
+- [x] format은 workspace member까지 검사한다는 실제 동작을 반영해 명령을 명확히 유지한다.
+- [x] local Make target과 CI gate가 같은 범위를 검사하게 한다.
 
 범위: `Makefile`, CI, workspace lints.
 
 ### P2-31. compile, sign, package, E2E target을 분리한다
 
-- [ ] signing identity가 없어도 `build-unsigned`는 성공하게 한다.
-- [ ] `sign`, `package`, `e2e`를 별도 target으로 분리하고 필요한 identity를 실행 전에 검사한다.
-- [ ] ad-hoc signing을 허용할 범위와 privileged E2E에 필요한 정식 signing을 구분한다.
-- [ ] 긴 compile 뒤에야 signing 오류가 나는 흐름을 제거한다.
+- [x] signing identity가 없어도 `build-unsigned`는 성공하게 한다.
+- [x] `sign`, `package`, `e2e`를 별도 target으로 분리하고 필요한 identity를 실행 전에 검사한다.
+- [x] ad-hoc signing을 허용할 범위와 privileged E2E에 필요한 정식 signing을 구분한다.
+- [x] 긴 compile 뒤에야 signing 오류가 나는 흐름을 제거한다.
 
 범위: `Makefile`, release scripts.
 
 ### P2-32. test-only dialog mock을 production artifact에서 분리한다
 
-- [ ] production workspace/default build/package에 `crash_dialog_mock`이 포함되지 않게 한다.
-- [ ] test에서는 명시적인 dev dependency/fixture로 build한다.
-- [ ] production package manifest에 허용 binary 목록을 둔다.
+- [x] production workspace/default build/package에 `crash_dialog_mock`이 포함되지 않게 한다.
+- [x] test에서는 명시적인 dev dependency/fixture로 build한다.
+- [x] production package manifest에 허용 binary 목록을 둔다.
 
 범위: workspace/package manifests.
 
 ### P2-33. toolchain과 coverage tool discovery를 이식 가능하게 만든다
 
-- [ ] `/opt/homebrew`에 고정된 LLVM 경로 대신 rustup `llvm-tools` 또는 `brew --prefix llvm`/명시 override를 사용한다.
-- [ ] `rust-version`과 `rust-toolchain.toml`로 지원 toolchain을 고정한다.
-- [ ] libclang/bindgen 요구사항을 developer setup과 CI에 명시한다.
+- [x] `/opt/homebrew`에 고정된 LLVM 경로 대신 rustup `llvm-tools` 또는 `brew --prefix llvm`/명시 override를 사용한다.
+- [x] `rust-version`과 `rust-toolchain.toml`로 지원 toolchain을 고정한다.
+- [x] libclang/bindgen 요구사항을 developer setup과 CI에 명시한다.
 
 범위: `Makefile`, Cargo/toolchain files, contributor docs.
 
 ### P2-34. package metadata와 프로젝트 운영 문서를 완성한다
 
-- [ ] license, repository, homepage, documentation, include/exclude를 의도에 맞게 채운다.
-- [ ] 비공개 package면 `publish=false`, 공개 package면 실제 publish contract를 명시한다.
-- [ ] `SECURITY.md`, `CONTRIBUTING.md`, release checklist를 추가한다.
-- [ ] member crate가 workspace metadata를 일관되게 상속하는지 검사한다.
+- [x] license, repository, homepage, documentation, include/exclude를 의도에 맞게 채운다.
+- [x] 비공개 package면 `publish=false`, 공개 package면 실제 publish contract를 명시한다.
+- [x] `SECURITY.md`, `CONTRIBUTING.md`, release checklist를 추가한다.
+- [x] member crate가 workspace metadata를 일관되게 상속하는지 검사한다.
 
 범위: Cargo manifests, repository root docs.
 
 ### P2-35. 배포 artifact contract를 정의한다
 
-- [ ] monitor와 dialog의 설치 위치, 상대 탐색 규칙, signature/entitlement를 정의한다.
-- [ ] update 방식, checksum, dSYM 보존·매칭, 최소 macOS/architecture를 명시한다.
-- [ ] package 내용과 서명을 자동 검증하는 release test를 추가한다.
+- [x] monitor와 dialog의 설치 위치, 상대 탐색 규칙, signature/entitlement를 정의한다.
+- [x] update 방식, checksum, dSYM 보존·매칭, 최소 macOS/architecture를 명시한다.
+- [x] package 내용과 서명을 자동 검증하는 release test를 추가한다.
 
 범위: packaging scripts and release docs.
 
 ### P2-36. dependency 갱신은 근거 기반 유지보수로 수행한다
 
-- [ ] advisory, changelog, MSRV, API break, migration cost를 검토하는 정기 dependency audit를 둔다.
-- [ ] 단순히 최신 major가 아니라는 이유만으로 confirmed defect로 취급하거나 일괄 업그레이드하지 않는다.
+- [x] advisory, changelog, MSRV, API break, migration cost를 검토하는 정기 dependency audit를 둔다.
+- [x] 단순히 최신 major가 아니라는 이유만으로 confirmed defect로 취급하거나 일괄 업그레이드하지 않는다.
 
 범위: Cargo dependencies, dependency-review process.
 
 ### P2-37. disk-space 계산을 64-bit와 overflow에 안전하게 만든다
 
-- [ ] macOS에서 64-bit `statfs` 계열을 사용하거나 block count 곱셈의 overflow/saturation을 처리한다.
-- [ ] 매우 큰 volume과 API 오류를 테스트한다.
+- [x] macOS에서 64-bit `statfs` 계열을 사용하거나 block count 곱셈의 overflow/saturation을 처리한다.
+- [x] 매우 큰 volume과 API 오류를 테스트한다.
 
 범위: `src/filters/disk_space.rs`. 이 항목은 일반 환경의 즉시 장애라기보다 portability hardening이다.
 

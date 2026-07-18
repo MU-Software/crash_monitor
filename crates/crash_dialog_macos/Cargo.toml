@@ -2,7 +2,17 @@
 name = "crash_dialog_macos"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
 description = "macOS native feedback dialog for crash/snapshot reports"
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "crash_dialog_macos"

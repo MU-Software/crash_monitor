@@ -1,0 +1,4 @@
+# Relative paths allowed in a production package. Test fixtures such as
+# crash_dialog_mock are intentionally absent.
+bin/crash_monitor
+libexec/crash_monitor/crash_dialog_macos
