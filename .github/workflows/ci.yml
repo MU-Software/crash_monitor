@@ -70,6 +70,11 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy,rustfmt
+      - name: Enable Developer Tools access
+        run: |
+          sudo /usr/sbin/DevToolsSecurity -enable
+          sudo /usr/sbin/dseditgroup -o edit -a "$USER" -t user _developer
+          /usr/bin/dsmemberutil checkmembership -U "$USER" -G _developer
       - name: Run required signed E2E gate
         env:
           E2E_REQUIRED: "1"
