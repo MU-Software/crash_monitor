@@ -241,9 +241,9 @@
 
 ### P1-10. 지원 architecture를 코드와 배포 계약에 일치시킨다
 
-- [ ] ARM64 전용이라면 x86_64/Rosetta에서 compile-time 또는 startup 오류를 명확히 낸다.
-- [ ] 범용 지원이 필요하면 architecture별 thread flavor, register layout, Mach-O slice 처리를 분리한다.
-- [ ] 최소 macOS와 architecture 조합을 CI와 배포 문서에 명시한다.
+- [x] ARM64 전용이라면 x86_64/Rosetta에서 compile-time 또는 startup 오류를 명확히 낸다.
+- [x] 범용 지원이 필요하면 architecture별 thread flavor, register layout, Mach-O slice 처리를 분리한다.
+- [x] 최소 macOS와 architecture 조합을 CI와 배포 문서에 명시한다.
 
 범위: `src/platform/macos/types.rs`, collectors, packaging docs.
 

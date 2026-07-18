@@ -7,6 +7,10 @@
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("crash_monitor requires macOS (Mach kernel APIs)");
+#[cfg(not(target_arch = "aarch64"))]
+compile_error!(
+    "crash_monitor currently supports native arm64 macOS only; x86_64 and Rosetta are unsupported"
+);
 
 mod cli;
 mod collectors;

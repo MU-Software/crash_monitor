@@ -14,6 +14,15 @@ ANR detection, the app links a small in-process reporter that writes to the
 shared-memory region. This page covers both the runtime contract and the
 configuration knobs.
 
+## Supported platform
+
+The release contract is native **arm64 macOS**. The current Mach thread-state,
+register, and unwind implementations use the ARM64 ABI and the build fails at
+compile time on x86_64, including Rosetta builds. The minimum supported system
+is macOS 13 on Apple Silicon. CI and release packaging must build and test the
+`aarch64-apple-darwin` target; adding Intel support requires separate thread
+flavors, register layouts, unwind handling, and Mach-O slice selection first.
+
 ## Codesigning
 
 The monitor calls `task_for_pid()` on the child, which requires the
