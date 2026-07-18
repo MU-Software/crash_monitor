@@ -1069,6 +1069,14 @@
 
 범위: `src/platform/macos/ffi/capture_spawn.rs`, `tests/integration/capture_isolation_test.rs`.
 
+### P2-48. 가변 길이 screenshot snapshot의 누락 원인을 보존한다
+
+- [x] 고정 metadata prefix와 footer 사이의 screenshot payload가 짧은 owned snapshot을 안전하게 읽는다.
+- [x] frame/byte/deadline budget 초과와 published slot의 불완전한 payload를 typed outcome으로 구분한다.
+- [x] 불완전한 slot이 있어도 읽을 수 있는 다른 frame은 보존하고 정확한 진단을 남긴다.
+
+범위: `src/shm/reader.rs`, `src/collectors/screenshot.rs`, SHM reader tests.
+
 ## 전체 완료 조건
 
 - [ ] `exit(1)`, uncaught signal, Mach exception, possible OOM, ANR, snapshot이 각각 고유 `ReportId`와 올바른 termination metadata로 보고된다.

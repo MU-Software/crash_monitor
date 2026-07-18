@@ -9,6 +9,7 @@ use mach2::port::mach_port_t;
 use crate::pipeline::{
     CollectedData, Collector, CrashEvent, Plugin, PluginContext, PluginExecution, Priority,
 };
+use crate::shm::ScreenshotBudgetExhaustion;
 
 const MAX_SCREENSHOT_FRAMES: usize = 8;
 const MAX_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
@@ -46,26 +47,44 @@ impl Collector for ScreenshotCollector {
         let snapshot = context
             .shm_snapshot()
             .ok_or_else(|| "owned shared-memory snapshot unavailable".to_string())?;
-        let (screenshots, truncated) =
+        let outcome =
             snapshot.read_screenshots_bounded(MAX_SCREENSHOT_FRAMES, MAX_SCREENSHOT_BYTES, || {
                 !context.is_timed_out()
             });
         context.checkpoint()?;
-        if screenshots.is_empty() {
+        if outcome.screenshots.is_empty() {
             eprintln!("[monitor] ScreenshotCollector: no valid screenshots in shm");
         } else {
             eprintln!(
                 "[monitor] ScreenshotCollector: {} valid frames from shm",
-                screenshots.len()
+                outcome.screenshots.len()
             );
         }
-        data.raw.screenshots = screenshots;
-        if truncated {
-            Err(format!(
-                "screenshot budget exceeded; retained at most {MAX_SCREENSHOT_FRAMES} frames and {MAX_SCREENSHOT_BYTES} bytes"
-            ))
-        } else {
+        let mut diagnostics = Vec::new();
+        if let Some(exhaustion) = outcome.budget_exhaustion {
+            diagnostics.push(match exhaustion {
+                ScreenshotBudgetExhaustion::FrameLimit => format!(
+                    "screenshot frame budget exceeded; retained at most {MAX_SCREENSHOT_FRAMES} frames"
+                ),
+                ScreenshotBudgetExhaustion::ByteLimit => format!(
+                    "screenshot byte budget exceeded; retained at most {MAX_SCREENSHOT_BYTES} bytes"
+                ),
+                ScreenshotBudgetExhaustion::Deadline => {
+                    "screenshot collection deadline exceeded".to_string()
+                }
+            });
+        }
+        if !outcome.unreadable_slots.is_empty() {
+            diagnostics.push(format!(
+                "published screenshot slots could not be read completely: {:?}",
+                outcome.unreadable_slots
+            ));
+        }
+        data.raw.screenshots = outcome.screenshots;
+        if diagnostics.is_empty() {
             Ok(())
+        } else {
+            Err(diagnostics.join("; "))
         }
     }
 }

@@ -842,18 +842,65 @@ fn screenshot_budget_prefers_lower_tier_then_newer_timestamp() {
         }
     }
 
-    let (shots, truncated) =
+    let outcome =
         snapshot(&shm).read_screenshots_bounded(2, SCREENSHOT_BYTES_PER_SLOT * 2, || true);
-    assert!(truncated);
-    assert_eq!(shots.len(), 2);
     assert_eq!(
-        (shots[0].tier, shots[0].timestamp_ns, shots[0].rgba[0]),
+        outcome.budget_exhaustion,
+        Some(ScreenshotBudgetExhaustion::FrameLimit)
+    );
+    assert!(outcome.unreadable_slots.is_empty());
+    assert_eq!(outcome.screenshots.len(), 2);
+    assert_eq!(
+        (
+            outcome.screenshots[0].tier,
+            outcome.screenshots[0].timestamp_ns,
+            outcome.screenshots[0].rgba[0]
+        ),
         (1, 200, 0x12)
     );
     assert_eq!(
-        (shots[1].tier, shots[1].timestamp_ns, shots[1].rgba[0]),
+        (
+            outcome.screenshots[1].tier,
+            outcome.screenshots[1].timestamp_ns,
+            outcome.screenshots[1].rgba[0]
+        ),
         (1, 100, 0x11)
     );
+}
+
+#[test]
+fn variable_length_snapshot_reports_incomplete_slot_separately_from_budget() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let valid_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, valid);
+    let timestamp_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, timestamp);
+    let tier_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, tier);
+    let data_base = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, data);
+    unsafe {
+        for (index, timestamp, marker) in [(0usize, 100u64, 0x11u8), (1, 200, 0x22)] {
+            write_val::<u32>(shm.base_ptr(), valid_base + index * size_of::<u32>(), 2);
+            write_val::<u64>(
+                shm.base_ptr(),
+                timestamp_base + index * size_of::<u64>(),
+                timestamp,
+            );
+            write_val::<u32>(shm.base_ptr(), tier_base + index * size_of::<u32>(), 1);
+            *shm.base_ptr()
+                .add(data_base + index * SCREENSHOT_BYTES_PER_SLOT) = marker;
+        }
+    }
+
+    let full = snapshot(&shm);
+    let payload_end = data_base + SCREENSHOT_BYTES_PER_SLOT + SCREENSHOT_BYTES_PER_SLOT / 2;
+    let mut variable_bytes = full.bytes[..payload_end].to_vec();
+    variable_bytes.extend_from_slice(&SHM_CANARY.to_ne_bytes());
+    let variable = OwnedShmSnapshot::from_owned_bytes(variable_bytes, Vec::new()).unwrap();
+    let outcome = variable.read_screenshots_bounded(8, usize::MAX, || true);
+
+    assert_eq!(outcome.budget_exhaustion, None);
+    assert_eq!(outcome.unreadable_slots, vec![1]);
+    assert_eq!(outcome.screenshots.len(), 1);
+    assert_eq!(outcome.screenshots[0].timestamp_ns, 100);
+    assert_eq!(outcome.screenshots[0].rgba[0], 0x11);
 }
 
 #[test]

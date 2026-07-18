@@ -10,6 +10,7 @@ use std::time::Instant;
 use super::types::*;
 
 const SNAPSHOT_COPY_CHUNK_SIZE: usize = 1024 * 1024;
+const MIN_VARIABLE_SNAPSHOT_SIZE: usize = SCREENSHOT_DATA_OFFSET + size_of::<u32>();
 
 const BREADCRUMB_FILE_LEN: usize = 16;
 const BREADCRUMB_MESSAGE_LEN: usize = 28;
@@ -204,6 +205,13 @@ pub enum ShmValidationError {
     UnsupportedVersion { found: u32 },
     /// The copied footer did not contain the expected canary.
     InvalidCanary { found: u32 },
+    /// An owned snapshot did not contain the complete fixed metadata prefix
+    /// plus a footer, or exceeded the current ABI's maximum size.
+    InvalidSnapshotLength {
+        found: usize,
+        minimum: usize,
+        maximum: usize,
+    },
 }
 
 impl fmt::Display for ShmValidationError {
@@ -230,6 +238,14 @@ impl fmt::Display for ShmValidationError {
             Self::InvalidCanary { found } => {
                 write!(f, "invalid shared-memory canary: {found:#010x}")
             }
+            Self::InvalidSnapshotLength {
+                found,
+                minimum,
+                maximum,
+            } => write!(
+                f,
+                "invalid owned snapshot length: {found} bytes, expected {minimum}..={maximum}"
+            ),
         }
     }
 }
@@ -318,13 +334,31 @@ pub enum ShmConsistencyIssue {
     },
 }
 
-/// Immutable, fixed-layout bytes copied from policy-authorized SHM sections.
+/// The first bounded screenshot-selection budget that stopped collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenshotBudgetExhaustion {
+    FrameLimit,
+    ByteLimit,
+    Deadline,
+}
+
+/// Screenshots copied from an owned snapshot plus precise omission causes.
+pub struct ScreenshotReadOutcome {
+    pub screenshots: Vec<RawScreenshot>,
+    pub budget_exhaustion: Option<ScreenshotBudgetExhaustion>,
+    pub unreadable_slots: Vec<usize>,
+}
+
+/// Immutable bytes copied from policy-authorized SHM sections.
 ///
 /// No method on this type reads the live mapping. Parsing uses checked byte
 /// ranges and primitive integer decoding, so untrusted wire bytes are never
-/// materialized as a bindgen-generated Rust struct.
+/// materialized as a bindgen-generated Rust struct. The fixed metadata prefix
+/// is always present; screenshot data may be a shorter prefix followed by the
+/// footer canary, allowing bounded variable-length snapshots.
 pub struct OwnedShmSnapshot {
     bytes: Vec<u8>,
+    payload_len: usize,
     consistency_issues: Vec<ShmConsistencyIssue>,
 }
 
@@ -332,6 +366,7 @@ impl fmt::Debug for OwnedShmSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OwnedShmSnapshot")
             .field("len", &self.bytes.len())
+            .field("payload_len", &self.payload_len)
             .field("consistency_issues", &self.consistency_issues)
             .finish_non_exhaustive()
     }
@@ -342,8 +377,14 @@ impl OwnedShmSnapshot {
         bytes: Vec<u8>,
         consistency_issues: Vec<ShmConsistencyIssue>,
     ) -> Result<Self, ShmSnapshotError> {
+        let payload_len = if bytes.len() == SHM_TOTAL_SIZE {
+            FOOTER_OFFSET
+        } else {
+            bytes.len().saturating_sub(size_of::<u32>())
+        };
         let snapshot = Self {
             bytes,
+            payload_len,
             consistency_issues,
         };
         snapshot.validate()?;
@@ -357,6 +398,13 @@ impl OwnedShmSnapshot {
     }
 
     fn validate(&self) -> Result<(), ShmValidationError> {
+        if !(MIN_VARIABLE_SNAPSHOT_SIZE..=SHM_TOTAL_SIZE).contains(&self.bytes.len()) {
+            return Err(ShmValidationError::InvalidSnapshotLength {
+                found: self.bytes.len(),
+                minimum: MIN_VARIABLE_SNAPSHOT_SIZE,
+                maximum: SHM_TOTAL_SIZE,
+            });
+        }
         let magic = self.read_u32(SECTION1_OFFSET).unwrap_or_default();
         if magic != SHM_MAGIC {
             return Err(ShmValidationError::InvalidMagic { found: magic });
@@ -369,7 +417,12 @@ impl OwnedShmSnapshot {
             return Err(ShmValidationError::UnsupportedVersion { found: version });
         }
 
-        let canary = self.read_u32(FOOTER_OFFSET).unwrap_or_default();
+        let canary = self
+            .bytes
+            .get(self.payload_len..self.payload_len + size_of::<u32>())
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_ne_bytes)
+            .unwrap_or_default();
         if canary != SHM_CANARY {
             return Err(ShmValidationError::InvalidCanary { found: canary });
         }
@@ -634,29 +687,35 @@ impl OwnedShmSnapshot {
     #[must_use]
     pub fn read_screenshots(&self) -> Vec<RawScreenshot> {
         self.read_screenshots_bounded(usize::MAX, usize::MAX, || true)
-            .0
+            .screenshots
     }
 
     /// Select and copy screenshots under deterministic frame/byte/deadline budgets.
     ///
     /// Lower producer tiers win first, then newer timestamps and lower slot
-    /// indices. The boolean result reports whether a valid frame was omitted.
+    /// indices. Budget exhaustion and published slots whose complete pixel
+    /// payload is unavailable are reported independently.
     #[must_use]
     pub fn read_screenshots_bounded(
         &self,
         max_frames: usize,
         max_bytes: usize,
         mut should_continue: impl FnMut() -> bool,
-    ) -> (Vec<RawScreenshot>, bool) {
+    ) -> ScreenshotReadOutcome {
         let (Some(valid_offset), Some(timestamp_offset), Some(tier_offset), Some(data_offset)) = (
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, valid)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, timestamp)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, tier)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, data)),
         ) else {
-            return (Vec::new(), false);
+            return ScreenshotReadOutcome {
+                screenshots: Vec::new(),
+                budget_exhaustion: None,
+                unreadable_slots: Vec::new(),
+            };
         };
         let mut candidates = Vec::new();
+        let mut unreadable_slots = Vec::new();
 
         for index in 0..SCREENSHOT_SLOTS as usize {
             let Some(valid) = indexed_offset(valid_offset, index, size_of::<u32>())
@@ -672,11 +731,13 @@ impl OwnedShmSnapshot {
             let Some(timestamp_ns) = indexed_offset(timestamp_offset, index, size_of::<u64>())
                 .and_then(|offset| self.read_u64(offset))
             else {
+                unreadable_slots.push(index);
                 continue;
             };
             let Some(tier) = indexed_offset(tier_offset, index, size_of::<u32>())
                 .and_then(|offset| self.read_u32(offset))
             else {
+                unreadable_slots.push(index);
                 continue;
             };
             candidates.push((index, timestamp_ns, tier));
@@ -689,22 +750,30 @@ impl OwnedShmSnapshot {
                 .then_with(|| left.0.cmp(&right.0))
         });
 
-        let candidate_count = candidates.len();
         let mut screenshots = Vec::new();
         let mut copied_bytes = 0usize;
+        let mut budget_exhaustion = None;
         for (index, timestamp_ns, tier) in candidates {
-            if screenshots.len() >= max_frames
-                || copied_bytes
-                    .checked_add(SCREENSHOT_BYTES_PER_SLOT)
-                    .is_none_or(|next| next > max_bytes)
-                || !should_continue()
+            if screenshots.len() >= max_frames {
+                budget_exhaustion = Some(ScreenshotBudgetExhaustion::FrameLimit);
+                break;
+            }
+            if copied_bytes
+                .checked_add(SCREENSHOT_BYTES_PER_SLOT)
+                .is_none_or(|next| next > max_bytes)
             {
+                budget_exhaustion = Some(ScreenshotBudgetExhaustion::ByteLimit);
+                break;
+            }
+            if !should_continue() {
+                budget_exhaustion = Some(ScreenshotBudgetExhaustion::Deadline);
                 break;
             }
             let Some(rgba) = indexed_offset(data_offset, index, SCREENSHOT_BYTES_PER_SLOT)
                 .and_then(|offset| self.range(offset, SCREENSHOT_BYTES_PER_SLOT))
                 .map(<[u8]>::to_vec)
             else {
+                unreadable_slots.push(index);
                 continue;
             };
             screenshots.push(RawScreenshot {
@@ -717,8 +786,11 @@ impl OwnedShmSnapshot {
             copied_bytes += SCREENSHOT_BYTES_PER_SLOT;
         }
 
-        let truncated = screenshots.len() < candidate_count;
-        (screenshots, truncated)
+        ScreenshotReadOutcome {
+            screenshots,
+            budget_exhaustion,
+            unreadable_slots,
+        }
     }
 
     /// Return an owned copy of the breadcrumb section for Stage 1 persistence.
@@ -763,6 +835,9 @@ impl OwnedShmSnapshot {
 
     fn range(&self, offset: usize, len: usize) -> Option<&[u8]> {
         let end = offset.checked_add(len)?;
+        if end > self.payload_len {
+            return None;
+        }
         self.bytes.get(offset..end)
     }
 
@@ -771,7 +846,7 @@ impl OwnedShmSnapshot {
     }
 
     fn read_u8(&self, offset: usize) -> Option<u8> {
-        self.bytes.get(offset).copied()
+        self.range(offset, 1)?.first().copied()
     }
 
     fn read_u16(&self, offset: usize) -> Option<u16> {
