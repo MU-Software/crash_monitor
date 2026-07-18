@@ -887,10 +887,10 @@
 
 ### P2-27. SHM producer와 layout fixture를 production contract에 묶는다
 
-- [ ] E2E C producer가 `fstat`으로 mapping size와 schema version을 확인한 뒤 offset에 쓴다.
-- [ ] integration test의 수동 숫자 offset을 `offset_of!`/generated constants로 교체한다.
-- [ ] 수동 테스트가 유일하게 검증하던 `SutBreadcrumb` field와 `SutCrumbRing.buf/write_idx/count` numeric offsets는 production compile-time assertion으로 옮긴다.
-- [ ] breadcrumb capacity wrap order, timestamp 0 torn entry, corrupted/huge write index를 테스트한다.
+- [x] E2E C producer가 `fstat`으로 mapping size와 schema version을 확인한 뒤 offset에 쓴다.
+- [x] integration test의 수동 숫자 offset을 `offset_of!`/generated constants로 교체한다.
+- [x] 수동 테스트가 유일하게 검증하던 `SutBreadcrumb` field와 `SutCrumbRing.buf/write_idx/count` numeric offsets는 production compile-time assertion으로 옮긴다.
+- [x] breadcrumb capacity wrap order, timestamp 0 torn entry, corrupted/huge write index를 테스트한다.
 
 범위: `tests/e2e/fixtures/crash_app.c`, SHM integration/unit tests.
 
