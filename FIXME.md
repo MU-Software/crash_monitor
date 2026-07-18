@@ -956,9 +956,9 @@
 
 ### P2-35. 배포 artifact contract를 정의한다
 
-- [ ] monitor와 dialog의 설치 위치, 상대 탐색 규칙, signature/entitlement를 정의한다.
-- [ ] update 방식, checksum, dSYM 보존·매칭, 최소 macOS/architecture를 명시한다.
-- [ ] package 내용과 서명을 자동 검증하는 release test를 추가한다.
+- [x] monitor와 dialog의 설치 위치, 상대 탐색 규칙, signature/entitlement를 정의한다.
+- [x] update 방식, checksum, dSYM 보존·매칭, 최소 macOS/architecture를 명시한다.
+- [x] package 내용과 서명을 자동 검증하는 release test를 추가한다.
 
 범위: packaging scripts and release docs.
 

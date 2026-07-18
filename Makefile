@@ -38,7 +38,7 @@ SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
 #   platform/mod.rs  — FFI delegation wrappers
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
-.PHONY: build build-unsigned check-sign-identity sign sign-adhoc package e2e-build lint test \
+.PHONY: build build-unsigned check-sign-identity sign sign-adhoc package verify-package e2e-build lint test \
         unit-test integration-test e2e e2e-test e2e-child shm-atomic-test coverage \
         unit-coverage integration-coverage e2e-coverage clean
 
@@ -67,7 +67,10 @@ sign-adhoc: build-unsigned
 	codesign --force --sign - $(MONITOR_DIALOG_BIN)
 
 package: sign
-	@echo "signed release binaries are ready under target/release"
+	./scripts/package-release.sh target/package $(MONITOR_BIN) $(MONITOR_DIALOG_BIN)
+
+verify-package: package
+	./scripts/verify-release.sh target/package/crash-monitor.tar.gz
 
 # E2E alone enables the mock-dialog environment override. Production `build`
 # never compiles that trust-boundary bypass.

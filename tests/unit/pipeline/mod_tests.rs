@@ -3058,6 +3058,26 @@ fn test_macos_factory_gates_process_output_on_explicit_privacy_consent() {
 }
 
 #[test]
+fn production_dialog_path_follows_package_layout_and_developer_fallback() {
+    assert_eq!(
+        production_dialog_path(std::path::Path::new(
+            "/Applications/CrashMonitor/bin/crash_monitor"
+        ))
+        .unwrap(),
+        std::path::Path::new(
+            "/Applications/CrashMonitor/libexec/crash_monitor/crash_dialog_macos"
+        )
+    );
+    assert_eq!(
+        production_dialog_path(std::path::Path::new(
+            "/workspace/target/release/crash_monitor"
+        ))
+        .unwrap(),
+        std::path::Path::new("/workspace/target/release/crash_dialog_macos")
+    );
+}
+
+#[test]
 fn test_factory_runtime_metadata_matches_static_config_registry() {
     let validated = crate::config::CrashReporterConfig::default()
         .validate()
