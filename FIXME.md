@@ -630,8 +630,8 @@
 
 ### P1-51. system notifier의 probe와 결과 검증을 고친다
 
-- [ ] constructor의 동기 `osascript` probe를 제거하거나 lazy하게 실행한다.
-- [ ] spawn 성공만으로 notification 성공으로 기록하지 않고 exit status와 stderr를 확인한다.
+- [x] constructor의 동기 `osascript` probe를 제거하거나 lazy하게 실행한다.
+- [x] spawn 성공만으로 notification 성공으로 기록하지 않고 exit status와 stderr를 확인한다.
 - [x] notifier 실패를 final diagnostics에 남긴다.
 
 범위: `src/notifiers/system.rs`.
