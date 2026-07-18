@@ -662,10 +662,10 @@
 
 ### P2-03. `ReportContext`와 `ArtifactStore`를 공통 기반으로 둔다
 
-- [ ] `ReportId`, output root, manifest, privacy policy, byte budget, deadlines를 immutable context에 묶는다.
-- [ ] collector/postprocessor가 global path 계산을 다시 하지 않고 context/store만 사용하게 한다.
-- [ ] artifact 등록, atomic commit, cleanup, retention을 store의 단일 contract로 제공한다.
-- [ ] logical report transaction의 상태 전이를 타입과 문서로 정의한다.
+- [x] `ReportId`, output root, manifest, privacy policy, byte budget, deadlines를 immutable context에 묶는다.
+- [x] collector/postprocessor가 global path 계산을 다시 하지 않고 context/store만 사용하게 한다.
+- [x] artifact 등록, atomic commit, cleanup, retention을 store의 단일 contract로 제공한다.
+- [x] logical report transaction의 상태 전이를 타입과 문서로 정의한다.
 
 범위: pipeline/report/artifact modules.
 

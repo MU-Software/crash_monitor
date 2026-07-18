@@ -23,7 +23,27 @@ use crate::utils::paths::{
     open_private_directory, open_private_file, open_private_file_optional, publish_private_path,
 };
 
-use super::{CrashEvent, ReportType};
+use super::{CollectionPolicy, CrashEvent, ReportType};
+
+/// Immutable per-report resource policy shared by capture and finalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportPolicy {
+    pub privacy: CollectionPolicy,
+    pub byte_budget: u64,
+    pub capture_deadline: Duration,
+    pub finalize_deadline: Duration,
+}
+
+impl Default for ReportPolicy {
+    fn default() -> Self {
+        Self {
+            privacy: CollectionPolicy::MINIMAL,
+            byte_budget: 1024 * 1024 * 1024,
+            capture_deadline: super::worker::CAPTURE_DEADLINE,
+            finalize_deadline: super::worker::CRASH_FINALIZE_WAIT,
+        }
+    }
+}
 
 pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -139,11 +159,18 @@ pub struct ReportContext {
     report_type: ReportType,
     pid: u32,
     process_name: String,
+    manifest_schema_version: u32,
+    policy: ReportPolicy,
 }
 
 impl ReportContext {
     #[must_use]
     pub fn new(event: &CrashEvent, output_root: &Path) -> Self {
+        Self::with_policy(event, output_root, ReportPolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_policy(event: &CrashEvent, output_root: &Path, policy: ReportPolicy) -> Self {
         let report_id = event.report_id.clone();
         let staging_name = format!("{STAGING_PREFIX}{report_id}{STAGING_SUFFIX}");
         Self {
@@ -153,6 +180,8 @@ impl ReportContext {
             report_type: event.report_type,
             pid: event.pid,
             process_name: event.process_name.clone(),
+            manifest_schema_version: MANIFEST_SCHEMA_VERSION,
+            policy,
         }
     }
 
@@ -169,6 +198,16 @@ impl ReportContext {
     #[must_use]
     pub fn staging_dir(&self) -> &Path {
         &self.staging_dir
+    }
+
+    #[must_use]
+    pub const fn manifest_schema_version(&self) -> u32 {
+        self.manifest_schema_version
+    }
+
+    #[must_use]
+    pub const fn policy(&self) -> ReportPolicy {
+        self.policy
     }
 }
 
@@ -222,12 +261,14 @@ pub enum ManifestDestination {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TransactionState {
+pub enum ArtifactTransactionState {
     Open,
     Preparing,
     Prepared,
     Committed,
 }
+
+type TransactionState = ArtifactTransactionState;
 
 #[derive(Debug)]
 struct TransactionCore {
@@ -252,6 +293,10 @@ pub struct ArtifactTransaction {
     /// retention only move directories whose live owner no longer holds it.
     _owner_lock: Flock<File>,
 }
+
+/// Public store contract for event-scoped registration, atomic commit,
+/// rollback-on-drop cleanup, recovery, and retention coordination.
+pub type ArtifactStore = ArtifactTransaction;
 
 #[derive(Clone, Debug)]
 pub struct CommittedReport {
@@ -396,6 +441,11 @@ impl ArtifactTransaction {
     #[must_use]
     pub fn report_context(&self) -> &ReportContext {
         &self.report
+    }
+
+    #[must_use]
+    pub fn state(&self) -> ArtifactTransactionState {
+        lock(&self.core).state
     }
 
     pub(crate) fn report_context_arc(&self) -> Arc<ReportContext> {
@@ -733,6 +783,7 @@ impl ArtifactTransaction {
     ) -> Result<ReportManifest, String> {
         validate_exact_directory(self.staging_dir(), registered, false)?;
         let mut artifacts = Vec::new();
+        let mut total_bytes = 0_u64;
         for (name, kind) in registered {
             let path = self.staging_dir().join(name);
             let file = open_private_file(&path).map_err(|error| {
@@ -744,6 +795,15 @@ impl ArtifactTransaction {
                     path.display()
                 )
             })?;
+            total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| "artifact byte total overflowed u64".to_string())?;
+            if total_bytes > self.report.policy().byte_budget {
+                return Err(format!(
+                    "report artifact byte budget exceeded ({total_bytes} > {})",
+                    self.report.policy().byte_budget
+                ));
+            }
             file.sync_all()
                 .map_err(|error| format!("cannot sync artifact '{}': {error}", path.display()))?;
             artifacts.push(ManifestArtifact {
@@ -753,7 +813,7 @@ impl ArtifactTransaction {
             });
         }
         Ok(ReportManifest {
-            schema_version: MANIFEST_SCHEMA_VERSION,
+            schema_version: self.report.manifest_schema_version(),
             report_id: self.report.report_id().clone(),
             report_type: self.report.report_type,
             pid: self.report.pid,
@@ -1459,6 +1519,45 @@ mod tests {
             process_name: "fixture".into(),
             hang_duration_ms: None,
         }
+    }
+
+    #[test]
+    fn report_context_keeps_identity_privacy_budget_and_deadlines_immutable() {
+        let event = event();
+        let root = tempfile::tempdir().unwrap();
+        let policy = ReportPolicy {
+            privacy: CollectionPolicy::FULL,
+            byte_budget: 4,
+            capture_deadline: Duration::from_secs(1),
+            finalize_deadline: Duration::from_secs(2),
+        };
+        let context = ReportContext::with_policy(&event, root.path(), policy);
+        assert_eq!(context.report_id(), &event.report_id);
+        assert_eq!(context.output_root(), root.path());
+        assert_eq!(context.policy(), policy);
+        assert_eq!(context.manifest_schema_version(), MANIFEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn store_state_and_byte_budget_are_enforced_at_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let event = event();
+        let context = ReportContext::with_policy(
+            &event,
+            root.path(),
+            ReportPolicy {
+                byte_budget: 1,
+                ..ReportPolicy::default()
+            },
+        );
+        let store = ArtifactStore::begin(context).unwrap();
+        assert_eq!(store.state(), ArtifactTransactionState::Open);
+        store
+            .write_bytes("report.json", ArtifactKind::Report, b"{}")
+            .unwrap();
+        let error = store.commit().unwrap_err();
+        assert!(error.contains("byte budget exceeded"), "{error}");
+        assert_eq!(store.state(), ArtifactTransactionState::Preparing);
     }
 
     #[test]

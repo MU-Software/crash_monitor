@@ -22,8 +22,9 @@ use crate::platform::{
 
 pub use crate::config::CollectionPolicy;
 pub use artifact::{
-    ArtifactKind, ArtifactTransaction, CommittedReport, ReportContext, ReportId, ReportManifest,
-    load_manifest, recover_prepared_reports, scavenge_stale_pending,
+    ArtifactKind, ArtifactStore, ArtifactTransaction, ArtifactTransactionState, CommittedReport,
+    ReportContext, ReportId, ReportManifest, ReportPolicy, load_manifest, recover_prepared_reports,
+    scavenge_stale_pending,
 };
 pub use safety::{
     CancellationToken, PluginContext, PluginRunResult, SubprocessOutput,
@@ -307,9 +308,13 @@ impl Pipeline {
         &self,
         event: &CrashEvent,
     ) -> Result<Arc<ReportContext>, String> {
-        Ok(Arc::new(ReportContext::new(
+        Ok(Arc::new(ReportContext::with_policy(
             event,
             &self.resolved_output_root()?,
+            ReportPolicy {
+                privacy: self.collection_policy,
+                ..ReportPolicy::default()
+            },
         )))
     }
 
