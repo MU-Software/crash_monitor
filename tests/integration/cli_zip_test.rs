@@ -4,6 +4,7 @@
 use base64::Engine;
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use tempfile::tempdir;
 
 /// A schema-valid crash report with stack memory (so `stack` has data to dump).
@@ -70,8 +71,15 @@ fn test_analyze_reads_report_from_zip() {
         ],
     );
 
-    let exit_code = crash_monitor::cli::analyze::run(zip_path.to_str().unwrap());
-    assert_eq!(exit_code, 0);
+    let output = Command::new(env!("CARGO_BIN_EXE_crash_monitor"))
+        .arg("analyze")
+        .arg(&zip_path)
+        .output()
+        .expect("run analyze ZIP CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("voxelcore_desktop"), "{stdout}");
+    assert!(stdout.contains("vxc_face_drag_step"), "{stdout}");
 }
 
 #[test]
@@ -84,8 +92,18 @@ fn test_stack_reads_report_from_zip() {
         &[("crash_20260405_120000_1234.json", json.as_bytes())],
     );
 
-    let exit_code = crash_monitor::cli::stack::run(zip_path.to_str().unwrap(), 0);
-    assert_eq!(exit_code, 0);
+    let output = Command::new(env!("CARGO_BIN_EXE_crash_monitor"))
+        .arg("stack")
+        .arg(&zip_path)
+        .args(["--thread", "0"])
+        .output()
+        .expect("run stack ZIP CLI");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("|Hello|")
+    );
 }
 
 #[test]

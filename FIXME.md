@@ -840,10 +840,10 @@
 
 ### P2-22. test command가 workspace의 실제 target을 모두 실행하게 한다
 
-- [ ] 수동 test target 목록 대신 `cargo test --workspace --all-targets`에 준하는 future-proof command를 사용한다.
-- [ ] 누락된 analyze, stack, symbolicate, feedback/zip CLI integration target을 포함한다.
-- [ ] 실제 binary process를 실행해 clap parsing, stdout, stderr, exit status를 검증한다.
-- [ ] exit code만이 아니라 선택된 report/thread/field와 output marker를 단언한다.
+- [x] 수동 test target 목록 대신 `cargo test --workspace --all-targets`에 준하는 future-proof command를 사용한다.
+- [x] 누락된 analyze, stack, symbolicate, feedback/zip CLI integration target을 포함한다.
+- [x] 실제 binary process를 실행해 clap parsing, stdout, stderr, exit status를 검증한다.
+- [x] exit code만이 아니라 선택된 report/thread/field와 output marker를 단언한다.
 
 범위: `Makefile`, CLI integration tests.
 

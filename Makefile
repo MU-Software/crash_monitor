@@ -19,10 +19,6 @@ DIALOG_ENTITLEMENTS := crash_dialog.entitlements
 MONITOR_BIN        := target/release/crash_monitor
 MONITOR_DIALOG_BIN := target/release/crash_dialog_macos
 
-INTEGRATION_TESTS := --test shm_round_trip --test shm_validation_failure \
-                     --test plugin_timeout --test event_loop_test \
-                     --test capture_isolation_test
-
 # Self-contained e2e crash producer (schema-only; no host app dependency).
 E2E_CHILD := tests/e2e/fixtures/crash_app
 E2E_SRC   := tests/e2e/fixtures/crash_app.c
@@ -87,7 +83,7 @@ unit-test: shm-atomic-test
 	cargo test --lib
 
 integration-test:
-	cargo test $(INTEGRATION_TESTS)
+	cargo test --workspace --tests
 
 # e2e needs the codesigned release monitor (build), the child, and a debug build
 # (for the unsigned-fails-fast case). Tests self-skip if the entitlement is absent.
@@ -101,7 +97,8 @@ e2e-required: e2e-build $(E2E_CHILD)
 	cargo build
 	E2E_REQUIRED=1 cargo test --test e2e_tests -- --ignored
 
-test: unit-test integration-test e2e-test
+test: schema-check
+	cargo test --workspace --all-targets
 
 # ── Coverage (HTML reports under coverage-report*/) ───────────
 unit-coverage:
@@ -109,7 +106,7 @@ unit-coverage:
 	@echo "Unit coverage: coverage-report-unit/html/index.html"
 
 integration-coverage:
-	$(LLVM_COV_ENV) cargo llvm-cov $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report-integration
+	$(LLVM_COV_ENV) cargo llvm-cov --workspace --tests $(COV_EXCLUDE) --html --output-dir coverage-report-integration
 	@echo "Integration coverage: coverage-report-integration/html/index.html"
 
 e2e-coverage: build $(E2E_CHILD)
@@ -117,7 +114,7 @@ e2e-coverage: build $(E2E_CHILD)
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"
 
 coverage: build $(E2E_CHILD)
-	$(LLVM_COV_ENV) cargo llvm-cov --lib $(INTEGRATION_TESTS) --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report
+	$(LLVM_COV_ENV) cargo llvm-cov --workspace --all-targets $(COV_EXCLUDE) --html --output-dir coverage-report
 	@echo "Coverage: coverage-report/html/index.html"
 
 # ── Clean ─────────────────────────────────────────────────────
