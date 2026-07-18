@@ -1,5 +1,8 @@
 use super::*;
-use crate::pipeline::{CrashEvent, PluginContext, ReportResult, ReportType};
+use crate::pipeline::{
+    ArtifactKind, ArtifactTransaction, CrashEvent, PluginContext, ReportContext, ReportResult,
+    ReportType,
+};
 
 fn make_crash_event() -> CrashEvent {
     CrashEvent {
@@ -68,4 +71,42 @@ fn test_raw_cleanup_observes_expired_deadline_before_deleting() {
     assert_eq!(error, "plugin deadline reached");
     assert!(raw_path.exists());
     assert_eq!(result.raw_path.as_deref(), Some(raw_path.as_path()));
+}
+
+#[test]
+fn cleanup_removes_every_sensitive_raw_kind_but_preserves_report_artifacts() {
+    let root = tempfile::tempdir().unwrap();
+    let event = make_crash_event();
+    let transaction = ArtifactTransaction::begin(ReportContext::new(&event, root.path())).unwrap();
+    let report = transaction
+        .write_bytes("report.json", ArtifactKind::Report, b"{}")
+        .unwrap();
+    let thread = transaction
+        .write_bytes("threads.txt", ArtifactKind::ThreadRaw, b"thread")
+        .unwrap();
+    let breadcrumbs = transaction
+        .write_bytes("breadcrumbs.bin", ArtifactKind::BreadcrumbsRaw, b"crumbs")
+        .unwrap();
+    let context_raw = transaction
+        .write_bytes("context.bin", ArtifactKind::ContextRaw, b"context")
+        .unwrap();
+    let mut result = ReportResult {
+        artifact_paths: transaction.artifact_paths(),
+        raw_path: Some(thread.clone()),
+        json_path: Some(report.clone()),
+        session: None,
+    };
+    let plugin_context =
+        PluginContext::without_deadline().with_artifact_transaction(transaction.clone());
+
+    RawCleanup
+        .process(&event, &mut result, &plugin_context)
+        .unwrap();
+
+    assert!(report.exists());
+    assert!(!thread.exists());
+    assert!(!breadcrumbs.exists());
+    assert!(!context_raw.exists());
+    assert_eq!(transaction.artifact_paths(), vec![report]);
+    assert!(result.raw_path.is_none());
 }

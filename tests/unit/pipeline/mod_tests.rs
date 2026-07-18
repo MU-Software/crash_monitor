@@ -921,7 +921,7 @@ fn test_full_crash_flow_writes_files() {
         report_path.file_name().and_then(|name| name.to_str()),
         Some("report.json")
     );
-    assert!(report_dir.join("threads.raw").exists());
+    assert!(report_dir.join("threads.txt").exists());
     assert!(report_dir.join("manifest.json").exists());
 }
 
@@ -963,7 +963,7 @@ fn identical_pid_type_and_second_create_two_isolated_reports() {
                 .iter()
                 .map(|artifact| artifact.path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["report.json", "threads.raw"]
+            vec!["report.json", "threads.txt"]
         );
         let report = crate::pipeline::report::load_report(&report_path).unwrap();
         assert_eq!(report.header.report_id.as_ref(), Some(&event.report_id));
@@ -1426,7 +1426,7 @@ fn test_stage1_raw_file_contents() {
     let _diag = pipeline.handle_event(&event, 0);
 
     let raw_file =
-        committed_artifact(tempdir.path(), "threads.raw").expect("threads.raw file should exist");
+        committed_artifact(tempdir.path(), "threads.txt").expect("threads.txt file should exist");
     let contents = std::fs::read_to_string(raw_file).unwrap();
     assert!(
         contents.contains("---thread 0"),

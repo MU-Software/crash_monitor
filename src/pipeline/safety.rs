@@ -885,7 +885,7 @@ pub fn write_raw_stage1(
     transaction: &ArtifactTransaction,
     threads: &[RawThreadData],
 ) -> Result<PathBuf, String> {
-    transaction.write_artifact("threads.raw", ArtifactKind::ThreadRaw, |file| {
+    transaction.write_artifact("threads.txt", ArtifactKind::ThreadRaw, |file| {
         for (i, thread) in threads.iter().enumerate() {
             writeln!(
                 file,

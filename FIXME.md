@@ -406,11 +406,11 @@
 
 ### P1-28. raw artifact를 manifest로 추적하고 정제 정책을 적용한다
 
-- [ ] thread raw뿐 아니라 SHM, breadcrumb, context 등 모든 raw artifact를 manifest에 등록한다.
-- [ ] sanitizer 이전의 민감 raw가 최종 ZIP 또는 `pending`에 의도치 않게 남지 않게 한다.
-- [ ] 보존이 필요한 raw는 별도 privacy policy, permission, retention 아래 둔다.
-- [ ] 삭제 성공 시 `ReportResult.raw_path`와 관련 목록에서 제거한다.
-- [ ] text Stage 1에는 `.txt`/`.jsonl`을 사용하거나 실제 binary framing을 도입하고, 진짜 SHM binary dump의 `.bin`은 유지한다.
+- [x] thread raw뿐 아니라 SHM, breadcrumb, context 등 모든 raw artifact를 manifest에 등록한다.
+- [x] sanitizer 이전의 민감 raw가 최종 ZIP 또는 `pending`에 의도치 않게 남지 않게 한다.
+- [x] 보존이 필요한 raw는 별도 privacy policy, permission, retention 아래 둔다.
+- [x] 삭제 성공 시 `ReportResult.raw_path`와 관련 목록에서 제거한다.
+- [x] text Stage 1에는 `.txt`/`.jsonl`을 사용하거나 실제 binary framing을 도입하고, 진짜 SHM binary dump의 `.bin`은 유지한다.
 
 범위: `src/pipeline/safety.rs`, `src/postprocessors/raw_cleanup.rs`, manifest.
 

@@ -253,7 +253,7 @@ fn private_modes_under_subprocess_umask_helper() {
     assert_eq!(mode(transaction.staging_dir()), PRIVATE_DIRECTORY_MODE);
     for (name, kind) in [
         ("report.json", crate::pipeline::ArtifactKind::Report),
-        ("threads.raw", crate::pipeline::ArtifactKind::ThreadRaw),
+        ("threads.txt", crate::pipeline::ArtifactKind::ThreadRaw),
         ("screen.rgba", crate::pipeline::ArtifactKind::ScreenshotRgba),
         ("screen.png", crate::pipeline::ArtifactKind::ScreenshotPng),
         ("report.zip", crate::pipeline::ArtifactKind::Archive),

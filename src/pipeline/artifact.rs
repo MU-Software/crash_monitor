@@ -576,6 +576,15 @@ impl ArtifactTransaction {
             .collect()
     }
 
+    #[must_use]
+    pub fn artifacts(&self) -> Vec<(PathBuf, ArtifactKind)> {
+        lock(&self.core)
+            .artifacts
+            .iter()
+            .map(|(name, kind)| (self.staging_dir().join(name), *kind))
+            .collect()
+    }
+
     /// Immutable descriptor available after the atomic directory publish.
     #[must_use]
     pub fn committed_report(&self) -> Option<CommittedReport> {

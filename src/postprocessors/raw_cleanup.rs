@@ -1,9 +1,11 @@
 //! Post-processor: deletes Stage 1 raw file after Stage 2 JSON succeeds.
 
 use crate::pipeline::{
-    CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority, ReportResult,
+    ArtifactKind, CrashEvent, Plugin, PluginContext, PluginExecution, PostProcessor, Priority,
+    ReportResult,
 };
 use std::fs;
+use std::path::PathBuf;
 
 pub struct RawCleanup;
 
@@ -27,31 +29,48 @@ impl PostProcessor for RawCleanup {
         context: &PluginContext,
     ) -> Result<(), String> {
         context.checkpoint()?;
-        if result.json_path.is_some()
-            && let Some(raw) = result.raw_path.clone()
-        {
-            match fs::remove_file(&raw) {
-                Ok(()) => {
-                    if let Some(transaction) = context.artifact_transaction() {
-                        transaction.unregister_file(&raw)?;
+        if result.json_path.is_some() {
+            let raw_artifacts: Vec<PathBuf> = context.artifact_transaction().map_or_else(
+                || result.raw_path.clone().into_iter().collect(),
+                |transaction| {
+                    transaction
+                        .artifacts()
+                        .into_iter()
+                        .filter_map(|(path, kind)| {
+                            matches!(
+                                kind,
+                                ArtifactKind::ThreadRaw
+                                    | ArtifactKind::BreadcrumbsRaw
+                                    | ArtifactKind::ContextRaw
+                            )
+                            .then_some(path)
+                        })
+                        .collect()
+                },
+            );
+            for raw in raw_artifacts {
+                match fs::remove_file(&raw) {
+                    Ok(()) => {
+                        if let Some(transaction) = context.artifact_transaction() {
+                            transaction.unregister_file(&raw)?;
+                        }
+                        result.artifact_paths.retain(|path| path != &raw);
                     }
-                    result.artifact_paths.retain(|path| path != &raw);
-                    result.raw_path = None;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if let Some(transaction) = context.artifact_transaction() {
-                        transaction.unregister_file(&raw)?;
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        if let Some(transaction) = context.artifact_transaction() {
+                            transaction.unregister_file(&raw)?;
+                        }
+                        result.artifact_paths.retain(|path| path != &raw);
                     }
-                    result.artifact_paths.retain(|path| path != &raw);
-                    result.raw_path = None;
-                }
-                Err(error) => {
-                    eprintln!(
-                        "[monitor] RawCleanup: failed to remove {}: {error}",
-                        raw.display()
-                    );
+                    Err(error) => {
+                        return Err(format!(
+                            "RawCleanup failed to remove sensitive raw artifact '{}': {error}",
+                            raw.display()
+                        ));
+                    }
                 }
             }
+            result.raw_path = None;
         }
         context.checkpoint()?;
         Ok(())

@@ -1915,7 +1915,7 @@ mod tests {
         assert!(report_path.is_file());
         let report_dir = report_path.parent().expect("report directory");
         assert_eq!(report_path.file_name().unwrap(), "report.json");
-        assert!(report_dir.join("threads.raw").is_file());
+        assert!(report_dir.join("threads.txt").is_file());
         assert_eq!(
             std::fs::read(report_dir.join("breadcrumbs.bin")).unwrap(),
             b"owned-breadcrumbs"
@@ -1925,7 +1925,7 @@ mod tests {
             b"owned-context"
         );
         assert!(
-            std::fs::read_to_string(report_dir.join("threads.raw"))
+            std::fs::read_to_string(report_dir.join("threads.txt"))
                 .unwrap()
                 .contains("crashed-thread")
         );
@@ -1942,7 +1942,7 @@ mod tests {
                 "breadcrumbs.bin",
                 "context.bin",
                 "report.json",
-                "threads.raw"
+                "threads.txt"
             ]
         );
         let report = crate::pipeline::report::load_report(report_path).unwrap();
