@@ -198,7 +198,7 @@ fn test_validate_corrupted_magic() {
     }
     assert_eq!(
         shm.snapshot_owned_until(None).unwrap_err(),
-        ShmSnapshotError::InvalidMagic { found: 0xDEAD_DEAD }
+        ShmSnapshotError::Validation(ShmValidationError::InvalidMagic { found: 0xDEAD_DEAD })
     );
 }
 
@@ -217,9 +217,9 @@ fn test_validate_rejects_legacy_schema_version() {
     }
     assert_eq!(
         shm.snapshot_owned_until(None).unwrap_err(),
-        ShmSnapshotError::UnsupportedVersion {
+        ShmSnapshotError::Validation(ShmValidationError::UnsupportedVersion {
             found: legacy_version
-        }
+        })
     );
 }
 
@@ -232,7 +232,7 @@ fn test_validate_corrupted_canary() {
     }
     assert_eq!(
         shm.snapshot_owned_until(None).unwrap_err(),
-        ShmSnapshotError::InvalidCanary { found: 0 }
+        ShmSnapshotError::Validation(ShmValidationError::InvalidCanary { found: 0 })
     );
 }
 
@@ -270,10 +270,10 @@ fn test_snapshot_rejects_short_mapping_without_pointer_arithmetic() {
     shm.set_mapped_size_for_test(FOOTER_OFFSET);
     assert_eq!(
         shm.snapshot_owned_until(None).unwrap_err(),
-        ShmSnapshotError::MappingTooSmall {
+        ShmSnapshotError::Validation(ShmValidationError::MappingTooSmall {
             mapped: FOOTER_OFFSET,
             required: SHM_TOTAL_SIZE,
-        }
+        })
     );
     // Restore the true mmap length before Drop calls munmap.
     shm.set_mapped_size_for_test(actual_size);
@@ -752,6 +752,11 @@ fn test_read_screenshots_one_valid_slot() {
             SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, timestamp),
             777_000,
         );
+        write_val::<u32>(
+            base,
+            SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, tier),
+            3,
+        );
         *base.add(SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, data)) = 0xA5;
     }
 
@@ -764,10 +769,52 @@ fn test_read_screenshots_one_valid_slot() {
     let shots = owned.read_screenshots();
     assert_eq!(shots.len(), 1);
     assert_eq!(shots[0].timestamp_ns, 777_000);
+    assert_eq!(shots[0].tier, 3);
     assert_eq!(shots[0].width, SCREENSHOT_WIDTH);
     assert_eq!(shots[0].height, SCREENSHOT_HEIGHT);
     assert_eq!(shots[0].rgba.len(), SCREENSHOT_BYTES_PER_SLOT);
     assert_eq!(shots[0].rgba[0], 0xA5);
+}
+
+#[test]
+fn test_screenshot_selection_prioritizes_lower_tier_then_newest_timestamp() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    unsafe {
+        let base = shm.base_ptr();
+        let valid = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, valid);
+        let timestamp = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, timestamp);
+        let tier = SECTION4_OFFSET + std::mem::offset_of!(SutScreenshotSection, tier);
+        for (index, timestamp_ns, capture_tier) in [(0, 300_u64, 2_u32), (1, 100, 1), (2, 200, 1)] {
+            write_val::<u32>(base, valid + index * size_of::<u32>(), 2);
+            write_val::<u64>(base, timestamp + index * size_of::<u64>(), timestamp_ns);
+            write_val::<u32>(base, tier + index * size_of::<u32>(), capture_tier);
+        }
+    }
+
+    let shots = snapshot(&shm).read_screenshots();
+    let selected = shots
+        .iter()
+        .map(|shot| (shot.tier, shot.timestamp_ns))
+        .collect::<Vec<_>>();
+    assert_eq!(selected, vec![(1, 200), (1, 100), (2, 300)]);
+}
+
+#[test]
+fn test_mapping_shape_reports_size_before_alignment_and_distinguishes_alignment() {
+    assert_eq!(
+        validate_mapping_shape(1, SHM_TOTAL_SIZE - 1),
+        Err(ShmValidationError::MappingTooSmall {
+            mapped: SHM_TOTAL_SIZE - 1,
+            required: SHM_TOTAL_SIZE,
+        })
+    );
+    assert_eq!(
+        validate_mapping_shape(1, SHM_TOTAL_SIZE),
+        Err(ShmValidationError::MisalignedMapping {
+            address: 1,
+            required: align_of::<SutShmRegion>(),
+        })
+    );
 }
 
 #[test]

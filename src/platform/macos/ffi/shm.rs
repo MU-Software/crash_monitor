@@ -160,10 +160,9 @@ fn validate_created_object(fd: &OwnedFd) -> Result<(), String> {
 /// Returns an error if `shm_open`, `ftruncate`, or `mmap` fails.
 pub fn create_shared_memory(monitor_pid: u32) -> Result<ShmMapping, String> {
     let pending = open_exclusive_shm(monitor_pid)?;
-    let fd = pending
-        .fd
-        .as_ref()
-        .expect("pending shm owns its descriptor");
+    let Some(fd) = pending.fd.as_ref() else {
+        return Err("internal error: pending shm lost its descriptor".to_string());
+    };
 
     // Size the region
     #[allow(clippy::cast_possible_wrap)]

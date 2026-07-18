@@ -191,15 +191,13 @@ impl Default for ShmSnapshotPolicy {
     }
 }
 
-/// Failure to copy or validate an immutable shared-memory snapshot.
+/// Failure to validate the live mapping or copied SHM schema metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ShmSnapshotError {
+pub enum ShmValidationError {
     /// The mapped object is shorter than the schema requires.
     MappingTooSmall { mapped: usize, required: usize },
-    /// The caller's absolute snapshot deadline elapsed.
-    DeadlineExceeded,
-    /// Allocating the bounded owned destination failed.
-    AllocationFailed { requested: usize },
+    /// The live mapping base does not satisfy the generated region alignment.
+    MisalignedMapping { address: usize, required: usize },
     /// The copied header did not contain the expected magic value.
     InvalidMagic { found: u32 },
     /// The copied header used an unsupported schema version.
@@ -208,7 +206,7 @@ pub enum ShmSnapshotError {
     InvalidCanary { found: u32 },
 }
 
-impl fmt::Display for ShmSnapshotError {
+impl fmt::Display for ShmValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MappingTooSmall { mapped, required } => {
@@ -217,11 +215,10 @@ impl fmt::Display for ShmSnapshotError {
                     "shared-memory mapping is too small: {mapped} bytes, need {required}"
                 )
             }
-            Self::DeadlineExceeded => f.write_str("shared-memory snapshot deadline exceeded"),
-            Self::AllocationFailed { requested } => {
+            Self::MisalignedMapping { address, required } => {
                 write!(
                     f,
-                    "failed to allocate {requested} bytes for shared-memory snapshot"
+                    "misaligned shared-memory mapping at {address:#x}: need {required}-byte alignment"
                 )
             }
             Self::InvalidMagic { found } => {
@@ -237,7 +234,53 @@ impl fmt::Display for ShmSnapshotError {
     }
 }
 
+impl std::error::Error for ShmValidationError {}
+
+/// Failure to copy or validate an immutable shared-memory snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShmSnapshotError {
+    /// The live mapping or copied schema metadata failed validation.
+    Validation(ShmValidationError),
+    /// The caller's absolute snapshot deadline elapsed.
+    DeadlineExceeded,
+    /// Allocating the bounded owned destination failed.
+    AllocationFailed { requested: usize },
+}
+
+impl From<ShmValidationError> for ShmSnapshotError {
+    fn from(error: ShmValidationError) -> Self {
+        Self::Validation(error)
+    }
+}
+
+impl fmt::Display for ShmSnapshotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(error) => error.fmt(f),
+            Self::DeadlineExceeded => f.write_str("shared-memory snapshot deadline exceeded"),
+            Self::AllocationFailed { requested } => write!(
+                f,
+                "failed to allocate {requested} bytes for shared-memory snapshot"
+            ),
+        }
+    }
+}
+
 impl std::error::Error for ShmSnapshotError {}
+
+fn validate_mapping_shape(address: usize, mapped: usize) -> Result<(), ShmValidationError> {
+    if mapped < SHM_TOTAL_SIZE {
+        return Err(ShmValidationError::MappingTooSmall {
+            mapped,
+            required: SHM_TOTAL_SIZE,
+        });
+    }
+    let required = align_of::<SutShmRegion>();
+    if !address.is_multiple_of(required) {
+        return Err(ShmValidationError::MisalignedMapping { address, required });
+    }
+    Ok(())
+}
 
 /// A publication unit that could not be proven stable during a snapshot.
 ///
@@ -313,22 +356,22 @@ impl OwnedShmSnapshot {
         &self.consistency_issues
     }
 
-    fn validate(&self) -> Result<(), ShmSnapshotError> {
+    fn validate(&self) -> Result<(), ShmValidationError> {
         let magic = self.read_u32(SECTION1_OFFSET).unwrap_or_default();
         if magic != SHM_MAGIC {
-            return Err(ShmSnapshotError::InvalidMagic { found: magic });
+            return Err(ShmValidationError::InvalidMagic { found: magic });
         }
 
         let version = self
             .read_u32(SECTION1_OFFSET + size_of::<u32>())
             .unwrap_or_default();
         if version != SHM_VERSION {
-            return Err(ShmSnapshotError::UnsupportedVersion { found: version });
+            return Err(ShmValidationError::UnsupportedVersion { found: version });
         }
 
         let canary = self.read_u32(FOOTER_OFFSET).unwrap_or_default();
         if canary != SHM_CANARY {
-            return Err(ShmSnapshotError::InvalidCanary { found: canary });
+            return Err(ShmValidationError::InvalidCanary { found: canary });
         }
 
         Ok(())
@@ -584,12 +627,16 @@ impl OwnedShmSnapshot {
         attachments
     }
 
-    /// Read valid screenshot slots, sorted by timestamp (newest first).
+    /// Read valid screenshot slots in capture priority order.
+    ///
+    /// Lower numeric tiers have higher priority. Frames in the same tier are
+    /// ordered newest first, with slot order providing a deterministic tie.
     #[must_use]
     pub fn read_screenshots(&self) -> Vec<RawScreenshot> {
-        let (Some(valid_offset), Some(timestamp_offset), Some(data_offset)) = (
+        let (Some(valid_offset), Some(timestamp_offset), Some(tier_offset), Some(data_offset)) = (
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, valid)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, timestamp)),
+            SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, tier)),
             SECTION4_OFFSET.checked_add(offset_of!(SutScreenshotSection, data)),
         ) else {
             return Vec::new();
@@ -612,6 +659,11 @@ impl OwnedShmSnapshot {
             else {
                 continue;
             };
+            let Some(tier) = indexed_offset(tier_offset, index, size_of::<u32>())
+                .and_then(|offset| self.read_u32(offset))
+            else {
+                continue;
+            };
             let Some(rgba) = indexed_offset(data_offset, index, SCREENSHOT_BYTES_PER_SLOT)
                 .and_then(|offset| self.range(offset, SCREENSHOT_BYTES_PER_SLOT))
                 .map(<[u8]>::to_vec)
@@ -620,13 +672,18 @@ impl OwnedShmSnapshot {
             };
             screenshots.push(RawScreenshot {
                 timestamp_ns,
+                tier,
                 width: SCREENSHOT_WIDTH,
                 height: SCREENSHOT_HEIGHT,
                 rgba,
             });
         }
 
-        screenshots.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+        screenshots.sort_by(|a, b| {
+            a.tier
+                .cmp(&b.tier)
+                .then_with(|| b.timestamp_ns.cmp(&a.timestamp_ns))
+        });
         screenshots
     }
 
@@ -1181,12 +1238,7 @@ impl SharedMemory {
         deadline: Option<Instant>,
         policy: ShmSnapshotPolicy,
     ) -> Result<OwnedShmSnapshot, ShmSnapshotError> {
-        if self.mapping.len() < SHM_TOTAL_SIZE {
-            return Err(ShmSnapshotError::MappingTooSmall {
-                mapped: self.mapping.len(),
-                required: SHM_TOTAL_SIZE,
-            });
-        }
+        validate_mapping_shape(self.mapping.base_ptr().addr(), self.mapping.len())?;
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(ShmSnapshotError::DeadlineExceeded);
         }

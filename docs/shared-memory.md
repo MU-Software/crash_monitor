@@ -238,6 +238,11 @@ generation before and after copying its pixels and metadata and accepts only the
 same nonzero even value. An odd or changed value drops that slot without
 spinning; other slots remain eligible.
 
+The numeric `tier` is retained in raw and report attachment metadata. Lower
+tier values have higher selection priority; frames within a tier are ordered
+newest first. This deterministic ordering lets later capture budgets truncate
+the result without discarding a higher-priority producer tier first.
+
 ## Atomic ABI rules
 
 Atomic words are declared as plain fixed-width integers in the schema because

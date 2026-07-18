@@ -1,4 +1,4 @@
-use super::encode_png;
+use super::{encode_png, rgba_attachment};
 use crate::pipeline::report::{
     self, CrashReport, ExceptionReport, HeapSummary, LoadedImageReport, ReportHeader, ThreadReport,
     VmRegionReport,
@@ -13,6 +13,12 @@ use nix::unistd::mkfifo;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+#[test]
+fn test_rgba_attachment_preserves_screenshot_tier_metadata() {
+    let attachment = rgba_attachment("screen", "screen.rgba", 2, 3, 24, 7);
+    assert_eq!(attachment["tier"], 7);
+}
 
 fn make_event() -> CrashEvent {
     CrashEvent {

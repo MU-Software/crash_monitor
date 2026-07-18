@@ -833,6 +833,7 @@ pub fn write_report(
                 shot.width,
                 shot.height,
                 shot.rgba.len() as u64,
+                shot.tier,
             ));
     }
 

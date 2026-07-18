@@ -304,10 +304,10 @@
 
 ### P1-17. SHM validation과 metadata 소비를 완전하게 만든다
 
-- [ ] validation의 bool 결과를 magic/version/canary/size/alignment를 구분하는 `ShmValidationError`로 바꾼다.
-- [ ] screenshot `tier`를 raw/report metadata와 selection policy에 반영한다.
-- [ ] 중복되고 미사용인 header `ring_count`를 제거·예약 처리하거나 authoritative count로 사용한다.
-- [ ] invalid header를 조용히 무시하지 말고 bounded diagnostic을 남긴다.
+- [x] validation의 bool 결과를 magic/version/canary/size/alignment를 구분하는 `ShmValidationError`로 바꾼다.
+- [x] screenshot `tier`를 raw/report metadata와 selection policy에 반영한다.
+- [x] 중복되고 미사용인 header `ring_count`를 제거·예약 처리하거나 authoritative count로 사용한다.
+- [x] invalid header를 조용히 무시하지 말고 bounded diagnostic을 남긴다.
 
 범위: `src/shm/reader.rs`, `src/shm/types.rs`, diagnostics.
 

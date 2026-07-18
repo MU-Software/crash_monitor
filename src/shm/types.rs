@@ -220,6 +220,8 @@ pub struct RawAttachment {
 /// A screenshot frame read from shared memory.
 pub struct RawScreenshot {
     pub timestamp_ns: u64,
+    /// Producer-assigned capture tier. Lower values are selected first.
+    pub tier: u32,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,

@@ -572,6 +572,7 @@ pub fn rgba_attachment(
     width: u32,
     height: u32,
     size: u64,
+    tier: u32,
 ) -> serde_json::Value {
     serde_json::json!({
         "label": label,
@@ -580,6 +581,7 @@ pub fn rgba_attachment(
         "width": width,
         "height": height,
         "size": size,
+        "tier": tier,
     })
 }
 

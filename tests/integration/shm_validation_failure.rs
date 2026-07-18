@@ -110,7 +110,7 @@ fn test_corrupted_magic_returns_error() {
     }
     assert_eq!(
         shm.snapshot_owned_until(None).unwrap_err(),
-        ShmSnapshotError::InvalidMagic { found: 0xBAD_BEEF }
+        ShmSnapshotError::Validation(ShmValidationError::InvalidMagic { found: 0xBAD_BEEF })
     );
 }
 
@@ -123,7 +123,7 @@ fn test_corrupted_canary_returns_error() {
     }
     assert_eq!(
         shm.snapshot_owned_until(None).unwrap_err(),
-        ShmSnapshotError::InvalidCanary { found: 0 }
+        ShmSnapshotError::Validation(ShmValidationError::InvalidCanary { found: 0 })
     );
 }
 
@@ -141,7 +141,7 @@ fn test_exact_old_and_future_schema_versions_are_rejected() {
         }
         assert_eq!(
             shm.snapshot_owned_until(None).unwrap_err(),
-            ShmSnapshotError::UnsupportedVersion { found: version }
+            ShmSnapshotError::Validation(ShmValidationError::UnsupportedVersion { found: version })
         );
     }
 }
