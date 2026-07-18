@@ -809,6 +809,7 @@ impl Pipeline {
             );
             diagnostics.record(pp.name(), plugin_status(&outcome), start.elapsed());
         }
+        persist_final_diagnostics(&committed, diagnostics);
         transaction.release_publication_lease();
 
         diagnostics.report_path = result.json_path;
@@ -1110,6 +1111,7 @@ impl Pipeline {
                 start.elapsed(),
             );
         }
+        persist_final_diagnostics(&committed, &mut diagnostics);
         transaction.release_publication_lease();
 
         diagnostics.report_path = result.json_path;
@@ -1172,6 +1174,18 @@ impl Pipeline {
             }
         }
         Ok(())
+    }
+}
+
+fn persist_final_diagnostics(committed: &CommittedReport, diagnostics: &mut Diagnostics) {
+    let Some(final_diagnostics) =
+        crate::preprocessors::report_formatter::build_diagnostics_json(diagnostics)
+    else {
+        return;
+    };
+    if let Err(error) = committed.persist_final_diagnostics(final_diagnostics) {
+        eprintln!("[monitor] Failed to persist final report diagnostics: {error}");
+        diagnostics.record_immediate("FinalDiagnostics", PluginStatus::Error(error));
     }
 }
 

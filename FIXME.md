@@ -30,6 +30,9 @@
 - [x] symbolication, JSON/PNG/ZIP, move, retention, feedback, notifier는 worker process 또는 bounded worker queue에서 수행한다.
 - [x] feedback·ZIP·notifier hang이 child resume나 Mach reply를 지연하지 않는 테스트를 추가한다.
 - [x] snapshot/finalize 각 단계의 deadline과 failure policy를 문서화한다.
+- [x] timeout 후 detach될 수 있는 capture worker가 task send right를 독립 소유하게 해 supervisor handle drop 뒤 Mach port name 재사용을 막는다.
+- [x] fatal finalizer thread spawn이 연속 실패해도 plugin을 실행하지 않는 동기 emergency transaction으로 Stage-1 raw/SHM과 best-effort JSON을 보존한다.
+- [ ] cooperative collector의 in-flight Mach 호출까지 resume 전에 종료하거나 kill 가능한 경계로 격리해 resume 이후 task-port 접근 자체를 제거한다.
 
 범위: `src/event_loop.rs`, `src/pipeline`, `src/postprocessors`, `src/notifiers`.
 
@@ -213,9 +216,9 @@
 
 ### P1-07. child environment 전달을 결정적이고 byte-safe하게 만든다
 
-- [ ] `std::env::vars()` 대신 non-UTF-8을 보존하거나 안전하게 건너뛸 수 있는 `vars_os()` 기반 경로를 사용한다.
-- [ ] 상속된 `CRASH_MONITOR_SHM`을 제거한 뒤 새 값 하나만 넣는다.
-- [ ] SHM 생성 실패 시 `CRASH_MONITOR_SHM=1`을 보내지 말고 key를 생략하거나 명시적 disabled protocol을 사용한다.
+- [x] `std::env::vars()` 대신 non-UTF-8을 보존하거나 안전하게 건너뛸 수 있는 `vars_os()` 기반 경로를 사용한다.
+- [x] 상속된 `CRASH_MONITOR_SHM`을 제거한 뒤 새 값 하나만 넣는다.
+- [x] SHM 생성 실패 시 `CRASH_MONITOR_SHM=1`을 보내지 말고 key를 생략하거나 명시적 disabled protocol을 사용한다.
 - [ ] child에 전달한 최종 environment snapshot을 report collector에 주입한다.
 
 범위: `src/main.rs`, `src/collectors/environment.rs`.
@@ -319,6 +322,7 @@
 
 ### P1-19. Mach right 종류별 RAII와 exception-port 정리를 구현한다
 
+- [x] detach될 수 있는 capture worker가 supervisor의 raw task name을 빌리지 않고 독립 send-right user reference를 소유·해제하게 한다.
 - [ ] receive right에는 send-right용 deallocate가 아니라 `mach_port_mod_refs` 또는 `mach_port_destruct`를 사용한다.
 - [ ] send, receive, task, thread right를 서로 다른 wrapper로 표현한다.
 - [ ] exception request descriptor의 task/thread right ownership과 reply 이후 정리 책임을 검증한다.
@@ -366,8 +370,8 @@
 
 ### P1-24. postprocessor와 notifier 결과까지 최종 진단에 포함한다
 
-- [ ] Stage 2 JSON 작성 뒤 발생하는 ZIP, move, retention, feedback, notifier 상태와 총 시간을 별도 final manifest 또는 원자적 final update로 보존한다.
-- [ ] diagnostics를 기록하기 위해 notifier가 삭제된 중간 JSON path에 의존하지 않게 한다.
+- [x] Stage 2 JSON 작성 뒤 발생하는 ZIP, move, retention, feedback, notifier 상태와 총 시간을 별도 final manifest 또는 원자적 final update로 보존한다.
+- [x] diagnostics를 기록하기 위해 notifier가 삭제된 중간 JSON path에 의존하지 않게 한다.
 - [ ] 각 stage의 시작·종료·실패·duration을 report identity와 함께 남긴다.
 
 범위: `src/pipeline/mod.rs`, report/manifest model.
@@ -628,7 +632,7 @@
 
 - [ ] constructor의 동기 `osascript` probe를 제거하거나 lazy하게 실행한다.
 - [ ] spawn 성공만으로 notification 성공으로 기록하지 않고 exit status와 stderr를 확인한다.
-- [ ] notifier 실패를 final diagnostics에 남긴다.
+- [x] notifier 실패를 final diagnostics에 남긴다.
 
 범위: `src/notifiers/system.rs`.
 

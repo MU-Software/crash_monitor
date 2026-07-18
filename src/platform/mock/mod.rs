@@ -49,6 +49,8 @@ pub struct MockPlatform {
     resume_count: AtomicUsize,
     resume_failures_remaining: AtomicUsize,
     terminate_count: AtomicUsize,
+    retain_task_port_count: AtomicUsize,
+    deallocate_task_port_count: AtomicUsize,
     supervisor_health: Mutex<SupervisorHealth>,
     deallocated_ports: Mutex<Vec<mach_port_t>>,
 }
@@ -68,6 +70,17 @@ impl MockPlatform {
     /// Number of times `terminate_task` was called.
     pub fn terminate_count(&self) -> usize {
         self.terminate_count.load(Ordering::SeqCst)
+    }
+
+    /// Number of independently owned task send-right references retained for
+    /// capture workers.
+    pub fn retain_task_port_count(&self) -> usize {
+        self.retain_task_port_count.load(Ordering::SeqCst)
+    }
+
+    /// Number of retained task send-right references released by workers.
+    pub fn deallocate_task_port_count(&self) -> usize {
+        self.deallocate_task_port_count.load(Ordering::SeqCst)
     }
 
     /// Fail exactly the next `attempts` resume calls, then allow success.
@@ -101,6 +114,8 @@ impl Default for MockPlatform {
             resume_count: AtomicUsize::new(0),
             resume_failures_remaining: AtomicUsize::new(0),
             terminate_count: AtomicUsize::new(0),
+            retain_task_port_count: AtomicUsize::new(0),
+            deallocate_task_port_count: AtomicUsize::new(0),
             supervisor_health: Mutex::new(SupervisorHealth::default()),
             deallocated_ports: Mutex::new(Vec::new()),
         }
@@ -139,6 +154,16 @@ impl PlatformOps for MockPlatform {
         } else {
             Ok(())
         }
+    }
+
+    fn retain_task_port(&self, _task: mach_port_t) -> Result<(), String> {
+        self.retain_task_port_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn deallocate_task_port(&self, _task: mach_port_t) {
+        self.deallocate_task_port_count
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn record_task_control_failure(&self, failure: TaskControlFailure) {

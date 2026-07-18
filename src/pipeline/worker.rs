@@ -11,7 +11,7 @@ use super::{
     CaptureOutcome, CapturePayload, CapturedEvent, Diagnostics, Pipeline, PluginStatus,
     TerminationReason, suspend_failure_policy,
 };
-use crate::platform::{TaskControlFailureSink, TaskSuspendGuard};
+use crate::platform::{RetainedTaskPort, TaskControlFailureSink, TaskSuspendGuard};
 
 /// One absolute capture budget, measured from Mach request receipt for crashes.
 pub const CAPTURE_DEADLINE: Duration = Duration::from_secs(5);
@@ -23,10 +23,18 @@ pub const CRASH_FINALIZE_WAIT: Duration = Duration::from_secs(310);
 const CAPTURE_QUEUE_CAPACITY: usize = 1;
 const BACKGROUND_QUEUE_CAPACITY: usize = 2;
 
+#[cfg(test)]
+thread_local! {
+    /// Deterministic fault injection for the otherwise impractical
+    /// `thread::Builder::spawn` resource-exhaustion path.
+    static TEST_FATAL_SPAWN_FAILURES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 struct CaptureJob {
     event: super::CrashEvent,
     report_context: Arc<super::ReportContext>,
-    task: mach_port_t,
     cancelled: Arc<AtomicBool>,
     shm_snapshot: Option<Arc<crate::shm::OwnedShmSnapshot>>,
     result_tx: SyncSender<CapturePayload>,
@@ -44,17 +52,42 @@ pub(crate) struct CaptureWorker {
 }
 
 impl CaptureWorker {
-    pub(crate) fn start(pipeline: Arc<Pipeline>) -> Self {
+    pub(crate) fn start(pipeline: Arc<Pipeline>, task: mach_port_t) -> Self {
         let (sender, receiver) = sync_channel::<CaptureJob>(CAPTURE_QUEUE_CAPACITY);
         let (done_tx, done_rx) = mpsc::channel();
+        if !pipeline.enabled {
+            return Self {
+                pipeline,
+                sender: None,
+                done_rx,
+                handle: None,
+                unavailable_reason: None,
+            };
+        }
+        let retained_task = match RetainedTaskPort::retain(pipeline.platform.clone(), task) {
+            Ok(retained_task) => retained_task,
+            Err(error) => {
+                return Self {
+                    pipeline,
+                    sender: None,
+                    done_rx,
+                    handle: None,
+                    unavailable_reason: Some(format!(
+                        "failed to retain task port for capture worker: {error}"
+                    )),
+                };
+            }
+        };
         let worker_pipeline = pipeline.clone();
         let spawn = thread::Builder::new()
             .name("crash-capture".into())
             .spawn(move || {
+                // The worker owns this send-right user reference until the
+                // thread actually exits, even when its JoinHandle is detached.
+                let task = retained_task.raw();
                 while let Ok(CaptureJob {
                     event,
                     report_context,
-                    task,
                     cancelled,
                     shm_snapshot,
                     result_tx,
@@ -164,9 +197,12 @@ impl CaptureWorker {
             );
         }
 
-        // The guard-owning event-loop thread snapshots the payload before the
-        // capture job can run. A timed-out worker may continue parsing owned
-        // bytes, but it can never reach back into the resumed task's mapping.
+        // The guard-owning event-loop thread snapshots every SHM payload
+        // section before the capture job can run. A timed-out worker may keep
+        // parsing those owned bytes without reading the resumed task's SHM
+        // mapping. Direct task-port collectors are separate: an in-flight Mach
+        // call can return after resume, so the worker owns a retained send
+        // right until it actually exits and its late result is quarantined.
         let mut snapshot_error = None;
         let shm_snapshot = if suspend_guard.is_some() {
             match self.pipeline.snapshot_shm_while_suspended(Some(deadline)) {
@@ -210,7 +246,6 @@ impl CaptureWorker {
         let job = CaptureJob {
             event,
             report_context,
-            task,
             cancelled: cancelled.clone(),
             shm_snapshot,
             result_tx,
@@ -565,6 +600,7 @@ impl CrashFinalization {
                     "CrashFinalizer",
                     PluginStatus::Error("initial worker spawn failed; retrying".into()),
                 );
+                let emergency_pipeline = pipeline.clone();
                 match CrashFinalizeTicket::spawn(pipeline, *captured) {
                     Ok(ticket) => ticket.complete(reason, timeout),
                     Err(captured) => {
@@ -573,12 +609,125 @@ impl CrashFinalization {
                             "CrashFinalizer",
                             PluginStatus::Error("worker spawn retry failed".into()),
                         );
-                        Some(captured.diagnostics)
+                        captured.set_termination(reason);
+                        Some(emergency_finalize_captured(&emergency_pipeline, captured))
                     }
                 }
             }
         }
     }
+}
+
+/// Last-resort fatal-event persistence when no finalizer thread can be
+/// created. This deliberately runs no filters, processors, or notifiers: the
+/// current supervisor thread writes only already-owned evidence through the
+/// normal private, atomic artifact transaction.
+fn emergency_finalize_captured(pipeline: &Pipeline, mut captured: CapturedEvent) -> Diagnostics {
+    if !pipeline.report_enabled(captured.event.report_type) {
+        return Diagnostics::new();
+    }
+
+    let report_context = match captured.report_context.take() {
+        Some(report_context) => report_context,
+        None => match pipeline.create_report_context(&captured.event) {
+            Ok(report_context) => report_context,
+            Err(error) => {
+                captured
+                    .diagnostics
+                    .record_immediate("EmergencyArtifactBegin", PluginStatus::Error(error));
+                return captured.diagnostics;
+            }
+        },
+    };
+    let transaction = match super::ArtifactTransaction::begin_shared(report_context) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            captured
+                .diagnostics
+                .record_immediate("EmergencyArtifactBegin", PluginStatus::Error(error));
+            return captured.diagnostics;
+        }
+    };
+
+    let raw_path = match super::safety::write_raw_stage1(&transaction, &captured.data.raw.threads) {
+        Ok(path) => {
+            captured
+                .diagnostics
+                .record_immediate("EmergencyStage1Raw", PluginStatus::Ok);
+            Some(path)
+        }
+        Err(error) => {
+            captured
+                .diagnostics
+                .record_immediate("EmergencyStage1Raw", PluginStatus::Error(error));
+            None
+        }
+    };
+
+    if let Some(raw_shm) = &captured.raw_shm {
+        let status = match super::safety::write_raw_shm_stage1(&transaction, raw_shm) {
+            Ok(()) => PluginStatus::Ok,
+            Err(error) => PluginStatus::Error(error),
+        };
+        captured
+            .diagnostics
+            .record_immediate("EmergencyStage1Shm", status);
+    }
+
+    // JSON is best-effort. It is produced without screenshot conversion or
+    // any other extension point so resource exhaustion cannot enter another
+    // unbounded plugin path.
+    let json_path = {
+        let mut report =
+            super::report::build_report(&captured.event, &captured.data, &captured.diagnostics);
+        match super::report::write_report(&transaction, &mut report, &[]) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                captured
+                    .diagnostics
+                    .record_immediate("EmergencyStage2Json", PluginStatus::Error(error));
+                None
+            }
+        }
+    };
+
+    if transaction.artifact_paths().is_empty() {
+        captured.diagnostics.record_immediate(
+            "EmergencyArtifactCommit",
+            PluginStatus::Error("no emergency artifacts could be written".into()),
+        );
+        return captured.diagnostics;
+    }
+
+    let staging_dir = transaction.staging_dir().to_path_buf();
+    let committed = match transaction.commit() {
+        Ok(committed) => committed,
+        Err(error) => {
+            captured
+                .diagnostics
+                .record_immediate("EmergencyArtifactCommit", PluginStatus::Error(error));
+            return captured.diagnostics;
+        }
+    };
+    for warning in &committed.durability_warnings {
+        captured.diagnostics.record_immediate(
+            "EmergencyArtifactDurability",
+            PluginStatus::Error(warning.clone()),
+        );
+    }
+
+    let committed_path = |staged_path: &std::path::Path| {
+        staged_path
+            .strip_prefix(&staging_dir)
+            .ok()
+            .map(|relative| committed.report_dir.join(relative))
+    };
+    captured.diagnostics.report_path = json_path
+        .as_deref()
+        .and_then(&committed_path)
+        .or_else(|| raw_path.as_deref().and_then(committed_path));
+    transaction.release_publication_lease();
+    captured.diagnostics
 }
 
 pub struct CrashFinalizeTicket {
@@ -590,6 +739,20 @@ pub struct CrashFinalizeTicket {
 
 impl CrashFinalizeTicket {
     fn spawn(pipeline: Arc<Pipeline>, captured: CapturedEvent) -> Result<Self, Box<CapturedEvent>> {
+        #[cfg(test)]
+        if TEST_FATAL_SPAWN_FAILURES.with(|remaining| {
+            let count = remaining.get();
+            if count == 0 {
+                false
+            } else {
+                remaining.set(count - 1);
+                true
+            }
+        }) {
+            eprintln!("[monitor] injected fatal finalizer spawn failure");
+            return Err(Box::new(captured));
+        }
+
         let (termination_tx, termination_rx) = sync_channel(1);
         let (result_tx, result_rx) = sync_channel(1);
         let (done_tx, done_rx) = mpsc::channel();
@@ -672,6 +835,7 @@ mod tests {
         PostProcessor, Priority, ReportResult, ReportType, TriggerPolicy,
     };
     use crate::platform::mock::MockPlatform;
+    use nix::libc;
     use std::sync::Condvar;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -725,6 +889,49 @@ mod tests {
         entered_tx: SyncSender<()>,
         observed_tx: SyncSender<String>,
         release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    struct BlockingCaptureCollector {
+        entered_tx: SyncSender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Plugin for BlockingCaptureCollector {
+        fn name(&self) -> &'static str {
+            "BlockingCaptureCollector"
+        }
+
+        fn execution(&self) -> PluginExecution {
+            PluginExecution::Cooperative
+        }
+
+        fn priority(&self) -> Priority {
+            Priority::Critical
+        }
+    }
+
+    impl Collector for BlockingCaptureCollector {
+        fn collect(
+            &self,
+            _event: &CrashEvent,
+            _task: mach_port_t,
+            _data: &mut CollectedData,
+            _context: &PluginContext,
+        ) -> Result<(), String> {
+            let _ = self.entered_tx.send(());
+            let (lock, condvar) = &*self.release;
+            let guard = match lock.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let wait = condvar
+                .wait_timeout_while(guard, Duration::from_secs(5), |released| !*released)
+                .map_err(|_| "release mutex poisoned".to_string())?;
+            if wait.1.timed_out() {
+                return Err("release timed out".into());
+            }
+            Ok(())
+        }
     }
 
     impl Plugin for PostResumeSnapshotCollector {
@@ -864,6 +1071,19 @@ mod tests {
         tempdir: tempfile::TempDir,
     }
 
+    struct FatalSpawnFailureReset;
+
+    impl Drop for FatalSpawnFailureReset {
+        fn drop(&mut self) {
+            TEST_FATAL_SPAWN_FAILURES.with(|remaining| remaining.set(0));
+        }
+    }
+
+    fn inject_fatal_spawn_failures(count: usize) -> FatalSpawnFailureReset {
+        TEST_FATAL_SPAWN_FAILURES.with(|remaining| remaining.set(count));
+        FatalSpawnFailureReset
+    }
+
     fn worker_fixture_with_enabled(enabled: bool) -> WorkerFixture {
         let tempdir = tempfile::tempdir().unwrap();
         let (entered_tx, entered_rx) = sync_channel(8);
@@ -939,7 +1159,7 @@ mod tests {
     #[test]
     fn expired_capture_worker_deadline_is_timed_out() {
         let fixture = worker_fixture();
-        let mut worker = CaptureWorker::start(fixture.pipeline.clone());
+        let mut worker = CaptureWorker::start(fixture.pipeline.clone(), 0);
         let event = captured(9).event;
 
         let outcome = worker.capture(event, 0, Instant::now());
@@ -974,7 +1194,7 @@ mod tests {
             platform: platform.clone(),
             output_dir: Some(tempdir.path().to_path_buf()),
         });
-        let mut worker = CaptureWorker::start(pipeline);
+        let mut worker = CaptureWorker::start(pipeline, 123);
 
         let outcome = worker.capture(
             captured(9).event,
@@ -985,8 +1205,71 @@ mod tests {
         assert!(matches!(outcome, CaptureOutcome::Skipped(_)));
         assert_eq!(platform.suspend_count(), 0);
         assert_eq!(platform.resume_count(), 0);
+        assert_eq!(platform.retain_task_port_count(), 0);
+        assert_eq!(platform.deallocate_task_port_count(), 0);
         assert!(std::fs::read_dir(tempdir.path()).unwrap().next().is_none());
         worker.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn detached_capture_worker_owns_task_send_right_until_thread_exit() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(MockPlatform::default());
+        let (entered_tx, entered_rx) = sync_channel(1);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let pipeline = Arc::new(Pipeline {
+            enabled: true,
+            triggers: TriggerPolicy::ALL_ENABLED,
+            collection_policy: crate::config::CollectionPolicy::FULL,
+            filters: vec![],
+            collectors: vec![Box::new(BlockingCaptureCollector {
+                entered_tx,
+                release: release.clone(),
+            })],
+            pre_processors: vec![],
+            post_processors: vec![],
+            notifiers: vec![],
+            shm: None,
+            platform: platform.clone(),
+            output_dir: Some(tempdir.path().to_path_buf()),
+        });
+
+        let mut worker = CaptureWorker::start(pipeline, 71);
+        assert_eq!(platform.retain_task_port_count(), 1);
+        assert_eq!(platform.deallocate_task_port_count(), 0);
+
+        let outcome = worker.capture(
+            captured(71).event,
+            71,
+            Instant::now() + Duration::from_millis(50),
+        );
+        assert!(matches!(outcome, CaptureOutcome::Captured(_)));
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("collector should remain in flight after capture timeout");
+        assert_eq!(platform.resume_count(), 1);
+        assert_eq!(platform.deallocate_task_port_count(), 0);
+
+        worker.detach();
+        assert_eq!(platform.deallocate_task_port_count(), 0);
+        let (lock, condvar) = &*release;
+        let mut released = match lock.lock() {
+            Ok(released) => released,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *released = true;
+        condvar.notify_all();
+        drop(released);
+
+        let started = Instant::now();
+        while platform.deallocate_task_port_count() == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "detached worker did not release its retained task send right"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(platform.deallocate_task_port_count(), 1);
     }
 
     #[test]
@@ -1014,7 +1297,7 @@ mod tests {
             platform: platform.clone(),
             output_dir: Some(tempdir.path().to_path_buf()),
         });
-        let mut worker = CaptureWorker::start(pipeline);
+        let mut worker = CaptureWorker::start(pipeline, 123);
 
         let outcome = worker.capture(
             captured(10).event,
@@ -1104,7 +1387,7 @@ mod tests {
             condvar.notify_all();
         });
 
-        let mut worker = CaptureWorker::start(pipeline);
+        let mut worker = CaptureWorker::start(pipeline, 7);
         let outcome = worker.capture(
             captured(44).event,
             7,
@@ -1159,7 +1442,7 @@ mod tests {
             platform: platform.clone(),
             output_dir: Some(tempdir.path().to_path_buf()),
         });
-        let mut worker = CaptureWorker::start(pipeline);
+        let mut worker = CaptureWorker::start(pipeline, 8);
         worker.sender.take();
 
         let outcome = worker.capture(
@@ -1212,7 +1495,7 @@ mod tests {
             platform: platform.clone(),
             output_dir: Some(tempdir.path().to_path_buf()),
         });
-        let mut worker = CaptureWorker::start(pipeline);
+        let mut worker = CaptureWorker::start(pipeline, 9);
         worker.sender.take();
 
         let outcome = worker.capture(
@@ -1259,6 +1542,114 @@ mod tests {
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
         assert!(fixture.entered_rx.try_recv().is_err());
         assert!(fixture.tempdir.path().read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn fatal_finalizer_double_spawn_failure_commits_emergency_evidence_without_plugins() {
+        let fixture = worker_fixture();
+        let mut event = captured(81);
+        event.event.report_type = ReportType::Crash;
+        event
+            .data
+            .raw
+            .threads
+            .push(crate::collectors::thread::RawThreadData {
+                thread_port: 17,
+                name: Some("crashed-thread".into()),
+                crashed: true,
+                ..Default::default()
+            });
+        event.raw_shm = Some(super::super::RawShmSnapshot {
+            breadcrumbs: b"owned-breadcrumbs".to_vec(),
+            context: b"owned-context".to_vec(),
+        });
+
+        let _reset = inject_fatal_spawn_failures(2);
+        let finalization = CrashFinalization::start(fixture.pipeline.clone(), Box::new(event));
+        assert!(matches!(&finalization, CrashFinalization::Deferred(_)));
+
+        let diagnostics = finalization
+            .complete(
+                fixture.pipeline.clone(),
+                Some(TerminationReason::Signaled {
+                    signal: libc::SIGSEGV,
+                    core_dumped: false,
+                    runtime_ms: 42,
+                }),
+                Duration::from_secs(1),
+            )
+            .expect("emergency finalization returns diagnostics");
+
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.entered_rx.try_recv().is_err());
+        assert_eq!(
+            diagnostics
+                .plugins
+                .iter()
+                .filter(|entry| entry.name == "CrashFinalizer")
+                .count(),
+            2
+        );
+
+        let report_path = diagnostics
+            .report_path
+            .as_ref()
+            .expect("best-effort JSON should be the emergency report path");
+        assert!(report_path.is_file());
+        let report_dir = report_path.parent().expect("report directory");
+        assert_eq!(report_path.file_name().unwrap(), "report.json");
+        assert!(report_dir.join("threads.raw").is_file());
+        assert_eq!(
+            std::fs::read(report_dir.join("breadcrumbs.bin")).unwrap(),
+            b"owned-breadcrumbs"
+        );
+        assert_eq!(
+            std::fs::read(report_dir.join("context.bin")).unwrap(),
+            b"owned-context"
+        );
+        assert!(
+            std::fs::read_to_string(report_dir.join("threads.raw"))
+                .unwrap()
+                .contains("crashed-thread")
+        );
+
+        let manifest = crate::pipeline::load_manifest(&report_dir.join("manifest.json")).unwrap();
+        let artifact_names: Vec<_> = manifest
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .collect();
+        assert_eq!(
+            artifact_names,
+            vec![
+                "breadcrumbs.bin",
+                "context.bin",
+                "report.json",
+                "threads.raw"
+            ]
+        );
+        let report = crate::pipeline::report::load_report(report_path).unwrap();
+        assert_eq!(
+            report.termination,
+            Some(TerminationReason::Signaled {
+                signal: libc::SIGSEGV,
+                core_dumped: false,
+                runtime_ms: 42,
+            })
+        );
+        assert!(
+            fixture
+                .tempdir
+                .path()
+                .read_dir()
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with('.')),
+            "the emergency transaction must be atomically published without a staging directory"
+        );
     }
 
     #[test]

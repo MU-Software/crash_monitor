@@ -53,6 +53,10 @@ A representative archived report looks like:
   "process": "example-app",
   "committed_at": "2026-07-18T12:34:56.123456789+09:00",
   "destination": { "kind": "sibling", "directory": "sent" },
+  "final_diagnostics": {
+    "pipeline_duration_ms": 37,
+    "plugins": { "DesktopNotification": { "status": "ok", "duration_ms": 2 } }
+  },
   "artifacts": [
     { "path": "report.zip", "kind": "archive", "size": 48123 }
   ]
@@ -66,6 +70,13 @@ manifest invalidate the directory for readers and recovery. The canonical
 report artifact is `{"path":"report.json","kind":"report"}` or, after ZIP
 archiving, `{"path":"report.zip","kind":"archive"}`. Other exact entries may
 describe attachments, screenshots, or fail-safe raw data.
+
+`final_diagnostics` is optional for backward compatibility. The monitor writes
+it by atomically replacing `manifest.json` only after after-commit processors,
+notifiers, after-notify processors, and final cleanup have completed. It does
+not add an artifact or change any artifact size recorded by the manifest.
+Report loaders prefer this terminal snapshot over the earlier `_diagnostics`
+embedded in `report.json` or `report.zip`.
 
 ## JSON shape
 

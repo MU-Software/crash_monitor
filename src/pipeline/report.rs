@@ -15,7 +15,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
-use super::artifact::{ArtifactKind, ArtifactTransaction, ReportId};
+use super::artifact::{
+    ArtifactKind, ArtifactTransaction, MANIFEST_FILE_NAME, MANIFEST_SCHEMA_VERSION, ReportId,
+    load_manifest,
+};
 use super::types::{CollectedData, CrashEvent, Diagnostics, ReportType, TerminationReason};
 
 // ═══════════════════════════════════════════════════
@@ -232,8 +235,48 @@ pub fn load_report(path: &Path) -> Result<CrashReport, String> {
     } else {
         read_plain_report(path)?
     };
-    serde_json::from_slice(&bytes)
-        .map_err(|e| format!("invalid report JSON in '{}': {e}", path.display()))
+    let mut report: CrashReport = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid report JSON in '{}': {e}", path.display()))?;
+    overlay_manifest_diagnostics(path, &mut report);
+    Ok(report)
+}
+
+/// Overlay terminal diagnostics only when `path` is the canonical artifact of
+/// a valid sibling manifest for the same report. External standalone reports
+/// keep their embedded diagnostics and malformed optional manifests do not
+/// make an otherwise readable report unusable.
+fn overlay_manifest_diagnostics(path: &Path, report: &mut CrashReport) {
+    let Some(report_dir) = path.parent() else {
+        return;
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(manifest) = load_manifest(&report_dir.join(MANIFEST_FILE_NAME)) else {
+        return;
+    };
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION
+        || report_dir.file_name().and_then(|name| name.to_str())
+            != Some(manifest.report_id.as_str())
+        || report.header.report_id.as_ref() != Some(&manifest.report_id)
+    {
+        return;
+    }
+    let expected_kind = if is_zip_path(path) {
+        ArtifactKind::Archive
+    } else {
+        ArtifactKind::Report
+    };
+    if !manifest
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.path == file_name && artifact.kind == expected_kind)
+    {
+        return;
+    }
+    if let Some(final_diagnostics) = manifest.final_diagnostics {
+        report.diagnostics = Some(final_diagnostics);
+    }
 }
 
 /// Persist the terminal wait status into an already finalized crash report.

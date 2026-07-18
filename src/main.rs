@@ -26,7 +26,8 @@ mod watchdog;
 use clap::{Parser, Subcommand};
 use mach2::port::mach_port_t;
 use nix::sys::wait::{WaitPidFlag, waitpid};
-use std::ffi::CString;
+use std::ffi::{CString, OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -99,6 +100,49 @@ fn env_u64(key: &str, default: u64) -> u64 {
         eprintln!("[monitor] Warning: {key}={val:?} is not a valid u64, using default {default}");
         default
     })
+}
+
+const CRASH_MONITOR_SHM_ENV: &str = "CRASH_MONITOR_SHM";
+
+/// Build the child's POSIX environment without inheriting a stale shared-memory
+/// capability from the monitor's own environment.
+///
+/// `vars_os()` values are encoded directly so non-UTF-8 environment entries
+/// survive unchanged. A freshly-created mapping contributes the sole
+/// `CRASH_MONITOR_SHM` entry; when no mapping exists, the key is omitted.
+fn build_child_environment<I>(
+    inherited: I,
+    shared_memory_name: Option<&str>,
+) -> Result<Vec<CString>, String>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let shm_key = OsStr::new(CRASH_MONITOR_SHM_ENV);
+    let mut environment = Vec::new();
+
+    for (key, value) in inherited {
+        if key == shm_key {
+            continue;
+        }
+
+        let mut entry = Vec::with_capacity(key.as_bytes().len() + value.as_bytes().len() + 1);
+        entry.extend_from_slice(key.as_bytes());
+        entry.push(b'=');
+        entry.extend_from_slice(value.as_bytes());
+        environment.push(
+            CString::new(entry)
+                .map_err(|_| "inherited environment contains a null byte".to_string())?,
+        );
+    }
+
+    if let Some(name) = shared_memory_name {
+        environment.push(
+            CString::new(format!("{CRASH_MONITOR_SHM_ENV}={name}"))
+                .map_err(|_| "shared-memory name contains a null byte".to_string())?,
+        );
+    }
+
+    Ok(environment)
 }
 
 /// Check whether a binary at `path` has the `com.apple.security.cs.debugger` entitlement.
@@ -422,16 +466,18 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
     }
     let c_argv: Vec<&std::ffi::CStr> = c_argv_owned.iter().map(AsRef::as_ref).collect();
 
-    // Build environment: inherit current env + add CRASH_MONITOR_SHM=<name>
-    let mut env_strings: Vec<CString> = std::env::vars()
-        .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok()) // skip invalid env vars
-        .collect();
-    let shm_env_value = shared_memory
-        .as_ref()
-        .map_or_else(|| "1".to_string(), |s| s.name().to_string());
-    if let Ok(shm_env) = CString::new(format!("CRASH_MONITOR_SHM={shm_env_value}")) {
-        env_strings.push(shm_env);
-    }
+    // Inherit the current environment, replacing (or removing) any stale SHM
+    // capability with the mapping created for this child.
+    let env_strings = match build_child_environment(
+        std::env::vars_os(),
+        shared_memory.as_ref().map(|mapping| mapping.name()),
+    ) {
+        Ok(environment) => environment,
+        Err(error) => {
+            eprintln!("[monitor] Failed to build child environment: {error}");
+            return event_loop::EXIT_MONITOR_INTERNAL;
+        }
+    };
     let c_envp: Vec<&std::ffi::CStr> = env_strings.iter().map(AsRef::as_ref).collect();
 
     // Spawn child with exception port pre-configured (survives exec)
@@ -651,6 +697,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::collections::VecDeque;
+    use std::os::unix::ffi::OsStringExt;
 
     const TEST_REAP_DEADLINE: Duration = Duration::from_millis(10);
 
@@ -667,6 +714,71 @@ mod tests {
             core_dumped: false,
             runtime_ms: 29,
         }
+    }
+
+    #[test]
+    fn child_environment_replaces_inherited_shm_and_preserves_non_utf8() {
+        let inherited = vec![
+            (OsString::from("PATH"), OsString::from("/usr/bin")),
+            (
+                OsString::from(CRASH_MONITOR_SHM_ENV),
+                OsString::from("/stale-one"),
+            ),
+            (
+                OsString::from(CRASH_MONITOR_SHM_ENV),
+                OsString::from("/stale-two"),
+            ),
+            (
+                OsString::from_vec(b"NON_UTF8".to_vec()),
+                OsString::from_vec(vec![b'v', b'a', b'l', 0xFF]),
+            ),
+        ];
+
+        let environment = build_child_environment(inherited, Some("/fresh-shm"))
+            .expect("valid environment should be encoded");
+        let entries: Vec<&[u8]> = environment.iter().map(CString::as_bytes).collect();
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.starts_with(b"CRASH_MONITOR_SHM="))
+                .count(),
+            1
+        );
+        assert!(entries.contains(&b"CRASH_MONITOR_SHM=/fresh-shm".as_slice()));
+        assert!(
+            entries.contains(
+                &[
+                    b'N', b'O', b'N', b'_', b'U', b'T', b'F', b'8', b'=', b'v', b'a', b'l', 0xFF
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn child_environment_omits_shm_when_mapping_is_unavailable() {
+        let inherited = vec![
+            (OsString::from("LANG"), OsString::from("ko_KR.UTF-8")),
+            (
+                OsString::from(CRASH_MONITOR_SHM_ENV),
+                OsString::from("/stale"),
+            ),
+        ];
+
+        let environment =
+            build_child_environment(inherited, None).expect("valid environment should be encoded");
+
+        assert!(
+            environment
+                .iter()
+                .all(|entry| { !entry.as_bytes().starts_with(b"CRASH_MONITOR_SHM=") })
+        );
+        assert!(
+            environment
+                .iter()
+                .any(|entry| entry.as_bytes() == b"LANG=ko_KR.UTF-8")
+        );
     }
 
     #[test]

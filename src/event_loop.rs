@@ -329,7 +329,7 @@ pub fn event_loop(
 ) -> EventLoopResult {
     // Worker construction is monitor-owned setup time, so finish it before
     // establishing the first ANR heartbeat/time baseline.
-    let mut capture_worker = CaptureWorker::start(pipeline.clone());
+    let mut capture_worker = CaptureWorker::start(pipeline.clone(), task);
     let background_worker = BackgroundFinalizeWorker::start(pipeline.clone());
 
     // Initialize ANR state only when both SHM and config are available. A

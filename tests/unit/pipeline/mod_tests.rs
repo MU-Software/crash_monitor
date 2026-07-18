@@ -3276,6 +3276,155 @@ fn after_commit_stage_cannot_mutate_the_sealed_transaction() {
 }
 
 #[test]
+fn live_report_loader_overlays_terminal_diagnostics_from_exact_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![
+            Box::new(ZIPArchiver),
+            Box::new(StageContextProbe::new(
+                "LateAfterCommit",
+                PostProcessorPhase::AfterCommit,
+                observations.clone(),
+            )),
+            Box::new(StageContextProbe::new(
+                "LateAfterNotify",
+                PostProcessorPhase::AfterNotify,
+                observations.clone(),
+            )),
+            Box::new(StageContextProbe::new(
+                "LateFinalCleanup",
+                PostProcessorPhase::FinalCleanup,
+                observations.clone(),
+            )),
+        ],
+        notifiers: vec![Box::new(StageContextProbe::new(
+            "LateNotifier",
+            PostProcessorPhase::AfterCommit,
+            observations,
+        ))],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(root.path().to_path_buf()),
+    };
+
+    let diagnostics = pipeline.handle_event(&make_crash_event(), 123);
+    let report_path = diagnostics.report_path.expect("committed ZIP report");
+    assert_eq!(
+        report_path
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("zip")
+    );
+    let report_dir = report_path.parent().unwrap();
+    let manifest = crate::pipeline::load_manifest(&report_dir.join("manifest.json")).unwrap();
+    let final_plugins = manifest
+        .final_diagnostics
+        .as_ref()
+        .and_then(|value| value.pointer("/plugins"))
+        .and_then(serde_json::Value::as_object)
+        .expect("terminal diagnostics in committed manifest");
+    for name in [
+        "LateAfterCommit",
+        "LateNotifier",
+        "LateAfterNotify",
+        "LateFinalCleanup",
+    ] {
+        assert_eq!(final_plugins[name]["status"], "ok", "missing {name}");
+    }
+
+    let loaded = crate::pipeline::report::load_report(&report_path).unwrap();
+    let overlaid_plugins = loaded
+        .diagnostics
+        .as_ref()
+        .and_then(|value| value.pointer("/plugins"))
+        .and_then(serde_json::Value::as_object)
+        .expect("loader-overlaid diagnostics");
+    assert_eq!(overlaid_plugins["LateFinalCleanup"]["status"], "ok");
+
+    assert_eq!(manifest.artifacts.len(), 1);
+    assert_eq!(manifest.artifacts[0].path, "report.zip");
+    assert_eq!(manifest.artifacts[0].kind, ArtifactKind::Archive);
+    assert_eq!(
+        manifest.artifacts[0].size,
+        std::fs::metadata(&report_path).unwrap().len()
+    );
+    let mut names = std::fs::read_dir(report_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["manifest.json", "report.zip"]);
+}
+
+#[test]
+fn termination_report_persists_diagnostics_after_final_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let pipeline = Pipeline {
+        enabled: true,
+        triggers: TriggerPolicy::ALL_ENABLED,
+        collection_policy: crate::config::CollectionPolicy::FULL,
+        filters: vec![],
+        collectors: vec![],
+        pre_processors: vec![],
+        post_processors: vec![Box::new(StageContextProbe::new(
+            "TerminationFinalCleanup",
+            PostProcessorPhase::FinalCleanup,
+            observations,
+        ))],
+        notifiers: vec![],
+        shm: None,
+        platform: Arc::new(MockPlatform::default()),
+        output_dir: Some(root.path().to_path_buf()),
+    };
+    let event = CrashEvent {
+        report_id: crate::pipeline::ReportId::default(),
+        report_type: ReportType::ExitFailure,
+        termination: Some(TerminationReason::Exited {
+            exit_code: 17,
+            runtime_ms: 250,
+        }),
+        exception_type: None,
+        exception_code: None,
+        exception_subcode: None,
+        exception_codes: Vec::new(),
+        crashed_thread: None,
+        bail_on_suspend_failure: false,
+        pid: 4321,
+        process_name: "terminated-test".into(),
+        hang_duration_ms: None,
+    };
+
+    let diagnostics = pipeline.handle_termination_event(&event);
+    let report_path = diagnostics.report_path.expect("termination report");
+    let loaded = crate::pipeline::report::load_report(&report_path).unwrap();
+    assert_eq!(
+        loaded
+            .diagnostics
+            .as_ref()
+            .and_then(|value| value.pointer("/plugins/TerminationFinalCleanup/status")),
+        Some(&serde_json::json!("ok"))
+    );
+    let manifest =
+        crate::pipeline::load_manifest(&report_path.parent().unwrap().join("manifest.json"))
+            .unwrap();
+    assert_eq!(
+        manifest
+            .final_diagnostics
+            .as_ref()
+            .and_then(|value| value.pointer("/plugins/TerminationFinalCleanup/status")),
+        Some(&serde_json::json!("ok"))
+    );
+}
+
+#[test]
 fn post_publish_sync_failure_keeps_report_notifier_and_diagnostic() {
     let root = tempfile::tempdir().unwrap();
     let notified = Arc::new(Mutex::new(None));

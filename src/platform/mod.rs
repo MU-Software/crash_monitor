@@ -11,8 +11,8 @@ mod task_control;
 
 #[allow(unused_imports)] // public API is also compiled into the binary crate
 pub use task_control::{
-    RESUME_ATTEMPT_LIMIT, SupervisorHealth, SuspendFailurePolicy, TaskControlFailure,
-    TaskControlFailureSink, TaskRecoveryAction, TaskSuspendGuard,
+    RESUME_ATTEMPT_LIMIT, RetainedTaskPort, SupervisorHealth, SuspendFailurePolicy,
+    TaskControlFailure, TaskControlFailureSink, TaskRecoveryAction, TaskSuspendGuard,
 };
 
 use mach2::port::mach_port_t;
@@ -44,6 +44,19 @@ pub trait PlatformOps: Send + Sync {
     /// # Errors
     /// Returns an error string if the platform cannot terminate the task.
     fn terminate_task(&self, task: mach_port_t) -> Result<(), String>;
+
+    /// Retain one independently owned user reference to a task send right.
+    ///
+    /// A worker that can outlive its caller must own this reference instead of
+    /// borrowing a raw Mach name from the supervisor.
+    ///
+    /// # Errors
+    /// Returns an error if the platform cannot retain the send-right reference.
+    fn retain_task_port(&self, task: mach_port_t) -> Result<(), String>;
+
+    /// Release one task send-right user reference retained by
+    /// [`Self::retain_task_port`].
+    fn deallocate_task_port(&self, task: mach_port_t);
 
     /// Record a task-control failure in supervisor-visible health state.
     ///
@@ -141,6 +154,14 @@ impl PlatformOps for MacOsPlatform {
 
     fn terminate_task(&self, task: mach_port_t) -> Result<(), String> {
         macos::terminate_task(task).map_err(|e| e.to_string())
+    }
+
+    fn retain_task_port(&self, task: mach_port_t) -> Result<(), String> {
+        macos::retain_task_port(task).map_err(|e| e.to_string())
+    }
+
+    fn deallocate_task_port(&self, task: mach_port_t) {
+        macos::deallocate_task_port(task);
     }
 
     fn record_task_control_failure(&self, failure: TaskControlFailure) {

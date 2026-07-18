@@ -10,6 +10,39 @@ use crate::pipeline::{Diagnostics, PluginStatus};
 /// Total `resume_task` calls, including the initial attempt.
 pub const RESUME_ATTEMPT_LIMIT: usize = 3;
 
+/// Independently owned task send-right reference for a capture worker.
+///
+/// Mach port names live in a process-wide IPC namespace. Keeping a separate
+/// user reference prevents the supervisor from deallocating and reusing the
+/// name while a timed-out worker is still returning from a synchronous Mach
+/// call.
+pub struct RetainedTaskPort {
+    platform: Arc<dyn PlatformOps>,
+    task: mach_port_t,
+}
+
+impl RetainedTaskPort {
+    /// Retain one send-right user reference and return its RAII owner.
+    ///
+    /// # Errors
+    /// Returns the platform error if the task right cannot be retained.
+    pub fn retain(platform: Arc<dyn PlatformOps>, task: mach_port_t) -> Result<Self, String> {
+        platform.retain_task_port(task)?;
+        Ok(Self { platform, task })
+    }
+
+    #[must_use]
+    pub const fn raw(&self) -> mach_port_t {
+        self.task
+    }
+}
+
+impl Drop for RetainedTaskPort {
+    fn drop(&mut self) {
+        self.platform.deallocate_task_port(self.task);
+    }
+}
+
 /// Capture policy when the monitor cannot acquire a suspension count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuspendFailurePolicy {

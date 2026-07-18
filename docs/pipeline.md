@@ -13,10 +13,12 @@ memory.
 ```
 Mach request received (record monotonic timestamp)
    │
-   ├─ live-task critical phase ──────────────────────────────────────┐
-   │  suspend → capture collectors + owned SHM copy → release ports │
-   │                                             → resume → reply    │
-   └─────────────────────────────────────────────────────────────────┘
+   ├─ live-task critical phase ─────────────────────────────────────────┐
+   │  retain task send right → suspend → collectors + owned SHM copy   │
+   │                                      → resume → reply             │
+   │  timeout: retire worker; quarantine late result; drop right       │
+   │                                      when worker actually exits   │
+   └────────────────────────────────────────────────────────────────────┘
                               │
                               ▼ owned CapturedSnapshot (no task port)
                     bounded finalization worker
@@ -32,11 +34,20 @@ Mach request received (record monotonic timestamp)
 For a Mach exception, the supervisor uses one absolute five-second wait budget
 measured from the listener's Mach receive timestamp. The budget is not reset
 for each collector. On the successful path, task suspension, capture collectors,
-copying required shared-memory payload into owned data, and releasing captured
-port rights all finish before task resume. At budget expiry, unfinished worker
-state is quarantined as described below. The Mach reply is attempted immediately
-after resume; no queue operation, filter, report write, or user interaction is
-allowed between resume and reply.
+copying required shared-memory payload into owned data, and releasing
+event-scoped thread/image rights all finish before task resume. The capture
+worker's independent task send-right reference remains owned for the worker's
+lifetime. At budget expiry, unfinished worker
+state is quarantined as described below. Cooperative cancellation cannot
+preempt an in-flight Mach call, so that one call may return after resume. The
+retired worker owns an independent task send-right reference until its thread
+actually exits; this prevents the raw Mach name from being deallocated and
+reused underneath the worker. It cannot start another collector after the next
+cancellation checkpoint, and its late mutable result is discarded. Eliminating
+the in-flight post-resume call itself still requires a killable capture boundary
+and remains tracked by P0-02. The Mach reply is attempted immediately after
+resume; no queue operation, filter, report write, or user interaction is allowed
+between resume and reply.
 
 The finalization entry point receives no task port and reads the owned SHM byte
 copy stored in `CapturedEvent`; it never invokes the collector set. (The shared
@@ -59,7 +70,7 @@ plugins and notifiers receive the committed descriptor.
 
 | Phase | Child state/capability | Typical work |
 |-------|------------------------|--------------|
-| **Critical capture** | suspended only for the bounded capture window | thread registers/backtraces, dylibs, owned breadcrumbs/context, and policy-authorized stack bytes, memory + heap, screenshots, or attachment registration |
+| **Critical capture** | suspended for the bounded capture window; a timed-out in-flight Mach call may finish under the worker-owned send right after resume, but its result is quarantined | thread registers/backtraces, dylibs, owned breadcrumbs/context, and policy-authorized stack bytes, memory + heap, screenshots, or attachment registration |
 | **Finalization worker** | no task/SHM argument; capture collectors are not invoked | filters, session, symbolication, fingerprint, raw/JSON/PNG writes, feedback, ZIP, move-to-sent, log rotation, retention, notifications |
 
 (The exact roster is what the default pipeline registers; treat the source as
@@ -76,7 +87,10 @@ A fatal crash is not finalized as an ordinary background snapshot. After the
 task is resumed and the Mach reply is attempted, the supervisor reaps the child
 and hands the observed termination reason to the fatal finalizer. The worker
 then creates the JSON and ZIP with that termination metadata. Finalization is
-never awaited before reply or child reap begins.
+never awaited before reply or child reap begins. If both attempts to start the
+fatal-finalizer thread fail, the caller synchronously commits a plugin-free
+emergency transaction containing available Stage-1 thread/SHM evidence and a
+best-effort JSON report instead of discarding the capture.
 
 During normal shutdown, the monitor drains queued background work for at most
 two seconds. A worker that is still blocked after that deadline is detached so
@@ -127,7 +141,10 @@ and timeout) is cached, constant-time state; metadata access performs no I/O.
   or disconnects, the monitor discards its unfinished mutable worker state,
   creates an immutable minimum crash payload, and immediately proceeds to
   resume and reply. The timed-out worker is retired and cannot accept another
-  capture.
+  capture. Its independently retained task send right remains owned until the
+  worker actually exits, preventing a detached worker from using a deallocated
+  and subsequently reused Mach name. Cooperative cancellation still cannot
+  stop a Mach call already in flight.
 - A manual snapshot or ANR that requires a consistent suspended snapshot is
   skipped when task suspension fails. It is not finalized from inconsistent
   live data.
@@ -181,8 +198,11 @@ an individual synchronous filesystem, kernel, or codec call remains
 non-preemptible, and artifact formats without a streaming byte budget can run
 past the deadline before returning. Finalization isolation keeps that work away
 from task resume and the Mach reply, but a detached in-process worker may keep
-running. The outer capture supervisor still resumes/replies at its absolute
-deadline and quarantines any late mutable result. `task_suspend` and
+running. Likewise, a task-facing Mach call already in flight may return after
+the outer capture supervisor resumes/replies at its absolute deadline. The
+worker-owned send right prevents Mach-name lifetime/ABA hazards and the late
+mutable result is quarantined, but strict no-access-after-resume isolation is
+not yet provided. `task_suspend` and
 `task_resume` themselves are synchronous kernel calls too. The Stage-1/Stage-2
 five-second setting has the same cooperative semantics: it diagnoses an
 overrun after serialization or a synchronous write returns; it is not a hard

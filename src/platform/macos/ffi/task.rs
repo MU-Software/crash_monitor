@@ -1,7 +1,7 @@
 //! Safe wrappers for Mach task operations.
 
 use mach2::kern_return::KERN_SUCCESS;
-use mach2::port::mach_port_t;
+use mach2::port::{MACH_PORT_NULL, MACH_PORT_RIGHT_SEND, mach_port_t};
 use mach2::task::{task_resume, task_suspend, task_terminate, task_threads};
 use mach2::vm::mach_vm_deallocate;
 
@@ -19,6 +19,41 @@ pub fn get_task_for_pid(pid: i32) -> Result<mach_port_t, MachError> {
     let kr = unsafe { mach2::traps::task_for_pid(self_task(), pid, &raw mut task) };
     mach_result("task_for_pid", kr)?;
     Ok(task)
+}
+
+/// Add one owned user reference to an existing task send right.
+///
+/// Capture workers use this to keep the Mach name alive independently of the
+/// supervisor's `OwnedMachPort`. A detached worker must never borrow the sole
+/// user reference from a shorter-lived owner.
+///
+/// # Errors
+/// Returns `MachError` when `task` is null/dead or the send right cannot be
+/// retained in the current task's IPC namespace.
+pub fn retain_task_port(task: mach_port_t) -> Result<(), MachError> {
+    if task == MACH_PORT_NULL {
+        return Err(MachError {
+            function: "mach_port_mod_refs(task send right)",
+            kern_return: mach2::kern_return::KERN_INVALID_ARGUMENT,
+        });
+    }
+    // SAFETY: `task` names an existing send right in this task. Incrementing
+    // its user-reference count creates an independently owned reference that
+    // must later be balanced by `mach_port_deallocate`.
+    let kr =
+        unsafe { mach2::mach_port::mach_port_mod_refs(self_task(), task, MACH_PORT_RIGHT_SEND, 1) };
+    mach_result("mach_port_mod_refs(task send right)", kr)
+}
+
+/// Release one task send-right user reference previously retained by
+/// [`retain_task_port`].
+pub fn deallocate_task_port(task: mach_port_t) {
+    if task != MACH_PORT_NULL {
+        // SAFETY: balances one owned send-right user reference.
+        unsafe {
+            mach2::mach_port::mach_port_deallocate(self_task(), task);
+        }
+    }
 }
 
 /// Suspend all threads in the target task.

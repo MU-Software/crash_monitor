@@ -203,7 +203,7 @@ fn format_heap_summary(heap: &RawHeapData) -> Option<HeapSummary> {
 //  Diagnostics formatting
 // ═══════════════════════════════════════════════════
 
-fn build_diagnostics_json(diagnostics: &Diagnostics) -> Option<serde_json::Value> {
+pub(crate) fn build_diagnostics_json(diagnostics: &Diagnostics) -> Option<serde_json::Value> {
     if diagnostics.plugins.is_empty() {
         return None;
     }

@@ -203,6 +203,12 @@ pub struct ReportManifest {
     pub committed_at: String,
     pub destination: ManifestDestination,
     pub artifacts: Vec<ManifestArtifact>,
+    /// Terminal pipeline diagnostics written after every report-path consumer
+    /// and final-cleanup processor has completed. This lives in the commit
+    /// record so late diagnostics do not mutate any registered artifact or
+    /// invalidate its recorded size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_diagnostics: Option<serde_json::Value>,
 }
 
 /// Recovery-safe publication policy.  A prepared report may remain in the
@@ -255,6 +261,82 @@ pub struct CommittedReport {
     /// A directory fsync failed after the atomic rename had already made this
     /// report visible. Publication cannot safely be rolled back at that point.
     pub durability_warnings: Vec<String>,
+}
+
+impl CommittedReport {
+    /// Atomically add terminal pipeline diagnostics to the committed manifest
+    /// without changing the exact artifact registry or any recorded size.
+    ///
+    /// The temporary file is created beside the report directory rather than
+    /// inside it, so concurrent exact-set readers never observe an
+    /// unmanifested report-local file.
+    pub(crate) fn persist_final_diagnostics(
+        &self,
+        final_diagnostics: serde_json::Value,
+    ) -> Result<(), String> {
+        if self.manifest_path != self.report_dir.join(MANIFEST_FILE_NAME) {
+            return Err("committed manifest path does not match its report directory".into());
+        }
+        let report_name = self
+            .report_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "committed report directory has no UTF-8 name".to_string())?;
+        if report_name != self.report_id.as_str() {
+            return Err("committed report directory does not match its report id".into());
+        }
+        ensure_private_directory(&self.report_dir)
+            .map_err(|error| format!("committed report directory is not private: {error}"))?;
+
+        let mut manifest = load_manifest(&self.manifest_path)?;
+        if manifest.schema_version != MANIFEST_SCHEMA_VERSION
+            || manifest.report_id != self.report_id
+        {
+            return Err("committed manifest identity mismatch".into());
+        }
+        manifest.final_diagnostics = Some(final_diagnostics);
+        let bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("cannot serialize final report diagnostics: {error}"))?;
+        if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(format!(
+                "report manifest exceeds size limit ({} > {MAX_MANIFEST_BYTES})",
+                bytes.len()
+            ));
+        }
+
+        let report_root = self
+            .report_dir
+            .parent()
+            .ok_or_else(|| "committed report directory has no parent".to_string())?;
+        let temporary_manifest = report_root.join(format!(
+            ".{MANIFEST_FILE_NAME}.{}.{}.final.tmp",
+            self.report_id,
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut file = create_private_file(&temporary_manifest).map_err(|error| {
+            format!(
+                "cannot create temporary final diagnostics manifest '{}': {error}",
+                temporary_manifest.display()
+            )
+        })?;
+        let write_result = (|| -> Result<(), String> {
+            file.write_all(&bytes)
+                .map_err(|error| format!("cannot write final diagnostics manifest: {error}"))?;
+            file.flush()
+                .map_err(|error| format!("cannot flush final diagnostics manifest: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("cannot sync final diagnostics manifest: {error}"))?;
+            drop(file);
+            fs::rename(&temporary_manifest, &self.manifest_path)
+                .map_err(|error| format!("cannot publish final diagnostics manifest: {error}"))?;
+            sync_directory(&self.report_dir)?;
+            sync_directory(report_root)
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temporary_manifest);
+        }
+        write_result
+    }
 }
 
 struct TransactionOperation<'a> {
@@ -670,6 +752,7 @@ impl ArtifactTransaction {
             committed_at: Local::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false),
             destination: destination_policy(self.report.output_root(), destination_root)?,
             artifacts,
+            final_diagnostics: None,
         })
     }
 
