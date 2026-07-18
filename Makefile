@@ -8,7 +8,7 @@
 #   make build SIGN_IDENTITY="Developer ID Application: ..."   # different signer
 #   CRASH_MONITOR_DATA_DIR_NAME=.myapp make build             # bake a host default
 
-.DEFAULT_GOAL := build
+.DEFAULT_GOAL := build-unsigned
 
 # Codesigning identity for the debugger entitlement (task_for_pid, vm_read).
 # Without it the monitor cannot inspect a crashing child (and e2e self-skips).
@@ -39,18 +39,40 @@ LLVM_COV_ENV := LLVM_COV=/opt/homebrew/opt/llvm/bin/llvm-cov \
 #   platform/mod.rs  — FFI delegation wrappers
 COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
 
-.PHONY: build e2e-build lint test unit-test integration-test e2e-test e2e-child shm-atomic-test \
-        coverage unit-coverage integration-coverage e2e-coverage clean
+.PHONY: build build-unsigned check-sign-identity sign sign-adhoc package e2e-build lint test \
+        unit-test integration-test e2e e2e-test e2e-child shm-atomic-test coverage \
+        unit-coverage integration-coverage e2e-coverage clean
 
-# ── Build (release + codesign) ────────────────────────────────
-build:
+# ── Compile / sign / package ──────────────────────────────────
+build-unsigned:
 	cargo build --release --workspace
+
+# Backward-compatible compile-only alias. Signing is always explicit.
+build: build-unsigned
+
+check-sign-identity:
+	@test -n "$(SIGN_IDENTITY)" || (echo "SIGN_IDENTITY is required for privileged signing" >&2; exit 2)
+	@security find-identity -v -p codesigning | grep -F -- "$(SIGN_IDENTITY)" >/dev/null || \
+		(echo "codesigning identity not found: $(SIGN_IDENTITY)" >&2; exit 2)
+
+# Check credentials before starting a potentially long release compilation.
+sign: check-sign-identity
+	$(MAKE) build-unsigned
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
 	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
 
+# Ad-hoc signing is suitable for local distribution checks only. It does not
+# grant task_for_pid and therefore cannot run privileged capture E2E tests.
+sign-adhoc: build-unsigned
+	codesign --force --sign - $(MONITOR_BIN)
+	codesign --force --sign - $(MONITOR_DIALOG_BIN)
+
+package: sign
+	@echo "signed release binaries are ready under target/release"
+
 # E2E alone enables the mock-dialog environment override. Production `build`
 # never compiles that trust-boundary bypass.
-e2e-build:
+e2e-build: check-sign-identity
 	cargo build --release --workspace --features test-support
 	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
 	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
@@ -85,6 +107,8 @@ integration-test:
 e2e-test: e2e-build $(E2E_CHILD)
 	cargo build
 	cargo test --test e2e_tests
+
+e2e: e2e-test
 
 test: unit-test integration-test e2e-test
 

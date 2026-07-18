@@ -922,10 +922,10 @@
 
 ### P2-31. compile, sign, package, E2E target을 분리한다
 
-- [ ] signing identity가 없어도 `build-unsigned`는 성공하게 한다.
-- [ ] `sign`, `package`, `e2e`를 별도 target으로 분리하고 필요한 identity를 실행 전에 검사한다.
-- [ ] ad-hoc signing을 허용할 범위와 privileged E2E에 필요한 정식 signing을 구분한다.
-- [ ] 긴 compile 뒤에야 signing 오류가 나는 흐름을 제거한다.
+- [x] signing identity가 없어도 `build-unsigned`는 성공하게 한다.
+- [x] `sign`, `package`, `e2e`를 별도 target으로 분리하고 필요한 identity를 실행 전에 검사한다.
+- [x] ad-hoc signing을 허용할 범위와 privileged E2E에 필요한 정식 signing을 구분한다.
+- [x] 긴 compile 뒤에야 signing 오류가 나는 흐름을 제거한다.
 
 범위: `Makefile`, release scripts.
 
