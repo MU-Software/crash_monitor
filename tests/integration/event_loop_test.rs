@@ -12,7 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crash_monitor::event_loop::{
-    AnrConfig, EXIT_CHILD_FAILURE, EXIT_MONITOR_INTERNAL, EventLoopContext, EventSource,
+    AnrClock, AnrConfig, EXIT_CHILD_FAILURE, EXIT_MONITOR_INTERNAL, EventLoopContext, EventSource,
     MonitorEvent, MonitorOutcome, MonitoredTarget, MonitoredTask, ProcessId,
     event_loop as run_event_loop_with_context,
 };
@@ -47,6 +47,24 @@ fn event_loop(
     run_event_loop_with_context(source, context)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn event_loop_with_anr_clock(
+    source: &mut dyn EventSource,
+    pipeline: &Arc<Pipeline>,
+    task: mach2::port::mach_port_t,
+    pid: u32,
+    process_name: &str,
+    reply_fn: &dyn Fn(&mut ReceivedMachMessage) -> Result<(), String>,
+    shm: Option<&Arc<SharedMemory>>,
+    anr_config: Option<&AnrConfig>,
+    anr_clock: &dyn AnrClock,
+) -> crash_monitor::event_loop::EventLoopResult {
+    let target = MonitoredTarget::new(MonitoredTask::new(task), ProcessId::new(pid), process_name);
+    let context = EventLoopContext::new(pipeline, target, reply_fn, shm, anr_config)
+        .with_anr_clock(anr_clock);
+    run_event_loop_with_context(source, context)
+}
+
 // ═══════════════════════════════════════════════════
 //  TestEventSource
 // ═══════════════════════════════════════════════════
@@ -74,12 +92,14 @@ impl EventSource for TestEventSource {
 /// an empty queue is indistinguishable from an idle poll.
 struct ScriptedPollSource {
     polls: VecDeque<Option<MonitorEvent>>,
+    clock: Arc<ManualAnrClock>,
 }
 
 impl ScriptedPollSource {
-    fn new(polls: Vec<Option<MonitorEvent>>) -> Self {
+    fn new(polls: Vec<Option<MonitorEvent>>, clock: Arc<ManualAnrClock>) -> Self {
         Self {
             polls: polls.into(),
+            clock,
         }
     }
 }
@@ -96,9 +116,39 @@ impl EventSource for ScriptedPollSource {
         if event.is_none()
             && let Some(deadline) = deadline
         {
-            std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+            self.clock.advance_to(deadline);
         }
         event
+    }
+}
+
+struct ManualAnrClock {
+    base: std::time::Instant,
+    elapsed_ms: AtomicU64,
+}
+
+impl ManualAnrClock {
+    fn new() -> Self {
+        Self {
+            base: std::time::Instant::now(),
+            elapsed_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn advance_to(&self, deadline: std::time::Instant) {
+        let elapsed_ms = u64::try_from(deadline.saturating_duration_since(self.base).as_millis())
+            .unwrap_or(u64::MAX);
+        self.elapsed_ms.fetch_max(elapsed_ms, Ordering::SeqCst);
+    }
+}
+
+impl AnrClock for ManualAnrClock {
+    fn now(&self) -> std::time::Instant {
+        self.base
+            .checked_add(Duration::from_millis(
+                self.elapsed_ms.load(Ordering::SeqCst),
+            ))
+            .unwrap_or(self.base)
     }
 }
 
@@ -1264,10 +1314,13 @@ fn test_unclaimed_shm_never_arms_anr_watchdog() {
         check_interval_ms: 5,
         cooldown_ms: 0,
     };
-    let mut source =
-        ScriptedPollSource::new(vec![None, None, None, None, None, Some(exited(0, 125))]);
+    let clock = Arc::new(ManualAnrClock::new());
+    let mut source = ScriptedPollSource::new(
+        vec![None, None, None, None, None, Some(exited(0, 125))],
+        clock.clone(),
+    );
 
-    let result = event_loop(
+    let result = event_loop_with_anr_clock(
         &mut source,
         &pipeline,
         123,
@@ -1276,6 +1329,7 @@ fn test_unclaimed_shm_never_arms_anr_watchdog() {
         &noop_reply,
         Some(&shm),
         Some(&anr_config),
+        clock.as_ref(),
     );
 
     assert_eq!(result.exit_code(), 0);
@@ -1303,9 +1357,11 @@ fn test_ready_stale_heartbeat_triggers_anr_capture() {
         check_interval_ms: 5,
         cooldown_ms: 1_000,
     };
-    let mut source = ScriptedPollSource::new(vec![None, None, None, Some(exited(0, 175))]);
+    let clock = Arc::new(ManualAnrClock::new());
+    let mut source =
+        ScriptedPollSource::new(vec![None, None, None, Some(exited(0, 175))], clock.clone());
 
-    let result = event_loop(
+    let result = event_loop_with_anr_clock(
         &mut source,
         &pipeline,
         123,
@@ -1314,6 +1370,7 @@ fn test_ready_stale_heartbeat_triggers_anr_capture() {
         &noop_reply,
         Some(&shm),
         Some(&anr_config),
+        clock.as_ref(),
     );
 
     assert_eq!(result.exit_code(), 0);
@@ -1352,17 +1409,13 @@ fn test_slow_anr_capture_time_does_not_trigger_a_second_anr() {
     // ANR. Capture then takes longer than the threshold. With cooldown disabled,
     // the following idle poll would immediately cause a second ANR unless the
     // event loop rebased its heartbeat and clock after the child resumed.
-    let mut source = ScriptedPollSource::new(vec![
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(exited(0, 700)),
-    ]);
+    let clock = Arc::new(ManualAnrClock::new());
+    let mut source = ScriptedPollSource::new(
+        vec![None, None, None, None, None, None, Some(exited(0, 700))],
+        clock.clone(),
+    );
 
-    let result = event_loop(
+    let result = event_loop_with_anr_clock(
         &mut source,
         &pipeline,
         123,
@@ -1371,6 +1424,7 @@ fn test_slow_anr_capture_time_does_not_trigger_a_second_anr() {
         &noop_reply,
         Some(&shm),
         Some(&anr_config),
+        clock.as_ref(),
     );
 
     assert_eq!(result.exit_code(), 0);
@@ -1409,14 +1463,18 @@ fn test_slow_snapshot_monitor_time_does_not_trigger_false_anr() {
     // wall time exceeds it. Only the monitor-owned interval must be excluded;
     // the pure watchdog test separately verifies that real pre-capture stale
     // time remains accumulated.
-    let mut source = ScriptedPollSource::new(vec![
-        None,
-        Some(MonitorEvent::Snapshot),
-        None,
-        Some(exited(0, 250)),
-    ]);
+    let clock = Arc::new(ManualAnrClock::new());
+    let mut source = ScriptedPollSource::new(
+        vec![
+            None,
+            Some(MonitorEvent::Snapshot),
+            None,
+            Some(exited(0, 250)),
+        ],
+        clock.clone(),
+    );
 
-    let result = event_loop(
+    let result = event_loop_with_anr_clock(
         &mut source,
         &pipeline,
         123,
@@ -1425,6 +1483,7 @@ fn test_slow_snapshot_monitor_time_does_not_trigger_false_anr() {
         &noop_reply,
         Some(&shm),
         Some(&anr_config),
+        clock.as_ref(),
     );
 
     assert_eq!(result.exit_code(), 0);
@@ -1465,18 +1524,22 @@ fn test_snapshot_preserves_real_stale_time_around_excluded_monitor_work() {
     // threshold, but their sum reaches it. Capture itself is longer than the
     // threshold and must be excluded. A full post-event reset would miss the
     // ANR; raw wall-clock accounting would report it too early.
-    let mut source = ScriptedPollSource::new(vec![
-        None,
-        None,
-        None,
-        Some(MonitorEvent::Snapshot),
-        None,
-        None,
-        None,
-        Some(exited(0, 1_100)),
-    ]);
+    let clock = Arc::new(ManualAnrClock::new());
+    let mut source = ScriptedPollSource::new(
+        vec![
+            None,
+            None,
+            None,
+            Some(MonitorEvent::Snapshot),
+            None,
+            None,
+            None,
+            Some(exited(0, 1_100)),
+        ],
+        clock.clone(),
+    );
 
-    let result = event_loop(
+    let result = event_loop_with_anr_clock(
         &mut source,
         &pipeline,
         123,
@@ -1485,6 +1548,7 @@ fn test_snapshot_preserves_real_stale_time_around_excluded_monitor_work() {
         &noop_reply,
         Some(&shm),
         Some(&anr_config),
+        clock.as_ref(),
     );
 
     assert_eq!(result.exit_code(), 0);

@@ -83,6 +83,25 @@ pub struct AnrConfig {
     pub cooldown_ms: u64,
 }
 
+/// Monotonic time source used only for ANR accounting.
+///
+/// Capture deadlines remain tied to the operating-system clock. Keeping the
+/// watchdog clock injectable lets integration tests advance application time
+/// without depending on scheduler-sensitive millisecond sleeps.
+pub trait AnrClock {
+    fn now(&self) -> Instant;
+}
+
+struct SystemAnrClock;
+
+impl AnrClock for SystemAnrClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+static SYSTEM_ANR_CLOCK: SystemAnrClock = SystemAnrClock;
+
 /// A Mach task port belonging to the process being monitored.
 ///
 /// Keeping this distinct from [`ProcessId`] prevents accidentally swapping the
@@ -150,6 +169,7 @@ pub struct EventLoopContext<'a> {
     reply_fn: &'a dyn Fn(&mut ReceivedMachMessage) -> Result<(), String>,
     shm: Option<&'a Arc<SharedMemory>>,
     anr_config: Option<&'a AnrConfig>,
+    anr_clock: &'a dyn AnrClock,
 }
 
 impl<'a> EventLoopContext<'a> {
@@ -167,7 +187,16 @@ impl<'a> EventLoopContext<'a> {
             reply_fn,
             shm,
             anr_config,
+            anr_clock: &SYSTEM_ANR_CLOCK,
         }
+    }
+
+    /// Override the ANR accounting clock while preserving real capture
+    /// deadlines. Intended for deterministic event-loop integration tests.
+    #[must_use]
+    pub const fn with_anr_clock(mut self, anr_clock: &'a dyn AnrClock) -> Self {
+        self.anr_clock = anr_clock;
+        self
     }
 }
 
@@ -411,6 +440,7 @@ fn finish_anr_monitor_work(
     shm: Option<&SharedMemory>,
     last_anr_check: &mut Instant,
     monitor_work_started: Instant,
+    anr_clock: &dyn AnrClock,
 ) {
     let (Some(state), Some(shm)) = (anr_state, shm) else {
         return;
@@ -425,7 +455,7 @@ fn finish_anr_monitor_work(
         shm.read_live_anr_heartbeat(),
         application_elapsed_before_monitor_ms,
     );
-    let monitor_work_finished = Instant::now();
+    let monitor_work_finished = anr_clock.now();
     *last_anr_check = match rebase {
         MonitorWorkRebase::PreserveElapsed => exclude_monitor_work_from_anr_clock(
             *last_anr_check,
@@ -457,6 +487,7 @@ pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -
         reply_fn,
         shm,
         anr_config,
+        anr_clock,
     } = context;
     let task = task.raw();
     let pid = pid.raw();
@@ -476,7 +507,7 @@ pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -
         )),
         _ => None,
     };
-    let mut last_anr_check = Instant::now();
+    let mut last_anr_check = anr_clock.now();
 
     loop {
         let next_watchdog_check = anr_state.as_ref().and_then(|_| {
@@ -576,7 +607,7 @@ pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -
                 if !pipeline.report_enabled(ReportType::Snapshot) {
                     continue;
                 }
-                let monitor_work_started = Instant::now();
+                let monitor_work_started = anr_clock.now();
                 let event = CrashEvent {
                     report_id: ReportId::default(),
                     report_type: ReportType::Snapshot,
@@ -612,6 +643,7 @@ pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -
                     shm.map(Arc::as_ref),
                     &mut last_anr_check,
                     monitor_work_started,
+                    anr_clock,
                 );
             }
 
@@ -669,7 +701,10 @@ pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -
                 // ── Inline ANR check ──
                 if let (Some(state), Some(s), Some(cfg)) = (&mut anr_state, &shm, &anr_config) {
                     #[allow(clippy::cast_possible_truncation)]
-                    let elapsed = last_anr_check.elapsed().as_millis() as u64;
+                    let elapsed = anr_clock
+                        .now()
+                        .saturating_duration_since(last_anr_check)
+                        .as_millis() as u64;
                     if elapsed >= cfg.check_interval_ms {
                         let heartbeat = s.read_live_anr_heartbeat();
                         let detected = update_watchdog_state(
@@ -681,7 +716,7 @@ pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -
                         );
                         // Sampling and state transition are monitor work too;
                         // begin the next interval only after both complete.
-                        last_anr_check = Instant::now();
+                        last_anr_check = anr_clock.now();
 
                         if let Some(hang_duration_ms) = detected {
                             let monitor_work_started = last_anr_check;
@@ -726,6 +761,7 @@ pub fn event_loop(source: &mut dyn EventSource, context: EventLoopContext<'_>) -
                                 Some(s.as_ref()),
                                 &mut last_anr_check,
                                 monitor_work_started,
+                                anr_clock,
                             );
                         }
                     }
