@@ -302,7 +302,7 @@ impl EventSource for MacEventSource {
                 })
             }
             ExceptionListenerPoll::Failure(message) => {
-                Some(MonitorEvent::MonitorFailure { message })
+                Some(MonitorEvent::ListenerFailure { message })
             }
             ExceptionListenerPoll::Empty => None,
         };

@@ -46,6 +46,9 @@ pub enum MonitorEvent {
     ChildTerminated(TerminationReason),
     /// The monitor can no longer determine the child's state reliably.
     MonitorFailure { message: String },
+    /// The Mach exception listener is gone. The supervisor must immediately
+    /// contain the still-running child rather than leave it unmonitored.
+    ListenerFailure { message: String },
 }
 
 /// Abstract source of monitor events.
@@ -160,6 +163,9 @@ pub struct EventLoopResult {
     /// The supervisor must destroy the exception port and boundedly reap the
     /// child even when the deferred reply itself failed.
     pub crash_cleanup_required: bool,
+    /// Listener loss removes the monitor's crash-detection capability. The
+    /// supervisor policy is fail-closed: terminate and boundedly reap child.
+    pub listener_loss_containment_required: bool,
 }
 
 impl EventLoopResult {
@@ -423,6 +429,7 @@ pub fn event_loop(
                     outcome,
                     crash_finalization,
                     crash_cleanup_required: true,
+                    listener_loss_containment_required: false,
                 };
             }
 
@@ -455,6 +462,7 @@ pub fn event_loop(
                         outcome: MonitorOutcome::MonitorFailure(message),
                         crash_finalization: None,
                         crash_cleanup_required: false,
+                        listener_loss_containment_required: false,
                     };
                 }
                 if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {
@@ -476,6 +484,19 @@ pub fn event_loop(
                     outcome,
                     crash_finalization: None,
                     crash_cleanup_required: false,
+                    listener_loss_containment_required: false,
+                };
+            }
+
+            Some(MonitorEvent::ListenerFailure { message }) => {
+                eprintln!("[monitor] exception listener health failure: {message}");
+                capture_worker.shutdown(Duration::from_millis(100));
+                background_worker.shutdown(BACKGROUND_DRAIN_DEADLINE);
+                return EventLoopResult {
+                    outcome: MonitorOutcome::MonitorFailure(message),
+                    crash_finalization: None,
+                    crash_cleanup_required: false,
+                    listener_loss_containment_required: true,
                 };
             }
 
@@ -487,6 +508,7 @@ pub fn event_loop(
                     outcome: MonitorOutcome::MonitorFailure(message),
                     crash_finalization: None,
                     crash_cleanup_required: false,
+                    listener_loss_containment_required: false,
                 };
             }
 
@@ -540,6 +562,7 @@ pub fn event_loop(
                                     outcome: MonitorOutcome::MonitorFailure(message),
                                     crash_finalization: None,
                                     crash_cleanup_required: false,
+                                    listener_loss_containment_required: false,
                                 };
                             }
                             if let crate::pipeline::CaptureOutcome::Captured(captured) = capture {

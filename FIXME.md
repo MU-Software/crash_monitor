@@ -207,10 +207,10 @@
 
 ### P1-06. exception listener 상실을 health failure로 처리한다
 
-- [ ] exception channel의 `Empty`와 `Disconnected`를 구분한다.
-- [ ] 실제 receive failure로 listener가 종료되면 supervisor에 원인을 전달한다.
-- [ ] listener 재시작 또는 monitor의 명시적 오류 종료 중 하나를 정책으로 정한다.
-- [ ] crash 감지 능력을 잃은 채 child를 계속 실행하지 않는다.
+- [x] exception channel의 `Empty`와 `Disconnected`를 구분한다.
+- [x] 실제 receive failure로 listener가 종료되면 supervisor에 원인을 전달한다.
+- [x] listener 재시작 또는 monitor의 명시적 오류 종료 중 하나를 정책으로 정한다.
+- [x] crash 감지 능력을 잃은 채 child를 계속 실행하지 않는다.
 
 범위: `src/event_source.rs`, exception listener.
 

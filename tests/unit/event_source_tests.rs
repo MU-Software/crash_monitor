@@ -175,6 +175,28 @@ fn unexpected_listener_disconnect_is_a_supervisor_failure() {
 }
 
 #[test]
+fn listener_disconnect_wakes_the_event_wait_without_a_watchdog_deadline() {
+    let (listener_tx, listener_rx) = std::sync::mpsc::channel();
+    let (bridged_rx, wake_fd) = bridge_exception_listener(listener_rx).unwrap();
+    drop(listener_tx);
+
+    let mut poll_fd = libc::pollfd {
+        fd: wake_fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll_fd points to one initialized pollfd for the duration of the
+    // bounded poll call.
+    let ready = unsafe { libc::poll(std::ptr::from_mut(&mut poll_fd), 1, 500) };
+    assert_eq!(ready, 1, "listener bridge did not wake on disconnect");
+    assert!(matches!(
+        poll_exception_listener(&bridged_rx),
+        ExceptionListenerPoll::Failure(message)
+            if message.contains("disconnected without a terminal event")
+    ));
+}
+
+#[test]
 fn terminal_child_status_has_priority_over_a_simultaneous_listener_failure() {
     let child = Some(MonitorEvent::ChildTerminated(TerminationReason::Exited {
         exit_code: 0,

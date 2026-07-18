@@ -598,6 +598,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         mut outcome,
         mut crash_finalization,
         crash_cleanup_required,
+        listener_loss_containment_required,
     } = event_loop::event_loop(
         &mut source,
         &pl,
@@ -615,7 +616,8 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         .iter()
         .any(platform::TaskControlFailure::prevents_continued_monitoring);
     let task_control_escalation = task_control_health.requires_escalation();
-    let must_reap_child = crash_cleanup_required || task_control_containment;
+    let must_reap_child =
+        crash_cleanup_required || task_control_containment || listener_loss_containment_required;
 
     // After receiving a crash (including a failed bounded reply), or entering
     // task-control containment, destroy the exception port so that if the
@@ -630,15 +632,21 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         unsafe {
             mach2::mach_port::mach_port_destroy(mach2::traps::mach_task_self(), exc_port);
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !listener_loss_containment_required {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     // `task_terminate` is the first containment boundary for a task that
     // could not be resumed. If that Mach operation also failed, escalate once
     // through the process supervisor. Do not block indefinitely waiting for a
     // process whose task-control state is already unreliable.
-    let supervisor_sigkill_sent = if task_control_escalation {
-        eprintln!("[monitor] task-control recovery exhausted; sending SIGKILL to child");
+    let supervisor_sigkill_sent = if listener_loss_containment_required || task_control_escalation {
+        if listener_loss_containment_required {
+            eprintln!("[monitor] exception listener lost; sending SIGKILL to unmonitored child");
+        } else {
+            eprintln!("[monitor] task-control recovery exhausted; sending SIGKILL to child");
+        }
         match nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGKILL) {
             Ok(()) => true,
             Err(error) => {

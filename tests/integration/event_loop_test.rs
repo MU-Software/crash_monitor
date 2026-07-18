@@ -2050,6 +2050,35 @@ fn test_monitor_failure_has_separate_exit_namespace() {
 }
 
 #[test]
+fn listener_loss_requires_fail_closed_child_containment() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline(tempdir.path());
+    let mut source = TestEventSource::new(vec![MonitorEvent::ListenerFailure {
+        message: "mach_msg receive failed: invalid destination".to_string(),
+    }]);
+
+    let result = event_loop(
+        &mut source,
+        &pipeline,
+        0,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert_eq!(result.exit_code(), EXIT_MONITOR_INTERNAL);
+    assert!(matches!(
+        result.outcome,
+        MonitorOutcome::MonitorFailure(ref message)
+            if message.contains("mach_msg receive failed")
+    ));
+    assert!(result.listener_loss_containment_required);
+    assert!(!result.crash_cleanup_required);
+}
+
+#[test]
 fn test_startup_recovers_valid_prepared_sent_report_without_exposing_partial_entries() {
     use crash_monitor::pipeline::{ArtifactKind, ArtifactTransaction, ReportContext, ReportType};
 
