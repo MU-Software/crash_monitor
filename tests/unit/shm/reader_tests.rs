@@ -1529,3 +1529,24 @@ fn test_owned_snapshot_survives_mapping_drop_and_arc_clone() {
         77
     );
 }
+
+#[test]
+fn arbitrary_shm_payload_bytes_never_panic() {
+    let shm = SharedMemory::create(unique_pid()).expect("shm create");
+    let mut state = 0xc001_d00d_u32;
+    let payload_len = SHM_TOTAL_SIZE - SECTION2_OFFSET;
+    unsafe {
+        for offset in 0..payload_len {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *shm.base_ptr().add(SECTION2_OFFSET + offset) = (state >> 24) as u8;
+        }
+    }
+
+    if let Ok(snapshot) = shm.snapshot_owned_until(None) {
+        let _ = snapshot.read_breadcrumbs();
+        let _ = snapshot.read_context();
+        let _ = snapshot.read_settings();
+        let _ = snapshot.read_attachments();
+        let _ = snapshot.read_screenshots_bounded(8, 4 * 1024 * 1024, || true);
+    }
+}

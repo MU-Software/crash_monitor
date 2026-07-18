@@ -233,3 +233,17 @@ fn parser_strips_one_leading_underscore_and_rejects_truncated_tables() {
             .is_none()
     );
 }
+
+#[test]
+fn arbitrary_macho_bytes_never_panic() {
+    let context = PluginContext::without_deadline();
+    let mut state = 0xa5a5_5a5a_u32;
+    for len in 0..1024 {
+        let mut bytes = vec![0_u8; len];
+        for byte in &mut bytes {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            *byte = (state >> 16) as u8;
+        }
+        let _ = find_symtab_info(&bytes, &context);
+    }
+}

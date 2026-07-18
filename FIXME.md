@@ -868,10 +868,10 @@
 
 ### P2-25. fuzz, property, fault-injection suite를 추가한다
 
-- [ ] malformed Mach message, Mach-O, SHM header/ring을 fuzz한다.
-- [ ] plugin toggle/dependency graph와 schema offsets를 property test한다.
-- [ ] path traversal, symlink swap, disk full, permission denied, cross-device move, ZIP bomb/failure를 fault-inject한다.
-- [ ] capture/finalize 각 단계에서 process kill 후 recovery를 검증한다.
+- [x] malformed Mach message, Mach-O, SHM header/ring을 fuzz한다.
+- [x] plugin toggle/dependency graph와 schema offsets를 property test한다.
+- [x] path traversal, symlink swap, disk full, permission denied, cross-device move, ZIP bomb/failure를 fault-inject한다.
+- [x] capture/finalize 각 단계에서 process kill 후 recovery를 검증한다.
 
 범위: parser crates, pipeline/artifact store, dedicated fuzz targets.
 

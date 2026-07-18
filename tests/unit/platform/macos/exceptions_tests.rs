@@ -312,3 +312,17 @@ fn message_header_returns_owned_value_from_unaligned_bytes() {
     assert_eq!(header.msgh_remote_port, FIXTURE_REPLY_PORT);
     assert_eq!(header.msgh_id, FIX_MESSAGE_ID);
 }
+
+#[test]
+fn arbitrary_mach_message_bytes_never_panic() {
+    let mut state = 0x9e37_79b9_u32;
+    for len in 0..512 {
+        let mut bytes = vec![0_u8; len];
+        for byte in &mut bytes {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (state >> 24) as u8;
+        }
+        let _ = parse_exception_message(&bytes);
+        let _ = failure_reply_for_message(&bytes);
+    }
+}
