@@ -1,6 +1,7 @@
 //! Integration test: `analyze` subcommand on a sample report file.
 
 use std::io::Write;
+use std::process::Command;
 use tempfile::NamedTempFile;
 
 #[test]
@@ -40,8 +41,16 @@ fn test_analyze_valid_report() {
     f.write_all(json.to_string().as_bytes()).unwrap();
     f.flush().unwrap();
 
-    let exit_code = crash_monitor::cli::analyze::run(f.path().to_str().unwrap());
-    assert_eq!(exit_code, 0);
+    let output = Command::new(env!("CARGO_BIN_EXE_crash_monitor"))
+        .arg("analyze")
+        .arg(f.path())
+        .output()
+        .expect("run analyze CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Crash Report: SIGSEGV at 0x8"), "{stdout}");
+    assert!(stdout.contains("voxelcore_desktop"), "{stdout}");
+    assert!(stdout.contains("vxc_face_drag_step"), "{stdout}");
 }
 
 #[test]

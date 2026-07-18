@@ -44,22 +44,20 @@ use std::time::{Duration, Instant};
 //  CLI
 // ═══════════════════════════════════════════════════
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "crash_monitor",
     version,
-    about = "Out-of-process crash monitor for native applications"
+    about = "Out-of-process crash monitor for native applications",
+    subcommand_required = true,
+    arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
-
-    /// Path to the child executable (when used without subcommand)
-    #[arg(trailing_var_arg = true)]
-    args: Vec<String>,
+    command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Internal killable boundary for task-facing collectors.
     #[command(hide = true)]
@@ -95,7 +93,7 @@ enum Commands {
         /// Path to the dSYM bundle directory (or DWARF binary)
         #[arg(long)]
         dsym: String,
-        /// Write symbolicated report to a new file (default: print to stdout)
+        /// Write JSON to a file (default: print a human-readable summary to stdout)
         #[arg(long, short)]
         output: Option<String>,
     },
@@ -628,7 +626,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
         eprintln!(
             "[monitor] Entitlement check failed: {reason}\n\
              [monitor] task_for_pid() requires com.apple.security.cs.debugger.\n\
-             [monitor] Run `make crash-monitor` to rebuild with codesign."
+             [monitor] Run `make build` to rebuild and codesign the release binary."
         );
         return event_loop::EXIT_MONITOR_INTERNAL;
     }
@@ -809,7 +807,7 @@ fn run_monitor(app_path: &str, app_args: &[String]) -> i32 {
             eprintln!(
                 "[monitor] {e}. Cannot inspect crashes or take snapshots.\n\
                  [monitor] This usually means crash_monitor lacks the debugger entitlement.\n\
-                 [monitor] Run `make crash-monitor` to rebuild with codesign."
+                 [monitor] Run `make build` to rebuild and codesign the release binary."
             );
             // An uninspectable child is terminated and reaped within explicit
             // deadlines. Continuing without a task port would silently lose
@@ -1012,7 +1010,7 @@ fn main() {
     let cli = Cli::parse();
 
     let exit_code = match cli.command {
-        Some(Commands::CaptureHelper { request_json }) => {
+        Commands::CaptureHelper { request_json } => {
             match pipeline::capture_isolation::run_capture_helper(&request_json) {
                 Ok(()) => 0,
                 Err(error) => {
@@ -1021,26 +1019,14 @@ fn main() {
                 }
             }
         }
-        Some(Commands::Run { app_path, args }) => run_monitor(&app_path, &args),
-        Some(Commands::Analyze { report }) => cli::analyze::run(&report),
-        Some(Commands::Stack { report, thread }) => cli::stack::run(&report, thread),
-        Some(Commands::Symbolicate {
+        Commands::Run { app_path, args } => run_monitor(&app_path, &args),
+        Commands::Analyze { report } => cli::analyze::run(&report),
+        Commands::Stack { report, thread } => cli::stack::run(&report, thread),
+        Commands::Symbolicate {
             report,
             dsym,
             output,
-        }) => cli::symbolicate::run(&report, &dsym, output.as_deref()),
-        None => {
-            // No subcommand: treat positional args as "run" mode
-            // Usage: crash_monitor run ./target_application [args...]
-            if cli.args.is_empty() {
-                eprintln!("Usage: crash_monitor [run] <app_path> [args...]");
-                1
-            } else {
-                let app_path = &cli.args[0];
-                let args = &cli.args[1..];
-                run_monitor(app_path, args)
-            }
-        }
+        } => cli::symbolicate::run(&report, &dsym, output.as_deref()),
     };
 
     std::process::exit(exit_code);
@@ -1054,6 +1040,19 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     const TEST_REAP_DEADLINE: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn no_subcommand_uses_clap_help_and_usage_exit_code() {
+        let error = Cli::try_parse_from(["crash_monitor"]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("Usage: crash_monitor <COMMAND>"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Commands:"), "{rendered}");
+        assert!(!rendered.contains("[run] <app_path>"), "{rendered}");
+    }
 
     fn entitlement_plist(value: &str) -> Vec<u8> {
         format!(

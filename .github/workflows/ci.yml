@@ -1,15 +1,40 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main, "release/**"]
+
+permissions:
+  contents: read
 
 jobs:
-  lint:
-    runs-on: macos-14
+  macos-arm64-fast:
+    name: macOS ARM64 fast checks
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify native architecture
+        run: test "$(uname -m)" = arm64
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - run: make lint
+      - name: Format, strict Clippy, tests, and schema drift
+        run: make ci-fast
+
+  privileged-e2e:
+    name: Signed privileged E2E
+    runs-on: [self-hosted, macOS, ARM64, crash-monitor-e2e]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Run required signed E2E gate
+        env:
+          E2E_REQUIRED: "1"
+          SIGN_IDENTITY: ${{ secrets.CRASH_MONITOR_SIGN_IDENTITY }}
+        run: make e2e-required

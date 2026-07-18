@@ -1810,6 +1810,33 @@ fn test_clean_exit_no_reports() {
 }
 
 #[test]
+fn child_state_ownership_loss_is_not_a_clean_exit() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let pipeline = make_test_pipeline(tempdir.path());
+    let mut source = TestEventSource::new(vec![MonitorEvent::MonitorFailure {
+        message: "waitpid lost child ownership (ECHILD/ChildGone)".to_string(),
+    }]);
+
+    let outcome = event_loop(
+        &mut source,
+        &pipeline,
+        0,
+        9999,
+        "test_app",
+        &noop_reply,
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        outcome.outcome,
+        MonitorOutcome::MonitorFailure(ref message) if message.contains("ChildGone")
+    ));
+    assert_eq!(outcome.exit_code(), EXIT_MONITOR_INTERNAL);
+    assert_no_artifacts(tempdir.path());
+}
+
+#[test]
 fn test_disabled_exit_failure_trigger_preserves_outcome_without_report() {
     let tempdir = tempfile::tempdir().unwrap();
     let pipeline = make_test_pipeline_with_triggers(

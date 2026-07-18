@@ -19,10 +19,6 @@ DIALOG_ENTITLEMENTS := crash_dialog.entitlements
 MONITOR_BIN        := target/release/crash_monitor
 MONITOR_DIALOG_BIN := target/release/crash_dialog_macos
 
-INTEGRATION_TESTS := --test shm_round_trip --test shm_validation_failure \
-                     --test plugin_timeout --test event_loop_test \
-                     --test capture_isolation_test
-
 # Self-contained e2e crash producer (schema-only; no host app dependency).
 E2E_CHILD := tests/e2e/fixtures/crash_app
 E2E_SRC   := tests/e2e/fixtures/crash_app.c
@@ -31,16 +27,16 @@ SHM_ATOMIC_TEST_SRC := tests/e2e/fixtures/shm_atomic_contract.c
 
 # cargo-llvm-cov discovers rustup's llvm-tools-preview. LLVM_COV and
 # LLVM_PROFDATA remain supported as explicit caller-provided overrides.
-# Exclude untestable code from coverage:
-#   platform/.*/ffi/ — platform FFI (macos/ffi/, future linux/ffi/)
-#   main.rs          — OS orchestration (signal, spawn, waitpid)
-#   paths.rs         — OS I/O (env::var, fs::create_dir_all)
-#   platform/mod.rs  — FFI delegation wrappers
-COV_EXCLUDE := --ignore-filename-regex '(platform/.*/ffi/|/main\.rs$$|/paths\.rs$$|platform/mod\.rs$$)'
+# Do not hide main/FFI/path code from the denominator. Signed E2E coverage
+# executes those boundaries in the real monitor process; remaining lines are
+# reported as uncovered rather than silently excluded.
+COV_EXCLUDE ?=
+COV_ENV_FILE := target/llvm-cov.env
 
 .PHONY: build build-unsigned check-sign-identity sign sign-adhoc package verify-package e2e-build lint test \
-        unit-test integration-test e2e e2e-test e2e-child shm-atomic-test coverage \
-        unit-coverage integration-coverage e2e-coverage clean
+        unit-test integration-test e2e e2e-test e2e-required e2e-child shm-atomic-test \
+        schema-check ci-fast coverage unit-coverage \
+        integration-coverage e2e-coverage clean
 
 # ── Compile / sign / package ──────────────────────────────────
 build-unsigned:
@@ -85,6 +81,11 @@ lint:
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+ci-fast: schema-check
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	cargo test --workspace --all-targets
+
 # ── E2E child (compiled from the shm schema alone) ────────────
 $(E2E_CHILD): $(E2E_SRC) schema/crash_shm.h schema/crash_shm_atomic.h
 	cc -std=c11 -Wall -Wextra -Werror -I schema -o $@ $<
@@ -98,12 +99,15 @@ $(SHM_ATOMIC_TEST): $(SHM_ATOMIC_TEST_SRC) schema/crash_shm.h schema/crash_shm_a
 shm-atomic-test: $(SHM_ATOMIC_TEST)
 	./$(SHM_ATOMIC_TEST)
 
+schema-check: shm-atomic-test
+	cargo check --workspace --all-targets
+
 # ── Tests ─────────────────────────────────────────────────────
 unit-test: shm-atomic-test
 	cargo test --lib
 
 integration-test:
-	cargo test $(INTEGRATION_TESTS)
+	cargo test --workspace --tests
 
 # e2e needs the codesigned release monitor (build), the child, and a debug build
 # (for the unsigned-fails-fast case). Tests self-skip if the entitlement is absent.
@@ -111,9 +115,16 @@ e2e-test: e2e-build $(E2E_CHILD)
 	cargo build
 	cargo test --test e2e_tests
 
-e2e: e2e-test
+# Privileged release gate. The dedicated runner must provide a signing identity
+# capable of granting com.apple.security.cs.debugger.
+e2e-required: e2e-build $(E2E_CHILD)
+	cargo build
+	E2E_REQUIRED=1 cargo test --test e2e_tests -- --ignored
 
-test: unit-test integration-test e2e-test
+test: schema-check
+	cargo test --workspace --all-targets
+
+e2e: e2e-test
 
 # ── Coverage (HTML reports under coverage-report*/) ───────────
 unit-coverage:
@@ -121,15 +132,22 @@ unit-coverage:
 	@echo "Unit coverage: coverage-report-unit/html/index.html"
 
 integration-coverage:
-	cargo llvm-cov $(INTEGRATION_TESTS) $(COV_EXCLUDE) --html --output-dir coverage-report-integration
+	cargo llvm-cov --workspace --tests $(COV_EXCLUDE) --html --output-dir coverage-report-integration
 	@echo "Integration coverage: coverage-report-integration/html/index.html"
 
-e2e-coverage: build $(E2E_CHILD)
-	cargo llvm-cov --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
+e2e-coverage: $(E2E_CHILD)
+	cargo llvm-cov clean --workspace
+	mkdir -p target
+	cargo llvm-cov show-env --sh > $(COV_ENV_FILE)
+	. $(COV_ENV_FILE); cargo build --release --workspace --features test-support
+	codesign --entitlements $(ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_BIN)
+	codesign --entitlements $(DIALOG_ENTITLEMENTS) --force --sign "$(SIGN_IDENTITY)" $(MONITOR_DIALOG_BIN)
+	. $(COV_ENV_FILE); CRASH_MONITOR_E2E_BIN=$(abspath $(MONITOR_BIN)) E2E_REQUIRED=1 cargo test --test e2e_tests -- --ignored
+	cargo llvm-cov report $(COV_EXCLUDE) --html --output-dir coverage-report-e2e
 	@echo "E2E coverage: coverage-report-e2e/html/index.html"
 
 coverage: build $(E2E_CHILD)
-	cargo llvm-cov --lib $(INTEGRATION_TESTS) --test e2e_tests $(COV_EXCLUDE) --html --output-dir coverage-report
+	cargo llvm-cov --workspace --all-targets $(COV_EXCLUDE) --html --output-dir coverage-report
 	@echo "Coverage: coverage-report/html/index.html"
 
 # ── Clean ─────────────────────────────────────────────────────

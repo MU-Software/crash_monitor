@@ -2,6 +2,7 @@
 
 use base64::Engine;
 use std::io::Write;
+use std::process::Command;
 use tempfile::NamedTempFile;
 
 #[test]
@@ -18,19 +19,29 @@ fn test_stack_valid_report() {
             "collector": "crash_monitor",
             "type": "crash"
         },
-        "threads": [{
-            "index": 0,
-            "id": 100,
-            "name": "main",
-            "crashed": true,
-            "registers": {},
-            "backtrace": [],
-            "stack_memory": {
-                "sp": "0x16d4fe000",
-                "size": 5,
-                "hex_dump": encoded
+        "threads": [
+            {
+                "index": 0,
+                "id": 100,
+                "name": "main",
+                "crashed": false,
+                "registers": {},
+                "backtrace": []
+            },
+            {
+                "index": 1,
+                "id": 101,
+                "name": "worker",
+                "crashed": true,
+                "registers": {},
+                "backtrace": [],
+                "stack_memory": {
+                    "sp": "0x16d4fe000",
+                    "size": 5,
+                    "hex_dump": encoded
+                }
             }
-        }],
+        ],
         "loaded_images": [],
         "memory_map": [],
         "attachments": []
@@ -40,8 +51,17 @@ fn test_stack_valid_report() {
     f.write_all(json.to_string().as_bytes()).unwrap();
     f.flush().unwrap();
 
-    let exit_code = crash_monitor::cli::stack::run(f.path().to_str().unwrap(), 0);
-    assert_eq!(exit_code, 0);
+    let output = Command::new(env!("CARGO_BIN_EXE_crash_monitor"))
+        .arg("stack")
+        .arg(f.path())
+        .args(["--thread", "1"])
+        .output()
+        .expect("run stack CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Stack memory for thread 1"), "{stdout}");
+    assert!(stdout.contains("48 65 6c 6c 6f"), "{stdout}");
+    assert!(stdout.contains("|Hello|"), "{stdout}");
 }
 
 #[test]

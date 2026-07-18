@@ -40,8 +40,9 @@ fn full_crash_report_json() -> String {
         "crash_context": {
             "annotations": {
                 "active_tool": "face_pull_drag",
-                "frame_number": "2847",
-                "region_count": "42"
+                "frame_number": 2847,
+                "region_count": 42,
+                "flags": ["safe", true]
             }
         },
         "threads": [{
@@ -330,4 +331,49 @@ fn process_name_is_terminal_safe_in_header_without_mutating_report() {
     assert!(rendered.contains("app\\x1b[2J\\nforged"));
     assert!(!rendered.chars().any(char::is_control));
     assert_eq!(report.header.process, "app\u{1b}[2J\nforged");
+}
+
+#[test]
+fn summary_renders_non_string_json_annotations_and_missing_fields() {
+    let report: CrashReport = serde_json::from_str(&full_crash_report_json()).unwrap();
+    let mut output = Vec::new();
+
+    write_summary(&report, &mut output).unwrap();
+
+    let rendered = String::from_utf8(output).unwrap();
+    assert!(rendered.contains("frame_number=2847"), "{rendered}");
+    assert!(rendered.contains("flags=[\"safe\",true]"), "{rendered}");
+    assert!(!rendered.contains("User feedback: <missing>"));
+}
+
+#[test]
+fn summary_marks_missing_context_and_feedback_comment() {
+    let mut value: serde_json::Value = serde_json::from_str(&minimal_report_json()).unwrap();
+    value["user_feedback"] = serde_json::json!({"email": "person@example.test"});
+    let report: CrashReport = serde_json::from_value(value).unwrap();
+    let mut output = Vec::new();
+
+    write_summary(&report, &mut output).unwrap();
+
+    let rendered = String::from_utf8(output).unwrap();
+    assert!(rendered.contains("Context: <missing>"), "{rendered}");
+    assert!(rendered.contains("User feedback: <missing>"), "{rendered}");
+}
+
+#[test]
+fn run_reports_json_type_mismatches_to_the_error_sink() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&minimal_report_json()).unwrap();
+    value["header"]["pid"] = serde_json::json!("not-a-number");
+    std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+
+    let status = run_with_writers(file.path().to_str().unwrap(), &mut output, &mut errors);
+
+    assert_eq!(status, 1);
+    assert!(output.is_empty());
+    let rendered = String::from_utf8(errors).unwrap();
+    assert!(rendered.contains("invalid type"), "{rendered}");
+    assert!(rendered.contains("u32"), "{rendered}");
 }

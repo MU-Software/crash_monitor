@@ -83,33 +83,6 @@ fn test_find_slide_for_address_empty() {
 }
 
 #[test]
-fn test_find_dwarf_binary_nonexistent() {
-    let result = find_dwarf_binary(Path::new("/nonexistent/path.dSYM"));
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not found"));
-}
-
-#[test]
-fn test_find_dwarf_binary_invalid_bundle() {
-    // A directory that isn't a valid dSYM bundle
-    let tmp = tempfile::tempdir().unwrap();
-    let result = find_dwarf_binary(tmp.path());
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not a valid dSYM"));
-}
-
-#[test]
-fn test_find_dwarf_binary_file_path() {
-    // If given a file path directly, should return it
-    let dir = tempfile::tempdir().unwrap();
-    let tmp = dir.path().join("dwarf-direct");
-    std::fs::write(&tmp, b"fake").unwrap();
-    let result = find_dwarf_binary(&tmp);
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), tmp);
-}
-
-#[test]
 fn test_build_slide_map_no_slide() {
     let images = vec![LoadedImageReport {
         path: "/a".into(),
@@ -136,6 +109,59 @@ fn thin_macho_identity(cpu: u32, uuid: [u8; 16]) -> Vec<u8> {
     bytes[36..40].copy_from_slice(&24_u32.to_le_bytes());
     bytes[40..56].copy_from_slice(&uuid);
     bytes
+}
+
+fn report_image(uuid: &str) -> LoadedImageReport {
+    LoadedImageReport {
+        path: "/Applications/Test.app/Contents/MacOS/Test".into(),
+        base: "0x1000".into(),
+        slide: None,
+        uuid: Some(uuid.into()),
+        architecture: Some("arm64".into()),
+        text_start: None,
+        text_end: None,
+        segments: Vec::new(),
+    }
+}
+
+#[test]
+fn dwarf_selection_matches_identity_and_skips_hidden_or_irrelevant_files() {
+    let bundle = tempfile::tempdir().unwrap();
+    let dwarf_dir = bundle.path().join("Contents/Resources/DWARF");
+    std::fs::create_dir_all(&dwarf_dir).unwrap();
+    std::fs::write(dwarf_dir.join(".metadata"), b"not macho").unwrap();
+    std::fs::write(
+        dwarf_dir.join("irrelevant"),
+        thin_macho_identity(0x0100_000c, [2; 16]),
+    )
+    .unwrap();
+    let expected = dwarf_dir.join("Test");
+    std::fs::write(&expected, thin_macho_identity(0x0100_000c, [1; 16])).unwrap();
+    let uuid = parse_macho_identities(&thin_macho_identity(0x0100_000c, [1; 16]))
+        .unwrap()
+        .remove(0)
+        .uuid;
+
+    assert_eq!(
+        find_dwarf_binary_for_images(bundle.path(), &[report_image(&uuid)]).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn dwarf_selection_rejects_ambiguous_identity_matches() {
+    let bundle = tempfile::tempdir().unwrap();
+    let dwarf_dir = bundle.path().join("Contents/Resources/DWARF");
+    std::fs::create_dir_all(&dwarf_dir).unwrap();
+    let macho = thin_macho_identity(0x0100_000c, [1; 16]);
+    std::fs::write(dwarf_dir.join("Test"), &macho).unwrap();
+    std::fs::write(dwarf_dir.join("Test-copy"), &macho).unwrap();
+    let uuid = parse_macho_identities(&macho).unwrap().remove(0).uuid;
+
+    let error = find_dwarf_binary_for_images(bundle.path(), &[report_image(&uuid)]).unwrap_err();
+
+    assert!(error.contains("ambiguous dSYM"), "{error}");
+    assert!(error.contains("Test-copy"), "{error}");
 }
 
 #[test]

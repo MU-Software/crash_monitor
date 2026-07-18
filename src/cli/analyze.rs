@@ -3,6 +3,7 @@
 use crate::pipeline::report::{self, CrashReport};
 use crate::pipeline::{ReportType, TerminationReason};
 use crate::utils::terminal::escape_terminal;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// Maximum number of backtrace frames to display.
@@ -13,61 +14,80 @@ const MAX_BREADCRUMBS: usize = 10;
 /// Run the `analyze` subcommand. Returns exit code (0 = success, 1 = error).
 #[must_use]
 pub fn run(report_path: &str) -> i32 {
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    run_with_writers(report_path, &mut stdout.lock(), &mut stderr.lock())
+}
+
+fn run_with_writers(report_path: &str, output: &mut dyn Write, errors: &mut dyn Write) -> i32 {
     let report = match report::load_report(Path::new(report_path)) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            let _ = writeln!(errors, "error: {e}");
             return 1;
         }
     };
 
-    print_summary(&report);
-    0
+    match write_summary(&report, output) {
+        Ok(()) => 0,
+        Err(error) => {
+            let _ = writeln!(errors, "error: failed to write analysis: {error}");
+            1
+        }
+    }
 }
 
-fn print_summary(report: &CrashReport) {
+fn write_summary(report: &CrashReport, output: &mut dyn Write) -> io::Result<()> {
     // 1. Header line
-    print_header(report);
+    print_header(report, output)?;
 
     // 2. Crash context
-    print_crash_context(report);
+    print_crash_context(report, output)?;
 
     // 3. Session
     if let Some(ref session) = report.session {
         let duration = format_duration(session.duration_s);
-        println!("Session: {duration} (id: {})", escape_terminal(&session.id));
+        writeln!(
+            output,
+            "Session: {duration} (id: {})",
+            escape_terminal(&session.id)
+        )?;
     }
 
     // 4. Fingerprint
     if let Some(ref fp) = report.fingerprint {
-        println!("Fingerprint: {}", escape_terminal(fp));
+        writeln!(output, "Fingerprint: {}", escape_terminal(fp))?;
     }
 
     // 5. User feedback
-    if let Some(ref fb) = report.user_feedback
-        && let Some(comment) = fb.get("comment").and_then(serde_json::Value::as_str)
-    {
-        println!("User feedback: {}", escape_terminal(comment));
+    if let Some(ref feedback) = report.user_feedback {
+        let comment = render_json_field(feedback.get("comment"));
+        writeln!(output, "User feedback: {comment}")?;
     }
 
-    println!();
+    writeln!(output)?;
 
     // 6. Exception details
-    print_exception(report);
+    print_exception(report, output)?;
 
     // 7. Crashed thread backtrace
-    print_backtrace(report);
+    print_backtrace(report, output)?;
 
     // 8. Breadcrumbs
-    print_breadcrumbs(report);
+    print_breadcrumbs(report, output)?;
 
     // 9. Diagnostics
-    print_diagnostics(report);
+    print_diagnostics(report, output)?;
+    Ok(())
 }
 
-fn print_header(report: &CrashReport) {
-    println!("{}", header_summary(report));
-    println!("Time: {}", escape_terminal(&report.header.timestamp));
+fn print_header(report: &CrashReport, output: &mut dyn Write) -> io::Result<()> {
+    writeln!(output, "{}", header_summary(report))?;
+    writeln!(
+        output,
+        "Time: {}",
+        escape_terminal(&report.header.timestamp)
+    )
 }
 
 fn header_summary(report: &CrashReport) -> String {
@@ -133,9 +153,10 @@ fn header_summary(report: &CrashReport) -> String {
     }
 }
 
-fn print_crash_context(report: &CrashReport) {
+fn print_crash_context(report: &CrashReport, output: &mut dyn Write) -> io::Result<()> {
     let Some(ref ctx) = report.crash_context else {
-        return;
+        writeln!(output, "Context: <missing>")?;
+        return Ok(());
     };
     // App state is a generic annotation map — print it verbatim (no app-specific
     // field names, so the tool stays domain-agnostic).
@@ -143,46 +164,70 @@ fn print_crash_context(report: &CrashReport) {
         let start = ctx
             .session_start_ns
             .map_or_else(|| "unknown".to_string(), |value| value.to_string());
-        println!(
+        writeln!(
+            output,
             "Producer session: {} (start_ns: {start}, heartbeat: {})",
             escape_terminal(session_id),
             ctx.heartbeat_counter
-        );
+        )?;
     } else {
-        println!("Producer heartbeat: {}", ctx.heartbeat_counter);
+        writeln!(output, "Producer heartbeat: {}", ctx.heartbeat_counter)?;
     }
 
     if ctx.annotations.is_empty() {
-        return;
+        writeln!(output, "Context annotations: <missing>")?;
+        return Ok(());
     }
     let joined = ctx
         .annotations
         .iter()
-        .map(|(k, v)| format!("{}={}", escape_terminal(k), escape_terminal(v)))
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                escape_terminal(key),
+                render_json_field(Some(value))
+            )
+        })
         .collect::<Vec<_>>()
         .join(" | ");
-    println!("Context: {joined}");
+    writeln!(output, "Context: {joined}")
 }
 
-fn print_exception(report: &CrashReport) {
+fn render_json_field(value: Option<&serde_json::Value>) -> String {
+    match value {
+        None => "<missing>".to_string(),
+        Some(serde_json::Value::String(value)) => escape_terminal(value),
+        Some(value) => escape_terminal(&value.to_string()),
+    }
+}
+
+fn print_exception(report: &CrashReport, output: &mut dyn Write) -> io::Result<()> {
     let Some(ref exc) = report.exception else {
-        return;
+        return Ok(());
     };
-    println!("Exception:");
-    println!("  Type:          {}", escape_terminal(&exc.exc_type));
-    println!("  Code:          {}", escape_terminal(&exc.code));
-    println!("  Subcode:       {}", escape_terminal(&exc.subcode));
-    println!("  Signal:        {}", escape_terminal(&exc.signal));
+    writeln!(output, "Exception:")?;
+    writeln!(
+        output,
+        "  Type:          {}",
+        escape_terminal(&exc.exc_type)
+    )?;
+    writeln!(output, "  Code:          {}", escape_terminal(&exc.code))?;
+    writeln!(output, "  Subcode:       {}", escape_terminal(&exc.subcode))?;
+    writeln!(output, "  Signal:        {}", escape_terminal(&exc.signal))?;
     if let Some(fault_address) = &exc.fault_address {
-        println!("  Fault address: {}", escape_terminal(fault_address));
+        writeln!(
+            output,
+            "  Fault address: {}",
+            escape_terminal(fault_address)
+        )?;
     }
     if exc.signal_is_approximate {
-        println!("  Signal mapping: approximate");
+        writeln!(output, "  Signal mapping: approximate")?;
     }
-    println!();
+    writeln!(output)
 }
 
-fn print_backtrace(report: &CrashReport) {
+fn print_backtrace(report: &CrashReport, output: &mut dyn Write) -> io::Result<()> {
     // Find crashed thread, or fall back to thread 0
     let thread = report
         .threads
@@ -191,16 +236,16 @@ fn print_backtrace(report: &CrashReport) {
         .or_else(|| report.threads.first());
 
     let Some(thread) = thread else {
-        println!("(no threads in report)");
-        return;
+        writeln!(output, "(no threads in report)")?;
+        return Ok(());
     };
 
     let label = if thread.crashed { " [CRASHED]" } else { "" };
     let name = escape_terminal(thread.name.as_deref().unwrap_or("unnamed"));
-    println!("Thread {} ({name}){label}:", thread.index);
+    writeln!(output, "Thread {} ({name}){label}:", thread.index)?;
 
     if thread.backtrace.is_empty() {
-        println!("  (no backtrace)");
+        writeln!(output, "  (no backtrace)")?;
     }
 
     for (i, frame) in thread.backtrace.iter().take(MAX_FRAMES).enumerate() {
@@ -221,27 +266,27 @@ fn print_backtrace(report: &CrashReport) {
             }
             _ => String::new(),
         };
-        println!("  #{i:<3} {sym}{offset_str}{image_str}{source_str}");
+        writeln!(output, "  #{i:<3} {sym}{offset_str}{image_str}{source_str}")?;
     }
 
     let total = thread.backtrace.len();
     if total > MAX_FRAMES {
-        println!("  ... ({} more frames)", total - MAX_FRAMES);
+        writeln!(output, "  ... ({} more frames)", total - MAX_FRAMES)?;
     }
-    println!();
+    writeln!(output)
 }
 
-fn print_breadcrumbs(report: &CrashReport) {
+fn print_breadcrumbs(report: &CrashReport, output: &mut dyn Write) -> io::Result<()> {
     // Breadcrumb format (from report_formatter::format_breadcrumbs):
     //   { "time_ns", "thread", "cat", "sev", "file", "line", "msg" }
     let Some(ref crumbs) = report.breadcrumbs else {
-        return;
+        return Ok(());
     };
     if crumbs.is_empty() {
-        return;
+        return Ok(());
     }
 
-    println!("Recent breadcrumbs:");
+    writeln!(output, "Recent breadcrumbs:")?;
 
     // Show last N breadcrumbs
     let start = crumbs.len().saturating_sub(MAX_BREADCRUMBS);
@@ -250,20 +295,21 @@ fn print_breadcrumbs(report: &CrashReport) {
         let file = escape_terminal(&crumb.file);
         let msg = escape_terminal(&crumb.msg);
         if file.is_empty() {
-            println!("  [{cat:<8}] {msg}");
+            writeln!(output, "  [{cat:<8}] {msg}")?;
         } else {
-            println!("  [{:<8}] {}:{}  {}", cat, file, crumb.line, msg);
+            writeln!(output, "  [{:<8}] {}:{}  {}", cat, file, crumb.line, msg)?;
         }
     }
-    println!();
+    writeln!(output)
 }
 
-fn print_diagnostics(report: &CrashReport) {
+fn print_diagnostics(report: &CrashReport, output: &mut dyn Write) -> io::Result<()> {
     // _diagnostics format (from report_formatter::build_diagnostics_json):
     //   { "pipeline_duration_ms": <u64>, "plugins": { "<name>": { "status", "duration_ms", ... } } }
     if let Some(summary) = diagnostics_summary(report) {
-        println!("{summary}");
+        writeln!(output, "{summary}")?;
     }
+    Ok(())
 }
 
 fn diagnostics_summary(report: &CrashReport) -> Option<String> {

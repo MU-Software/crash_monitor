@@ -125,6 +125,10 @@ name = "cli_stack_test"
 path = "tests/integration/cli_stack_test.rs"
 
 [[test]]
+name = "cli_symbolicate_test"
+path = "tests/integration/cli_symbolicate_test.rs"
+
+[[test]]
 name = "cli_zip_test"
 path = "tests/integration/cli_zip_test.rs"
 

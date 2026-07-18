@@ -746,38 +746,38 @@
 
 ### P2-12. analyze 출력에서 JSON 값과 민감 문자열을 정확히 다룬다
 
-- [ ] string이 아닌 annotation을 빈 문자열로 만들지 않고 JSON 표현으로 출력한다.
-- [ ] context/report field의 누락과 type mismatch를 명확히 표시한다.
-- [ ] output 함수가 `Write` sink를 받아 실제 formatting을 테스트할 수 있게 한다.
-- [ ] test fixture를 현재 annotations/report shape로 갱신한다.
+- [x] string이 아닌 annotation을 빈 문자열로 만들지 않고 JSON 표현으로 출력한다.
+- [x] context/report field의 누락과 type mismatch를 명확히 표시한다.
+- [x] output 함수가 `Write` sink를 받아 실제 formatting을 테스트할 수 있게 한다.
+- [x] test fixture를 현재 annotations/report shape로 갱신한다.
 
 범위: `src/cli/analyze.rs`, analyze tests.
 
 ### P2-13. stack CLI의 경계·출력·메모리 사용을 고친다
 
-- [ ] thread가 0개일 때 `0..0` range가 아니라 전용 no-threads 메시지를 낸다.
-- [ ] header에 declared size가 아니라 실제 decoded byte 길이를 표시하고 mismatch를 경고한다.
-- [ ] 최대 입력의 전체 hexdump 문자열을 메모리에 만들지 않고 locked writer에 line 단위로 출력한다.
-- [ ] import는 파일 상단, test module은 하단에 두어 module layout을 정리한다.
-- [ ] `src/pipeline/safety.rs` 중간의 `#[cfg(test)] mod tests` 선언도 파일 끝으로 이동한다.
+- [x] thread가 0개일 때 `0..0` range가 아니라 전용 no-threads 메시지를 낸다.
+- [x] header에 declared size가 아니라 실제 decoded byte 길이를 표시하고 mismatch를 경고한다.
+- [x] 최대 입력의 전체 hexdump 문자열을 메모리에 만들지 않고 locked writer에 line 단위로 출력한다.
+- [x] import는 파일 상단, test module은 하단에 두어 module layout을 정리한다.
+- [x] `src/pipeline/safety.rs` 중간의 `#[cfg(test)] mod tests` 선언도 파일 끝으로 이동한다.
 
 범위: `src/cli/stack.rs`.
 
 ### P2-14. symbolicate CLI의 선택과 성공 피드백을 명확히 한다
 
-- [ ] DWARF directory의 임의 첫 file을 선택하지 않고 bundle/process/image와 매칭하며 ambiguity는 오류로 낸다.
-- [ ] hidden/irrelevant file을 건너뛴다.
-- [ ] `--output` 성공 시 destination path와 resolved frame 수를 출력한다.
-- [ ] help에 기본 output이 JSON이 아니라 human-readable summary임을 명확히 적는다.
+- [x] DWARF directory의 임의 첫 file을 선택하지 않고 bundle/process/image와 매칭하며 ambiguity는 오류로 낸다.
+- [x] hidden/irrelevant file을 건너뛴다.
+- [x] `--output` 성공 시 destination path와 resolved frame 수를 출력한다.
+- [x] help에 기본 output이 JSON이 아니라 human-readable summary임을 명확히 적는다.
 
 범위: `src/cli/symbolicate.rs`, `src/main.rs` CLI definitions.
 
 ### P2-15. main CLI help와 exit-code contract를 정리한다
 
-- [ ] subcommand 없는 수동 usage 문자열을 제거하고 clap-generated help를 사용한다.
-- [ ] usage 오류는 관례적인 별도 exit code를 사용한다.
-- [ ] monitor internal failure, child failure, detected crash, normal completion의 exit code를 문서화한다.
-- [ ] 성공·실패 메시지가 실제 build target과 command 이름을 가리키게 한다.
+- [x] subcommand 없는 수동 usage 문자열을 제거하고 clap-generated help를 사용한다.
+- [x] usage 오류는 관례적인 별도 exit code를 사용한다.
+- [x] monitor internal failure, child failure, detected crash, normal completion의 exit code를 문서화한다.
+- [x] 성공·실패 메시지가 실제 build target과 command 이름을 가리키게 한다.
 
 범위: `src/main.rs`, README/help tests.
 
@@ -787,72 +787,72 @@
 
 ### P2-16. macOS CI와 privileged E2E gate를 만든다
 
-- [ ] macOS ARM64 fast job에서 format, strict Clippy, unit, integration, schema drift를 실행한다.
-- [ ] entitlement/signing이 준비된 required E2E job을 별도로 둔다.
-- [ ] privileged prerequisite가 없는 일반 CI에서는 E2E를 명시적으로 ignored로 표시한다.
-- [ ] release branch에서는 required E2E 미실행을 성공으로 간주하지 않는다.
+- [x] macOS ARM64 fast job에서 format, strict Clippy, unit, integration, schema drift를 실행한다.
+- [x] entitlement/signing이 준비된 required E2E job을 별도로 둔다.
+- [x] privileged prerequisite가 없는 일반 CI에서는 E2E를 명시적으로 ignored로 표시한다.
+- [x] release branch에서는 required E2E 미실행을 성공으로 간주하지 않는다.
 
 범위: CI workflow, Makefile/Cargo commands.
 
 ### P2-17. E2E prerequisite와 helper 준비를 결정적으로 만든다
 
-- [ ] fixture, monitor binary, entitlement, signing identity, mock dialog가 없을 때 단순 return으로 pass 처리하지 않는다.
-- [ ] `E2E_REQUIRED=1`이면 prerequisite 부재를 실패시키고, 아니면 명시적인 skip 이유를 출력한다.
-- [ ] mock dialog가 없을 때 real UI를 띄워 최대 수분 block하지 않게 한다.
-- [ ] feedback integration test가 helper binary의 우연한 사전 build에 의존하지 않게 setup에서 build/locate한다.
-- [ ] 안내 메시지의 존재하지 않는 make target 이름을 실제 target으로 교체한다.
+- [x] fixture, monitor binary, entitlement, signing identity, mock dialog가 없을 때 단순 return으로 pass 처리하지 않는다.
+- [x] `E2E_REQUIRED=1`이면 prerequisite 부재를 실패시키고, 아니면 명시적인 skip 이유를 출력한다.
+- [x] mock dialog가 없을 때 real UI를 띄워 최대 수분 block하지 않게 한다.
+- [x] feedback integration test가 helper binary의 우연한 사전 build에 의존하지 않게 setup에서 build/locate한다.
+- [x] 안내 메시지의 존재하지 않는 make target 이름을 실제 target으로 교체한다.
 
 범위: `tests/e2e/e2e_tests.rs`, `tests/integration/cli_feedback_test.rs`, Makefile.
 
 ### P2-18. 실제 OS signal 경로를 E2E로 검증한다
 
-- [ ] 실제 SIGUSR1 snapshot을 통해 signal handler, self-pipe, event loop, report 생성까지 검증한다.
-- [ ] child SIGKILL을 통해 waitpid와 `PossibleOom` 분류를 검증한다.
-- [ ] SIGSEGV, SIGABRT, clean exit, nonzero exit, 다른 fatal signal을 각각 검증한다.
-- [ ] report type, termination metadata, unique ID, 최종 artifact 위치까지 단언한다.
+- [x] 실제 SIGUSR1 snapshot을 통해 signal handler, self-pipe, event loop, report 생성까지 검증한다.
+- [x] child SIGKILL을 통해 waitpid와 `PossibleOom` 분류를 검증한다.
+- [x] SIGSEGV, SIGABRT, clean exit, nonzero exit, 다른 fatal signal을 각각 검증한다.
+- [x] report type, termination metadata, unique ID, 최종 artifact 위치까지 단언한다.
 
 범위: `tests/e2e/e2e_tests.rs`, crash fixture.
 
 ### P2-19. ANR 테스트를 deadline polling과 명시적 cleanup으로 바꾼다
 
-- [ ] 고정 3초 sleep 대신 report/manifest 완성을 bounded deadline polling으로 기다린다.
-- [ ] monitor와 child PID/process group을 test teardown에서 직접 정리하고 잔존 process/SHM이 없는지 확인한다.
-- [ ] graceful SIGTERM cleanup 구현 전에는 monitor에 SIGTERM만 보내면 child도 정리된다고 가정하지 않는다.
-- [ ] fixture 자체 deadline을 두어 실패한 테스트도 무기한 orphan을 남기지 않게 한다.
+- [x] 고정 3초 sleep 대신 report/manifest 완성을 bounded deadline polling으로 기다린다.
+- [x] monitor와 child PID/process group을 test teardown에서 직접 정리하고 잔존 process/SHM이 없는지 확인한다.
+- [x] graceful SIGTERM cleanup 구현 전에는 monitor에 SIGTERM만 보내면 child도 정리된다고 가정하지 않는다.
+- [x] fixture 자체 deadline을 두어 실패한 테스트도 무기한 orphan을 남기지 않게 한다.
 
 범위: `tests/e2e/e2e_tests.rs`, fixture lifecycle.
 
 ### P2-20. event-loop ANR wiring을 결정론적으로 통합 테스트한다
 
-- [ ] injectable clock/짧은 ANR config/SHM fixture로 elapsed→heartbeat read→ANR event 경로를 검증한다.
-- [ ] monitor가 소비한 시간을 제외하는 accounting을 단언한다.
-- [ ] `ChildGone`/unknown status와 clean exit 0을 구분하는 경로도 포함한다.
+- [x] injectable clock/짧은 ANR config/SHM fixture로 elapsed→heartbeat read→ANR event 경로를 검증한다.
+- [x] monitor가 소비한 시간을 제외하는 accounting을 단언한다.
+- [x] `ChildGone`/unknown status와 clean exit 0을 구분하는 경로도 포함한다.
 
 범위: `tests/integration/event_loop_test.rs`, watchdog tests.
 
 ### P2-21. timeout 테스트를 실제 차단 동작으로 교체한다
 
-- [ ] 단순 flag/alarm 호출 여부 테스트를 실제 blocking syscall, CPU loop, retrying I/O worker 테스트로 바꾼다.
-- [ ] kill 가능한 subprocess harness로 test suite 자체가 hang하지 않게 한다.
-- [ ] timeout, cancellation, worker crash, 정상 완료 결과를 구분한다.
+- [x] 단순 flag/alarm 호출 여부 테스트를 실제 blocking syscall, CPU loop, retrying I/O worker 테스트로 바꾼다.
+- [x] kill 가능한 subprocess harness로 test suite 자체가 hang하지 않게 한다.
+- [x] timeout, cancellation, worker crash, 정상 완료 결과를 구분한다.
 
 범위: pipeline safety unit/integration tests.
 
 ### P2-22. test command가 workspace의 실제 target을 모두 실행하게 한다
 
-- [ ] 수동 test target 목록 대신 `cargo test --workspace --all-targets`에 준하는 future-proof command를 사용한다.
-- [ ] 누락된 analyze, stack, symbolicate, feedback/zip CLI integration target을 포함한다.
-- [ ] 실제 binary process를 실행해 clap parsing, stdout, stderr, exit status를 검증한다.
-- [ ] exit code만이 아니라 선택된 report/thread/field와 output marker를 단언한다.
+- [x] 수동 test target 목록 대신 `cargo test --workspace --all-targets`에 준하는 future-proof command를 사용한다.
+- [x] 누락된 analyze, stack, symbolicate, feedback/zip CLI integration target을 포함한다.
+- [x] 실제 binary process를 실행해 clap parsing, stdout, stderr, exit status를 검증한다.
+- [x] exit code만이 아니라 선택된 report/thread/field와 output marker를 단언한다.
 
 범위: `Makefile`, CLI integration tests.
 
 ### P2-23. E2E coverage가 실제 monitor binary를 계측하게 한다
 
-- [ ] instrumented monitor binary를 build·sign하고 그 경로를 E2E에 주입한다.
-- [ ] 별도 release binary를 spawn해 coverage가 test harness에만 쌓이는 현상을 제거한다.
-- [ ] `main.rs`, FFI, path handling을 blanket exclude하지 않고 실행 가능한 coverage 또는 별도 gate를 둔다.
-- [ ] coverage target의 한계를 문서화하고 측정되지 않는 코드를 숫자에 포함한 것처럼 표시하지 않는다.
+- [x] instrumented monitor binary를 build·sign하고 그 경로를 E2E에 주입한다.
+- [x] 별도 release binary를 spawn해 coverage가 test harness에만 쌓이는 현상을 제거한다.
+- [x] `main.rs`, FFI, path handling을 blanket exclude하지 않고 실행 가능한 coverage 또는 별도 gate를 둔다.
+- [x] coverage target의 한계를 문서화하고 측정되지 않는 코드를 숫자에 포함한 것처럼 표시하지 않는다.
 
 범위: `Makefile`, E2E binary resolution.
 

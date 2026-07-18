@@ -6,10 +6,13 @@
  * region from $CRASH_MONITOR_SHM, publishes a breadcrumb + minimal context via
  * the schema's release/seqlock contract, then triggers the requested scenario.
  *
- * Usage: crash_app <sigsegv|sigabrt|sigterm|exit42|anr|clean|uninstrumented>
+ * Usage: crash_app <sigsegv|sigabrt|sigill|sigkill|wait|exit42|anr|clean|uninstrumented>
  *   sigsegv       — NULL pointer dereference
  *   sigabrt       — abort()
  *   sigterm       — terminate via an uncaught SIGTERM
+ *   sigill        — terminate via an uncaught SIGILL
+ *   sigkill       — terminate via SIGKILL (possible-OOM policy fixture)
+ *   wait          — remain alive for externally delivered monitor signals
  *   exit42        — immediate non-zero exit (42)
  *   anr           — hang forever after publishing one heartbeat (ANR)
  *   clean         — normal exit (no report expected)
@@ -52,6 +55,18 @@ static int sleep_ms(uint64_t duration_ms) {
         requested = remaining;
     }
     return 0;
+}
+
+static void publish_fixture_state(void) {
+    const char* path = getenv("CRASH_APP_STATE_FILE");
+    if (!path || path[0] == '\0') return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) _Exit(124);
+    const char* shm_name = getenv("CRASH_MONITOR_SHM");
+    if (!shm_name) shm_name = "";
+    if (dprintf(fd, "%ld\n%s\n", (long)getpid(), shm_name) < 0 || close(fd) != 0) {
+        _Exit(124);
+    }
 }
 
 /* Map the monitor-created region and populate a breadcrumb + context so the
@@ -147,13 +162,14 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         fprintf(stderr,
                 "usage: crash_app "
-                "<sigsegv|sigabrt|sigterm|exit42|anr|clean|uninstrumented>\n");
+                "<sigsegv|sigabrt|sigterm|sigill|sigkill|wait|exit42|anr|clean|uninstrumented>\n");
         return 1;
     }
     const char* scenario = argv[1];
     if (strcmp(scenario, "uninstrumented") != 0) {
         populate_shm(scenario);
     }
+    publish_fixture_state();
 
     if (strcmp(scenario, "sigsegv") == 0) {
         volatile int* np = NULL;
@@ -177,6 +193,20 @@ int main(int argc, char* argv[]) {
             _Exit(125);
         }
         _Exit(125); /* SIGTERM unexpectedly returned instead of terminating. */
+    } else if (strcmp(scenario, "sigill") == 0) {
+        if (signal(SIGILL, SIG_DFL) == SIG_ERR || raise(SIGILL) != 0) {
+            _Exit(125);
+        }
+        _Exit(125);
+    } else if (strcmp(scenario, "sigkill") == 0) {
+        if (raise(SIGKILL) != 0) {
+            _Exit(125);
+        }
+        _Exit(125);
+    } else if (strcmp(scenario, "wait") == 0) {
+        for (;;) {
+            pause();
+        }
     } else if (strcmp(scenario, "exit42") == 0) {
         return 42;
     } else if (strcmp(scenario, "anr") == 0) {

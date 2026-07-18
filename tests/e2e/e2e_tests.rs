@@ -1,8 +1,8 @@
 //! End-to-end tests: spawn `crash_monitor` with a `crash_app` child, verify report output.
 //!
 //! These tests require:
-//! 1. `crash_monitor` binary built (`cargo build --release` or `make crash-monitor`)
-//! 2. `crash_app` test child built (`make crash-monitor-e2e-child` or cc directly)
+//! 1. `crash_monitor` binary built and signed (`make e2e-build`)
+//! 2. `crash_app` test child built (`make e2e-child`)
 //! 3. Debugger entitlement on `crash_monitor` (codesign)
 //! 4. Debug build (`cargo build`) for `test_e2e_unsigned_binary_fails_fast`
 //!
@@ -15,12 +15,14 @@
 //! tests can run in parallel without interfering with each other.
 
 use crash_monitor::shm::{SHM_TOTAL_SIZE, SHM_VERSION, SharedMemory, ShmHeader};
+use nix::libc;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::mem::{offset_of, size_of};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -29,6 +31,8 @@ const MONITOR_INTERNAL_FAILURE_EXIT_CODE: i32 = 70;
 const CHILD_FAILURE_EXIT_CODE: i32 = 80;
 const DETECTED_CRASH_EXIT_CODE: i32 = 81;
 const SIGABRT_NUMBER: i32 = 6;
+const SIGILL_NUMBER: i32 = 4;
+const SIGKILL_NUMBER: i32 = 9;
 const SIGSEGV_NUMBER: i32 = 11;
 const SIGTERM_NUMBER: i32 = 15;
 const REPORT_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -82,6 +86,9 @@ fn copy_mapping(shm: &SharedMemory) -> Vec<u8> {
 
 /// Locate the `crash_monitor` binary (release build).
 fn monitor_path() -> PathBuf {
+    if let Some(injected) = std::env::var_os("CRASH_MONITOR_E2E_BIN") {
+        return PathBuf::from(injected);
+    }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest.join("target/release/crash_monitor")
 }
@@ -101,10 +108,7 @@ fn mock_dialog_path() -> PathBuf {
 fn monitor_cmd(data_dir: &Path) -> Command {
     let mut cmd = Command::new(monitor_path());
     cmd.env("CRASH_MONITOR_DATA_DIR", data_dir);
-    let mock = mock_dialog_path();
-    if mock.exists() {
-        cmd.env("CRASH_MONITOR_DIALOG_BIN", &mock);
-    }
+    cmd.env("CRASH_MONITOR_DIALOG_BIN", mock_dialog_path());
     cmd
 }
 
@@ -283,19 +287,45 @@ fn find_all_crash_artifacts(data_dir: &Path) -> Vec<PathBuf> {
     artifacts
 }
 
-/// Check prerequisites. Skip test if binaries don't exist or lack entitlements.
-fn check_prerequisites() -> bool {
+fn e2e_required() -> bool {
+    std::env::var("E2E_REQUIRED").as_deref() == Ok("1")
+}
+
+/// Check privileged prerequisites. Missing requirements are a hard failure for
+/// the release gate and an explicit skip for opt-in local runs.
+fn check_prerequisites() -> Result<(), String> {
     let monitor = monitor_path();
     let child = crash_app_path();
+    if !monitor.is_absolute() {
+        return Err(format!(
+            "CRASH_MONITOR_E2E_BIN must be an absolute path, got {}",
+            monitor.display()
+        ));
+    }
     if !monitor.exists() {
-        eprintln!("SKIP: crash_monitor not found at {}", monitor.display());
-        eprintln!("      Run: make crash-monitor");
-        return false;
+        return Err(format!(
+            "crash_monitor not found at {}; run `make e2e-build`",
+            monitor.display()
+        ));
     }
     if !child.exists() {
-        eprintln!("SKIP: crash_app not found at {}", child.display());
-        eprintln!("      Run: make crash-monitor-e2e-child");
-        return false;
+        return Err(format!(
+            "crash_app not found at {}; run `make e2e-child`",
+            child.display()
+        ));
+    }
+    let mock = mock_dialog_path();
+    if !mock.exists() || mock.metadata().is_err() {
+        return Err(format!(
+            "mock dialog not found at {}; run `make e2e-build`",
+            mock.display()
+        ));
+    }
+    if mock
+        .metadata()
+        .map_or(true, |metadata| metadata.permissions().mode() & 0o111 == 0)
+    {
+        return Err(format!("mock dialog is not executable: {}", mock.display()));
     }
     // Verify the monitor binary has the debugger entitlement.
     // Without it, task_for_pid() will fail and the monitor will exit immediately.
@@ -307,17 +337,44 @@ fn check_prerequisites() -> bool {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if !stdout.contains("com.apple.security.cs.debugger") {
-                eprintln!("SKIP: crash_monitor lacks com.apple.security.cs.debugger entitlement");
-                eprintln!("      Run: make crash-monitor");
-                return false;
+                return Err(
+                    "crash_monitor lacks com.apple.security.cs.debugger; run `make e2e-build` with a valid SIGN_IDENTITY"
+                        .to_string(),
+                );
             }
         }
         Err(e) => {
-            eprintln!("SKIP: codesign check failed: {e}");
-            return false;
+            return Err(format!("codesign prerequisite check failed: {e}"));
         }
     }
-    true
+    Ok(())
+}
+
+fn require_prerequisites() -> bool {
+    match check_prerequisites() {
+        Ok(()) => true,
+        Err(reason) => skip_or_fail(&reason),
+    }
+}
+
+fn require_file(path: &Path, preparation: &str) -> bool {
+    if path.is_file() {
+        true
+    } else {
+        skip_or_fail(&format!(
+            "required fixture not found at {}; {preparation}",
+            path.display()
+        ))
+    }
+}
+
+fn skip_or_fail(reason: &str) -> bool {
+    if e2e_required() {
+        panic!("required E2E prerequisite missing: {reason}")
+    } else {
+        eprintln!("SKIP: {reason}");
+        false
+    }
 }
 
 /// Read report JSON from a `.json` file or extract it from a `.zip` archive.
@@ -338,6 +395,135 @@ fn read_report_json(path: &Path) -> serde_json::Value {
             serde_json::from_str(&content).expect("parse JSON from ZIP")
         }
         _ => panic!("unexpected report extension: {}", path.display()),
+    }
+}
+
+fn assert_report_identity(path: &Path, report: &serde_json::Value, report_type: &str) {
+    let report_id = report["header"]["report_id"]
+        .as_str()
+        .expect("report header has a report_id");
+    assert!(is_report_id(report_id), "invalid report id: {report_id}");
+    assert_eq!(
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str()),
+        Some(report_id),
+        "final artifact directory must be the immutable report id"
+    );
+    assert_eq!(report["header"]["type"], report_type);
+}
+
+fn write_oom_config(data_dir: &Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::create_dir_all(data_dir).expect("create E2E data dir");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options
+        .open(data_dir.join("crash_reporter.json"))
+        .expect("create private E2E config");
+    std::io::Write::write_all(
+        &mut file,
+        br#"{"triggers":{"oom_detection":{"enabled":true}}}"#,
+    )
+    .expect("write OOM config");
+}
+
+fn wait_for_report(dir: &Path, report_type: &str, deadline: Instant) -> Vec<PathBuf> {
+    loop {
+        let reports = find_reports(dir, report_type);
+        if !reports.is_empty() {
+            return reports;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {report_type} report in {}",
+            dir.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+struct FixtureProcessGuard {
+    monitor: Child,
+    child_pid: nix::unistd::Pid,
+    shm_name: String,
+}
+
+impl FixtureProcessGuard {
+    fn terminate(&mut self) {
+        let monitor_pid =
+            nix::unistd::Pid::from_raw(i32::try_from(self.monitor.id()).expect("pid fits i32"));
+        let _ = nix::sys::signal::kill(monitor_pid, nix::sys::signal::Signal::SIGTERM);
+        let graceful_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < graceful_deadline {
+            if self.monitor.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        // Independently clean the fixture group; the test does not assume that
+        // forwarding SIGTERM was sufficient to reap the child.
+        let _ = nix::sys::signal::killpg(self.child_pid, nix::sys::signal::Signal::SIGKILL);
+        if self.monitor.try_wait().ok().flatten().is_none() {
+            let _ = self.monitor.kill();
+            let _ = self.monitor.wait();
+        }
+    }
+
+    fn assert_cleaned(&self) {
+        let process_deadline = Instant::now() + Duration::from_secs(2);
+        while nix::sys::signal::kill(self.child_pid, None) != Err(nix::errno::Errno::ESRCH) {
+            assert!(
+                Instant::now() < process_deadline,
+                "fixture child/process group still exists"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let name = std::ffi::CString::new(self.shm_name.clone()).expect("valid SHM name");
+        // SAFETY: `name` is a live NUL-terminated string; this is a read-only
+        // existence check and any unexpectedly opened descriptor is closed.
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+        if fd >= 0 {
+            // SAFETY: `fd` was returned by shm_open above.
+            unsafe { libc::close(fd) };
+            panic!("stale shared memory remains: {}", self.shm_name);
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOENT)
+        );
+    }
+}
+
+impl Drop for FixtureProcessGuard {
+    fn drop(&mut self) {
+        self.terminate();
+        if let Ok(name) = std::ffi::CString::new(self.shm_name.clone()) {
+            // SAFETY: best-effort cleanup for a failed test; `name` is valid.
+            unsafe { libc::shm_unlink(name.as_ptr()) };
+        }
+    }
+}
+
+fn read_fixture_state(path: &Path, deadline: Instant) -> (nix::unistd::Pid, String) {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            let mut lines = contents.lines();
+            let pid = lines
+                .next()
+                .expect("fixture PID")
+                .parse::<i32>()
+                .expect("numeric fixture PID");
+            let shm_name = lines.next().expect("fixture SHM name").to_string();
+            return (nix::unistd::Pid::from_raw(pid), shm_name);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture did not publish process state"
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -544,8 +730,9 @@ fn find_reports_rejects_traversal_duplicates_and_non_regular_artifacts() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_crash_sigsegv() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -574,6 +761,7 @@ fn test_e2e_crash_sigsegv() {
 
     // Verify JSON content (may be inside a ZIP archive)
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "crash");
     assert_eq!(json["header"]["type"], "crash");
     assert!(json["exception"].is_object(), "expected exception field");
     let raw_codes = json["exception"]["raw_codes"]
@@ -607,10 +795,10 @@ fn test_e2e_crash_sigsegv() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_producer_rejects_schema_mismatch_without_writing() {
     let child = crash_app_path();
-    if !child.exists() {
-        eprintln!("SKIP: crash_app not found at {}", child.display());
+    if !require_file(&child, "run `make e2e-child`") {
         return;
     }
 
@@ -648,8 +836,9 @@ fn test_e2e_producer_rejects_schema_mismatch_without_writing() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_crash_sigabrt() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -673,6 +862,7 @@ fn test_e2e_crash_sigabrt() {
     assert!(!reports.is_empty(), "expected crash report");
 
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "crash");
     assert_eq!(json["header"]["type"], "crash");
     assert_eq!(json["termination"]["kind"], "signaled");
     assert_eq!(json["termination"]["signal"], SIGABRT_NUMBER);
@@ -681,8 +871,9 @@ fn test_e2e_crash_sigabrt() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_fast_clean_exit() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -711,8 +902,9 @@ fn test_e2e_fast_clean_exit() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_nonzero_exit_reports_termination() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -739,6 +931,7 @@ fn test_e2e_nonzero_exit_reports_termination() {
         "expected exactly one exit-failure report in {archive:?}"
     );
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "exit_failure");
     assert_eq!(json["header"]["type"], "exit_failure");
     assert_eq!(json["termination"]["kind"], "exited");
     assert_eq!(json["termination"]["exit_code"], 42);
@@ -746,8 +939,9 @@ fn test_e2e_nonzero_exit_reports_termination() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_sigterm_preserves_signal_semantics() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -774,6 +968,7 @@ fn test_e2e_sigterm_preserves_signal_semantics() {
         "expected exactly one signal-failure report in {archive:?}"
     );
     let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "signal_failure");
     assert_eq!(json["header"]["type"], "signal_failure");
     assert_eq!(json["termination"]["kind"], "signaled");
     assert_eq!(json["termination"]["signal"], SIGTERM_NUMBER);
@@ -782,8 +977,9 @@ fn test_e2e_sigterm_preserves_signal_semantics() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_nonexistent_executable_is_monitor_failure() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -810,8 +1006,9 @@ fn test_e2e_nonexistent_executable_is_monitor_failure() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -840,8 +1037,100 @@ fn test_e2e_uninstrumented_child_does_not_trigger_anr() {
 }
 
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
+fn test_e2e_sigusr1_snapshot_uses_the_real_signal_pipe() {
+    if !require_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+    let mut monitor = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("wait")
+        .spawn()
+        .expect("spawn crash_monitor");
+
+    std::thread::sleep(Duration::from_millis(250));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(monitor.id()).expect("pid fits i32")),
+        nix::sys::signal::Signal::SIGUSR1,
+    )
+    .expect("send real SIGUSR1 to monitor");
+    let reports = wait_for_report(
+        &archive,
+        "snapshot",
+        Instant::now() + Duration::from_secs(10),
+    );
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(monitor.id()).expect("pid fits i32")),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("request monitor shutdown");
+    let status = monitor.wait().expect("reap monitor");
+    assert_eq!(status.code(), Some(128 + SIGTERM_NUMBER));
+
+    assert_eq!(reports.len(), 1);
+    let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "snapshot");
+    assert!(json.get("termination").is_none() || json["termination"].is_null());
+}
+
+#[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
+fn test_e2e_sigkill_is_classified_as_possible_oom_when_enabled() {
+    if !require_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    write_oom_config(data_dir.path());
+    let archive = archive_dir(data_dir.path());
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("sigkill")
+        .output()
+        .expect("run crash_monitor");
+
+    assert_eq!(output.status.code(), Some(128 + SIGKILL_NUMBER));
+    let reports = find_reports(&archive, "oom");
+    assert_eq!(reports.len(), 1);
+    let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "oom");
+    assert_eq!(json["header"]["termination_evidence"], "possible_oom");
+    assert_eq!(json["termination"]["signal"], SIGKILL_NUMBER);
+}
+
+#[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
+fn test_e2e_other_fatal_signal_preserves_sigill() {
+    if !require_prerequisites() {
+        return;
+    }
+    let data_dir = TempDir::new().expect("create temp dir");
+    let archive = archive_dir(data_dir.path());
+
+    let output = monitor_cmd(data_dir.path())
+        .arg("run")
+        .arg(crash_app_path())
+        .arg("sigill")
+        .output()
+        .expect("run crash_monitor");
+
+    assert_eq!(output.status.code(), Some(DETECTED_CRASH_EXIT_CODE));
+    let reports = find_reports(&archive, "crash");
+    assert_eq!(reports.len(), 1);
+    let json = read_report_json(&reports[0]);
+    assert_report_identity(&reports[0], &json, "crash");
+    assert_eq!(json["termination"]["signal"], SIGILL_NUMBER);
+}
+
+#[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_anr() {
-    if !check_prerequisites() {
+    if !require_prerequisites() {
         return;
     }
     let data_dir = TempDir::new().expect("create temp dir");
@@ -850,7 +1139,9 @@ fn test_e2e_anr() {
     // ANR: the child loops forever. Monitor should detect ANR after warmup + threshold,
     // generate a report, and the child keeps running. We kill the monitor after timeout.
     // Override ANR timings via env vars to keep the test fast.
-    let mut child = monitor_cmd(data_dir.path())
+    let state_file = data_dir.path().join("fixture-state");
+    let monitor = monitor_cmd(data_dir.path())
+        .env("CRASH_APP_STATE_FILE", &state_file)
         .env("CRASH_MONITOR_ANR_WARMUP_MS", "500")
         .env("CRASH_MONITOR_ANR_THRESHOLD_MS", "500")
         .env("CRASH_MONITOR_ANR_CHECK_INTERVAL_MS", "250")
@@ -859,6 +1150,13 @@ fn test_e2e_anr() {
         .arg("anr")
         .spawn()
         .expect("failed to spawn crash_monitor");
+    let (child_pid, shm_name) =
+        read_fixture_state(&state_file, Instant::now() + Duration::from_secs(5));
+    let mut processes = FixtureProcessGuard {
+        monitor,
+        child_pid,
+        shm_name,
+    };
 
     // Poll for the committed report instead of sleeping for a fixed interval:
     // slower CI hosts may cross a three-second boundary after ANR detection
@@ -869,42 +1167,39 @@ fn test_e2e_anr() {
         if !reports.is_empty() {
             break reports;
         }
-        if let Some(status) = child.try_wait().expect("poll crash_monitor") {
+        if let Some(status) = processes.monitor.try_wait().expect("poll crash_monitor") {
             panic!("crash_monitor exited before publishing an ANR report: {status}");
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("timed out waiting for an ANR report in {archive:?}");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an ANR report in {archive:?}"
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    // Kill the monitor (which also kills the child)
-    let _ = child.kill();
-    let _ = child.wait();
+    processes.terminate();
+    processes.assert_cleaned();
 
     let json = read_report_json(&reports[0]);
-    assert_eq!(json["header"]["type"], "anr");
+    assert_report_identity(&reports[0], &json, "anr");
 }
 
-/// The debug build binary lacks the debugger entitlement (only `make crash-monitor`
+/// The debug build binary lacks the debugger entitlement (only `make e2e-build`
 /// applies it via codesign). Verify that the monitor detects this and exits
 /// immediately with a clear error instead of hanging or producing a confusing
 /// `task_for_pid` failure.
 #[test]
+#[ignore = "requires a signed monitor with debugger entitlement; run make e2e-required"]
 fn test_e2e_unsigned_binary_fails_fast() {
     let child = crash_app_path();
-    if !child.exists() {
-        eprintln!("SKIP: crash_app not found");
+    if !require_file(&child, "run `make e2e-child`") {
         return;
     }
 
     // Use the debug build which is ad-hoc signed but lacks the entitlement.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let debug_monitor = manifest.join("target/debug/crash_monitor");
-    if !debug_monitor.exists() {
-        eprintln!("SKIP: debug crash_monitor not found (run `cargo build` first)");
+    if !require_file(&debug_monitor, "run `cargo build --bin crash_monitor`") {
         return;
     }
 
@@ -918,7 +1213,7 @@ fn test_e2e_unsigned_binary_fails_fast() {
         Ok(out)
             if String::from_utf8_lossy(&out.stdout).contains("com.apple.security.cs.debugger") =>
         {
-            eprintln!("SKIP: debug binary already has debugger entitlement");
+            let _ = skip_or_fail("debug crash_monitor unexpectedly has debugger entitlement");
             return;
         }
         _ => {}

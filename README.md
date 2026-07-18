@@ -39,6 +39,13 @@ without sudo. Override the identity with `make build SIGN_IDENTITY="…"`.
 ./target/release/crash_monitor run <path-to-app> [args…]
 ```
 
+`crash_monitor` uses a stable exit-status contract: `0` means normal child
+completion, `2` is a clap command-line usage error, `70` is an internal monitor
+failure, `80` is a non-zero child exit, and `81` is a detected crash whose
+terminal signal is unavailable. A child signal is preserved conventionally as
+`128 + signal` (for example, SIGSEGV is `139`), including when that signal was
+observed after a detected Mach exception.
+
 Each event is assigned a 32-character `ReportId`. While its artifacts are being
 built, they stay hidden in
 `~/.crash_monitor/crashes/pending/.report-<ReportId>.pending/`. A report becomes
@@ -71,6 +78,16 @@ directory or manifest itself. The canonical entry has kind `archive` and path
 make test        # unit + integration + e2e   (e2e requires codesigning)
 make coverage    # HTML coverage report
 ```
+
+`make e2e-coverage` is the signed-runner coverage gate. It builds the release
+monitor with `-C instrument-coverage`, signs that exact binary, injects its
+absolute path through `CRASH_MONITOR_E2E_BIN`, and merges the profiles emitted
+by the spawned monitor processes. The report does not blanket-exclude
+`main.rs`, platform FFI, or path handling: code not reached by the privileged
+scenarios remains visibly uncovered. This target measures the checked-in E2E
+scenarios on one supported macOS/ARM64 environment; it is not evidence for
+other OS versions, architectures, entitlement failures, or untested kernel
+error paths.
 
 ## Documentation
 
