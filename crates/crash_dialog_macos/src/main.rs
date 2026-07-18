@@ -6,39 +6,16 @@
 //!
 //! Exit codes: 0 = feedback submitted, 1 = skipped/cancelled, 2 = error.
 
-use clap::Parser;
+use crash_dialog_contract::{DialogArgs, DialogOutcome, Parser};
+use std::process::ExitCode;
 
 mod dialog;
 
-#[derive(Parser)]
-#[command(name = "crash_dialog_macos")]
-struct Args {
-    /// Report type: "crash", "snapshot", or "anr".
-    #[arg(long, rename_all = "verbatim")]
-    r#type: String,
-
-    /// Process name (e.g. "voxelcore_desktop").
-    #[arg(long)]
-    process: String,
-
-    /// Timestamp string from the report header.
-    #[arg(long)]
-    timestamp: String,
-
-    /// Test mode: supply feedback text directly without showing a dialog.
-    #[arg(long)]
-    mock_input: Option<String>,
-
-    /// Test mode: validate arguments only, do not show dialog or produce output.
-    #[arg(long)]
-    dry_run: bool,
-}
-
-fn main() {
-    let args = Args::parse();
+fn main() -> ExitCode {
+    let args = DialogArgs::parse();
 
     if args.dry_run {
-        std::process::exit(0);
+        return ExitCode::SUCCESS;
     }
 
     let feedback = if let Some(mock) = &args.mock_input {
@@ -52,20 +29,9 @@ fn main() {
         // Production: show native dialog.
         match dialog::show_feedback_dialog(&args.r#type, &args.process, &args.timestamp) {
             Ok(text) => text,
-            Err(e) => {
-                eprintln!("[crash_dialog] {e}");
-                std::process::exit(2);
-            }
+            Err(error) => return DialogOutcome::Error(error).emit(),
         }
     };
 
-    match feedback {
-        Some(text) if !text.trim().is_empty() => {
-            print!("{text}");
-            std::process::exit(0);
-        }
-        _ => {
-            std::process::exit(1);
-        }
-    }
+    DialogOutcome::from_optional_text(feedback).emit()
 }

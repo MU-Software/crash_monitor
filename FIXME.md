@@ -736,9 +736,9 @@
 
 ### P2-11. dialog UI와 mock의 CLI contract를 통일한다
 
-- [ ] wrapping label로 만든 입력란을 표준 editable `NSTextField` 또는 `NSTextView`로 바꾼다.
-- [ ] real/mock helper가 `--mock-input`, `--dry-run`, skip exit semantics와 출력 schema를 공유한다.
-- [ ] dialog title에 이전 제품명을 하드코딩하지 않고 process name 또는 설정값을 사용한다.
+- [x] wrapping label로 만든 입력란을 표준 editable `NSTextField` 또는 `NSTextView`로 바꾼다.
+- [x] real/mock helper가 `--mock-input`, `--dry-run`, skip exit semantics와 출력 schema를 공유한다.
+- [x] dialog title에 이전 제품명을 하드코딩하지 않고 process name 또는 설정값을 사용한다.
 
 범위: `crates/crash_dialog_macos`, `crates/crash_dialog_mock`.
 

@@ -9,7 +9,7 @@ name = "crash_dialog_macos"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+crash_dialog_contract = { path = "../crash_dialog_contract" }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = [

@@ -298,10 +298,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "crash_dialog_macos"
+name = "crash_dialog_contract"
 version = "0.1.0"
 dependencies = [
  "clap",
+]
+
+[[package]]
+name = "crash_dialog_macos"
+version = "0.1.0"
+dependencies = [
+ "crash_dialog_contract",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -311,7 +318,7 @@ dependencies = [
 name = "crash_dialog_mock"
 version = "0.1.0"
 dependencies = [
- "clap",
+ "crash_dialog_contract",
 ]
 
 [[package]]

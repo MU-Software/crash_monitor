@@ -1,5 +1,10 @@
 [workspace]
-members = [".", "crates/crash_dialog_macos", "crates/crash_dialog_mock"]
+members = [
+    ".",
+    "crates/crash_dialog_contract",
+    "crates/crash_dialog_macos",
+    "crates/crash_dialog_mock",
+]
 
 [package]
 name = "crash_monitor"
