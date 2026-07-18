@@ -10,7 +10,7 @@ use crate::pipeline::PluginContext;
 
 use super::{
     ArmThreadState64, PlatformOps, SupervisorHealth, TaskControlFailure, TaskVmSummary,
-    VmRegionEnumerationQuality, VmRegionInfo,
+    VmReadError, VmRegionEnumerationQuality, VmRegionInfo, classify_vm_read,
 };
 
 /// Mock thread data: port, optional name, register state [u32; 68].
@@ -228,20 +228,26 @@ impl PlatformOps for MockPlatform {
         self.deallocated_ports.lock().unwrap().push(thread);
     }
 
-    fn vm_read(&self, _task: mach_port_t, address: u64, size: usize) -> Result<Vec<u8>, String> {
+    fn vm_read(
+        &self,
+        _task: mach_port_t,
+        address: u64,
+        size: usize,
+    ) -> Result<Vec<u8>, VmReadError> {
         // Find the memory region that contains this address
         for (&base, data) in &self.memory {
             let Ok(diff) = usize::try_from(address.wrapping_sub(base)) else {
                 continue;
             };
-            if address >= base && diff + size <= data.len() {
-                let offset = diff;
-                return Ok(data[offset..offset + size].to_vec());
+            if address >= base && diff < data.len() {
+                let available = data.len() - diff;
+                let returned = size.min(available);
+                return classify_vm_read(data[diff..diff + returned].to_vec(), size);
             }
         }
-        Err(format!(
+        Err(VmReadError::Platform(format!(
             "mock: vm_read at {address:#x} size {size} not found"
-        ))
+        )))
     }
 
     fn vm_region_query(&self, _task: mach_port_t, address: u64) -> Result<VmRegionInfo, String> {
@@ -403,5 +409,27 @@ mod tests {
         let state = mock.get_thread_state(10).unwrap();
         assert_eq!(state[66], 123);
         assert_eq!(state.words().len(), 68);
+    }
+
+    #[test]
+    fn test_mock_vm_read_distinguishes_exact_short_and_empty_results() {
+        let mut mock = MockPlatform::default();
+        mock.memory.insert(0x1000, vec![1, 2, 3, 4]);
+
+        assert_eq!(mock.vm_read(0, 0x1000, 4).unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            mock.vm_read(0, 0x1000, 8).unwrap_err(),
+            crate::platform::VmReadError::Partial {
+                requested: 8,
+                bytes: vec![1, 2, 3, 4],
+            }
+        );
+        assert_eq!(
+            crate::platform::classify_vm_read(Vec::new(), 1).unwrap_err(),
+            crate::platform::VmReadError::Partial {
+                requested: 1,
+                bytes: Vec::new(),
+            }
+        );
     }
 }

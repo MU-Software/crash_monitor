@@ -12,14 +12,16 @@ use crate::platform::macos::memory::{
     VmEnumAction, VmEnumerationState, VmRegionEnumerationQuality,
 };
 use crate::platform::macos::types::{MachError, TaskVmSummary, VmRegionInfo, mach_result};
+use crate::platform::{VmReadError, classify_vm_read};
 
 use super::types::self_task;
 
 /// Read bytes from a remote task's address space.
 ///
 /// # Errors
-/// Returns `MachError` if the `mach_vm_read` kernel call fails.
-pub fn vm_read(task: mach_port_t, address: u64, size: usize) -> Result<Vec<u8>, MachError> {
+/// Returns [`VmReadError::Platform`] if the kernel call fails and
+/// [`VmReadError::Partial`] if its successful result is shorter than `size`.
+pub fn vm_read(task: mach_port_t, address: u64, size: usize) -> Result<Vec<u8>, VmReadError> {
     let mut data_ptr: usize = 0;
     let mut data_cnt: u32 = 0;
 
@@ -33,20 +35,29 @@ pub fn vm_read(task: mach_port_t, address: u64, size: usize) -> Result<Vec<u8>, 
             &raw mut data_cnt,
         )
     };
-    mach_result("mach_vm_read", kr)?;
+    mach_result("mach_vm_read", kr).map_err(|error| VmReadError::Platform(error.to_string()))?;
 
-    if data_ptr == 0 || data_cnt == 0 {
-        return Ok(Vec::new());
+    if data_ptr == 0 && data_cnt != 0 {
+        return Err(VmReadError::Platform(
+            "mach_vm_read returned a nonzero count with a null buffer".to_string(),
+        ));
     }
 
-    let result =
-        unsafe { std::slice::from_raw_parts(data_ptr as *const u8, data_cnt as usize) }.to_vec();
+    let result = if data_cnt == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: a successful nonempty mach_vm_read returned this buffer and
+        // byte count. It remains owned until the deallocation below.
+        unsafe { std::slice::from_raw_parts(data_ptr as *const u8, data_cnt as usize) }.to_vec()
+    };
 
-    unsafe {
-        mach_vm_deallocate(self_task(), data_ptr as u64, u64::from(data_cnt));
+    if data_ptr != 0 {
+        unsafe {
+            mach_vm_deallocate(self_task(), data_ptr as u64, u64::from(data_cnt));
+        }
     }
 
-    Ok(result)
+    classify_vm_read(result, size)
 }
 
 /// Query VM region info at or after `address`. Returns the region info and updates `address`

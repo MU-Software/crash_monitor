@@ -66,6 +66,48 @@ impl std::ops::Index<usize> for ArmThreadState64 {
     }
 }
 
+/// Failure to satisfy an exact remote-memory read request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VmReadError {
+    /// The platform rejected the read before returning usable bytes.
+    Platform(String),
+    /// The kernel returned fewer bytes than requested.
+    Partial { requested: usize, bytes: Vec<u8> },
+}
+
+impl VmReadError {
+    #[must_use]
+    pub fn partial_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Partial { bytes, .. } => Some(bytes),
+            Self::Platform(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for VmReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Platform(error) => formatter.write_str(error),
+            Self::Partial { requested, bytes } => write!(
+                formatter,
+                "partial VM read: requested {requested} bytes, received {}",
+                bytes.len()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VmReadError {}
+
+pub(crate) fn classify_vm_read(bytes: Vec<u8>, requested: usize) -> Result<Vec<u8>, VmReadError> {
+    if bytes.len() == requested {
+        Ok(bytes)
+    } else {
+        Err(VmReadError::Partial { requested, bytes })
+    }
+}
+
 /// Abstraction over Mach kernel APIs used by collectors and pipeline.
 /// Enables mock-based unit testing without real child processes.
 pub trait PlatformOps: Send + Sync {
@@ -153,7 +195,8 @@ pub trait PlatformOps: Send + Sync {
     ///
     /// # Errors
     /// Returns an error string if the platform call fails.
-    fn vm_read(&self, task: mach_port_t, address: u64, size: usize) -> Result<Vec<u8>, String>;
+    fn vm_read(&self, task: mach_port_t, address: u64, size: usize)
+    -> Result<Vec<u8>, VmReadError>;
 
     /// Query VM region info at or after `address`.
     ///
@@ -260,8 +303,13 @@ impl PlatformOps for MacOsPlatform {
         macos::deallocate_thread_port(thread);
     }
 
-    fn vm_read(&self, task: mach_port_t, address: u64, size: usize) -> Result<Vec<u8>, String> {
-        macos::vm_read(task, address, size).map_err(|e| e.to_string())
+    fn vm_read(
+        &self,
+        task: mach_port_t,
+        address: u64,
+        size: usize,
+    ) -> Result<Vec<u8>, VmReadError> {
+        macos::vm_read(task, address, size)
     }
 
     fn vm_region_query(&self, task: mach_port_t, address: u64) -> Result<VmRegionInfo, String> {

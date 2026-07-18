@@ -119,3 +119,19 @@ fn test_loaded_image_enumeration_rejects_short_task_info_count() {
     .unwrap_err();
     assert!(error.contains("returned 4 words; expected 5"));
 }
+
+#[test]
+fn test_c_string_reader_can_accept_useful_partial_read() {
+    let mut platform = MockPlatform::default();
+    platform.memory.insert(0x1000, b"short\0".to_vec());
+
+    let value = read_c_string(
+        &platform,
+        0,
+        0x1000,
+        512,
+        &crate::pipeline::PluginContext::without_deadline(),
+    )
+    .unwrap();
+    assert_eq!(value, "short");
+}

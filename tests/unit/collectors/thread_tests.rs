@@ -207,6 +207,16 @@ fn test_walk_backtrace_checked_add_stops_on_address_overflow() {
 }
 
 #[test]
+fn test_read_u64_aborts_on_partial_vm_read() {
+    let mut platform = MockPlatform::default();
+    platform.memory.insert(0x1000, vec![1, 2, 3, 4]);
+
+    let error = read_u64(&platform, 0, 0x1000).unwrap_err();
+    assert!(error.contains("partial VM read"));
+    assert!(error.contains("requested 8 bytes, received 4"));
+}
+
+#[test]
 fn test_compute_read_size_within_region() {
     let mut plat = MockPlatform::default();
     plat.regions = vec![crate::platform::VmRegionInfo {

@@ -426,7 +426,11 @@ fn read_c_string(
     for &chunk in &[128, 512, max_len] {
         context.checkpoint()?;
         let try_len = chunk.min(max_len);
-        if let Ok(bytes) = platform.vm_read(task, address, try_len) {
+        let candidate = match platform.vm_read(task, address, try_len) {
+            Ok(bytes) | Err(crate::platform::VmReadError::Partial { bytes, .. }) => Some(bytes),
+            Err(crate::platform::VmReadError::Platform(_)) => None,
+        };
+        if let Some(bytes) = candidate {
             context.checkpoint()?;
             if let Some(end) = bytes.iter().position(|&b| b == 0) {
                 return Ok(String::from_utf8_lossy(&bytes[..end]).into_owned());

@@ -331,9 +331,9 @@
 
 ### P1-20. memory FFI의 short-read 계약을 엄격히 한다
 
-- [ ] `vm_read`가 성공을 반환해도 returned byte count가 요청과 다르면 partial result로 처리한다.
-- [ ] empty/short data를 완전 성공으로 넘기지 않는다.
-- [ ] caller가 partial diagnostic과 retry/abort 정책을 선택할 수 있게 한다.
+- [x] `vm_read`가 성공을 반환해도 returned byte count가 요청과 다르면 partial result로 처리한다.
+- [x] empty/short data를 완전 성공으로 넘기지 않는다.
+- [x] caller가 partial diagnostic과 retry/abort 정책을 선택할 수 있게 한다.
 
 범위: `src/platform/macos/ffi/memory.rs`, memory/thread/dylib collectors.
 
