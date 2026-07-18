@@ -49,6 +49,11 @@ struct ThreadIdentifierInfo {
 
 /// Get the system-wide stable thread identifier rather than exposing the
 /// monitor-local Mach port name as report identity.
+///
+/// # Errors
+///
+/// Returns the Mach kernel error when `thread_info` fails or returns an
+/// incomplete identifier payload.
 pub fn get_thread_identifier(thread: mach_port_t) -> Result<u64, MachError> {
     let mut info = ThreadIdentifierInfo {
         thread_id: 0,

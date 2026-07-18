@@ -88,6 +88,9 @@ pub trait PlatformOps: Send + Sync {
     fn get_thread_name(&self, thread: mach_port_t) -> Result<Option<String>, String>;
 
     /// Return the system-wide stable `THREAD_IDENTIFIER_INFO.thread_id`.
+    ///
+    /// # Errors
+    /// Returns an error string if the platform cannot query a stable ID.
     fn get_thread_identifier(&self, thread: mach_port_t) -> Result<u64, String>;
 
     /// Returns ARM64 register state as `[u32; 68]`.
