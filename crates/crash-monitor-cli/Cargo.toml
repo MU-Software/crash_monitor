@@ -15,7 +15,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 clap.workspace = true
 crash-report-core = { path = "../crash-report-core" }
 serde_json = "1"
